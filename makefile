@@ -20,6 +20,8 @@ $(TARGET): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJ): src/common.h src/lexer.h
+
 .PHONY: test clean install uninstall package
 
 test: $(TARGET)

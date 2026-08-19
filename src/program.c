@@ -80,7 +80,9 @@ void add_line(int line_num, const char *text) {
 Statement* find_label(const char *label) {
     Statement *curr = head;
     while (curr) {
-        if (curr->label[0] != '\0' && strcasecmp(curr->label, label) == 0) return curr;
+        if (curr->label[0] != '\0') {
+            if (strcasecmp(curr->label, label) == 0) return curr;
+        }
         curr = curr->next;
     }
     return NULL;

@@ -20,12 +20,15 @@
 ## Graphics
 
 - ~~Implement `WINDOW` and `VIEW` for custom coordinate mapping and viewports.~~ ✅ Done
+- ~~Implement `_LOADIMAGE`, `_PUTIMAGE`, and `_FREEIMAGE` with SDL image handles.~~ ✅ Done
 
 ## Testing and project hygiene
 
 - Add `make check-clean` or test cleanup verification.
 - Add sanitizer builds: `make asan`, `make ubsan`.
 - Add a developer note documenting how to add a new BASIC keyword.
+- Add broader automated coverage for image rendering and font screenshots.
+- Add automated visible-window coverage for graphics demos where CI supports a display server.
 
 ## UX and documentation
 

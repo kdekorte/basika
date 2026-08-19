@@ -5,10 +5,10 @@ This document lists the runtime error codes supported by Basika. These codes can
 | Code | Message | Description |
 |------|---------|-------------|
 | 1 | NEXT without FOR | A `NEXT` statement was encountered without a matching `FOR` loop. |
-| 2 | Syntax error | An unrecognized command or invalid syntax was encountered. |
+| 2 | Syntax error | An unrecognized command or invalid syntax was encountered, including malformed graphics command arguments. |
 | 3 | RETURN without GOSUB | A `RETURN` statement was encountered without a matching `GOSUB`. |
 | 4 | Out of DATA | A `READ` statement was executed but no more `DATA` items are available. |
-| 5 | Illegal function call | A function argument is out of its valid range. |
+| 5 | Illegal function call | A function argument is out of its valid range, such as an invalid image/font handle or graphics coordinate. |
 | 6 | Overflow | The result of a calculation is too large to be represented. |
 | 7 | Out of memory | The program is too large or has too many nested loops/subroutines. |
 | 8 | Undefined line number | A `GOTO`, `GOSUB`, or `IF...THEN` referenced a non-existent line. |
@@ -25,7 +25,7 @@ This document lists the runtime error codes supported by Basika. These codes can
 | 50 | FIELD overflow | (Placeholder) A `FIELD` statement exceeded record length. |
 | 51 | Internal error | An internal error occurred in the interpreter. |
 | 52 | Bad file number | An invalid or unopened file number was referenced. |
-| 53 | File not found | The specified file does not exist. |
+| 53 | File not found | The specified file does not exist. Image and font loading failures return handle `0`; callers should handle that result before drawing or selecting the resource. |
 | 54 | Bad file mode | An illegal operation for the current file mode was attempted. |
 | 55 | File already open | `OPEN` was called for a file number that is already in use. |
 | 57 | Device I/O error | An error occurred during hardware input or output. |

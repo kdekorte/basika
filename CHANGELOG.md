@@ -2,6 +2,17 @@
 
 All notable changes to this project are recorded in this file.
 
+## 2026-08-19
+
+- **Image Functions**: Added `_LOADIMAGE`, `_PUTIMAGE`, and `_FREEIMAGE` using SDL3_image textures with numeric handles, alpha blending, scaling, and resource cleanup.
+- **Font Demo and Rendering**: Improved `_LOADFONT` demo coverage, default-font metrics, descender padding, and nearest-neighbor glyph rendering for crisp text.
+- **Graphics Demos**: Added image and font demos/assets and corrected random text placement so `LOCATE` stays within the active screen and does not scroll unexpectedly.
+- **Lexer and Build Reliability**: Made keyword lookup deterministic when adding underscore-prefixed keywords and added header dependencies to the Makefile so token changes rebuild dependent objects.
+- **Testing**: Added image/font test fixtures and expanded graphics validation scripts.
+- **Image Demo Asset**: Replaced the weak screenshot fixture with a colorful BMP asset that makes full-image, scaled, and cropped `_PUTIMAGE` output easier to compare.
+- **Parser Fixes**: Fixed `_PUTIMAGE` lookahead so a successful draw does not leave the command parser positioned at the wrong token boundary. Added Makefile header dependencies to avoid stale token enum objects.
+- **Demo Corrections**: Kept `randomtext.bas` within the active `SCREEN 12` text area and restored bright text before its completion message.
+
 ## 2026-07-06
 
 - **Optional Line Numbers and Labels**: Line numbers are now optional. When omitted, the file line number is used internally (incrementing by 10). Programs may use named labels (`my_label:`) as jump targets for `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`, `IF...THEN`, and `ON ERROR GOTO`.

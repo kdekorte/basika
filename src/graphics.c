@@ -10,6 +10,7 @@
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 void update_graphics(); // Forward declaration
+static SDL_Texture **get_active_glyph_cache(void); // Forward declaration
 static SDL_Texture *glyph_cache[128] = {NULL};
 static SDL_Texture *canvas = NULL;
 static SDL_Color current_text_color = {255, 255, 255, 255};
@@ -21,6 +22,16 @@ static int cursor_y = 0;
 static double gfx_cursor_x = 0;
 static double gfx_cursor_y = 0;
 
+#define MAX_IMAGE_SLOTS 64
+
+typedef struct {
+    SDL_Texture *texture;
+    int width;
+    int height;
+    int in_use;
+} ImageSlot;
+
+static ImageSlot image_slots[MAX_IMAGE_SLOTS];
 
 
 static TTF_Font *font = NULL;
@@ -193,18 +204,21 @@ static void reload_font(int target_height) {
         current_row_height = canvas_height / text_rows;
         
         int line_skip = TTF_GetFontLineSkip(font);
-        if (line_skip > 0 && line_skip < current_row_height) current_row_height = line_skip;
-        if (glyph_h > 0 && glyph_h < current_row_height) current_row_height = glyph_h;
+        if (line_skip > current_row_height) current_row_height = line_skip;
+        if (glyph_h + 2 > current_row_height) current_row_height = glyph_h + 2;
     }
 
     // Re-populate Glyph Cache for ASCII
     SDL_Color white = {255, 255, 255, 255};
     for (int i = 32; i < 127; i++) {
         char s[2] = {(char)i, 0};
-        SDL_Surface* surf = TTF_RenderText_Blended(font, s, 0, white);
+        SDL_Surface* surf = TTF_RenderText_Solid(font, s, 0, white);
         if (surf) {
             glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, surf);
-            if (glyph_cache[i]) SDL_SetTextureBlendMode(glyph_cache[i], SDL_BLENDMODE_BLEND);
+            if (glyph_cache[i]) {
+                SDL_SetTextureBlendMode(glyph_cache[i], SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(glyph_cache[i], SDL_SCALEMODE_NEAREST);
+            }
             SDL_DestroySurface(surf);
         }
     }
@@ -283,6 +297,85 @@ void set_screen_mode(int mode) {
             SDL_RenderPresent(renderer);
         }
     }
+}
+
+void set_screen_newimage(int width, int height, int colors) {
+    (void)colors;
+    if (width <= 0 || height <= 0) return;
+
+    mode_res_w = width;
+    mode_res_h = height;
+
+    canvas_width = width;
+    canvas_height = height;
+
+    text_columns = width / 8;
+    text_rows = height / 16;
+    if (text_columns < 1) text_columns = 1;
+    if (text_rows < 1) text_rows = 1;
+
+    current_col_width = canvas_width / text_columns;
+    current_row_height = canvas_height / text_rows;
+
+    if (font_path[0] != '\0') {
+        reload_font(current_row_height);
+    } else if (font) {
+        int glyph_w = 0, glyph_h = 0;
+        if (TTF_GetStringSize(font, "W", 0, &glyph_w, &glyph_h)) {
+            int line_skip = TTF_GetFontLineSkip(font);
+            if (line_skip > 0 && line_skip < current_row_height) current_row_height = line_skip;
+            if (glyph_h > 0 && glyph_h < current_row_height) current_row_height = glyph_h;
+        }
+    }
+
+    if (current_row_height < 1) current_row_height = 1;
+
+    cursor_x = 0;
+    cursor_y = 0;
+    gfx_cursor_x = 0;
+    gfx_cursor_y = 0;
+    view_active = 0;
+    window_active = 0;
+    view_x1 = 0; view_y1 = 0; view_x2 = mode_res_w - 1; view_y2 = mode_res_h - 1;
+
+    if (renderer) {
+        if (canvas) SDL_DestroyTexture(canvas);
+        canvas = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, canvas_width, canvas_height);
+        SDL_SetTextureBlendMode(canvas, SDL_BLENDMODE_NONE);
+        SDL_SetTextureScaleMode(canvas, SDL_SCALEMODE_NEAREST);
+    }
+
+    if (renderer && canvas) {
+        SDL_SetRenderTarget(renderer, canvas);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+        SDL_SetRenderTarget(renderer, NULL);
+        if (window) {
+            int win_w, win_h;
+            SDL_GetWindowSize(window, &win_w, &win_h);
+            double target_aspect = (double)width / (double)height;
+            int dest_w = win_w;
+            int dest_h = (int)(dest_w / target_aspect + 0.5);
+            if (dest_h > win_h) {
+                dest_h = win_h;
+                dest_w = (int)(dest_h * target_aspect + 0.5);
+            }
+            SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
+            SDL_SetRenderTarget(renderer, NULL);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            SDL_RenderClear(renderer);
+            SDL_RenderTexture(renderer, canvas, NULL, &dst);
+            SDL_RenderPresent(renderer);
+        }
+    }
+}
+
+int graphics_get_text_rows(void) {
+    return text_rows;
+}
+
+int graphics_get_text_cols(void) {
+    return text_columns;
 }
 
 static void check_scroll() {
@@ -394,10 +487,11 @@ void graphics_print(const char *text) {
         } else {
             clear_text_cell(cursor_x, cursor_y);
             unsigned char c = (unsigned char)*text;
-            if (c < 128 && glyph_cache[c]) {
-                SDL_SetTextureColorMod(glyph_cache[c], current_text_color.r, current_text_color.g, current_text_color.b);
+            SDL_Texture **cache = get_active_glyph_cache();
+            if (c < 128 && cache[c]) {
+                SDL_SetTextureColorMod(cache[c], current_text_color.r, current_text_color.g, current_text_color.b);
                 SDL_FRect dest = {(float)cursor_x, (float)cursor_y, (float)current_col_width, (float)current_row_height};
-                SDL_RenderTexture(renderer, glyph_cache[c], NULL, &dest);
+                SDL_RenderTexture(renderer, cache[c], NULL, &dest);
                 text++;
             } else {
                 int len = utf8_char_len(c);
@@ -424,6 +518,312 @@ void graphics_print(const char *text) {
         }
     }
     update_graphics();
+}
+
+void graphics_printstring(int px, int py, const char *text) {
+    if (!font || !canvas || !text) return;
+    SDL_SetRenderTarget(renderer, canvas);
+
+    int draw_x = px;
+    int draw_y = py;
+
+    while (*text) {
+        if (*text == '\n' || *text == '\r') {
+            text++;
+            continue;
+        }
+        if (*text == ' ') {
+            draw_x += current_col_width;
+            text++;
+        } else {
+            unsigned char c = (unsigned char)*text;
+            SDL_Texture **cache = get_active_glyph_cache();
+            if (c < 128 && cache[c]) {
+                SDL_SetTextureColorMod(cache[c], current_text_color.r, current_text_color.g, current_text_color.b);
+                SDL_FRect dest = {(float)draw_x, (float)draw_y, (float)current_col_width, (float)current_row_height};
+                SDL_RenderTexture(renderer, cache[c], NULL, &dest);
+                text++;
+            } else {
+                int len = utf8_char_len(c);
+                char s[5] = {0};
+                for (int i = 0; i < len && text[i]; i++) s[i] = text[i];
+                SDL_Surface* surf = TTF_RenderText_Blended(font, s, 0, current_text_color);
+                if (surf) {
+                    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+                    SDL_FRect dest = {(float)draw_x, (float)draw_y, (float)current_col_width, (float)current_row_height};
+                    SDL_RenderTexture(renderer, tex, NULL, &dest);
+                    SDL_DestroySurface(surf);
+                    SDL_DestroyTexture(tex);
+                }
+                text += len;
+            }
+            draw_x += current_col_width;
+        }
+    }
+    update_graphics();
+}
+
+int graphics_printwidth(const char *text) {
+    if (!text) return 0;
+    int width = 0;
+    while (*text) {
+        if (*text == '\n' || *text == '\r') {
+            text++;
+            continue;
+        }
+        unsigned char c = (unsigned char)*text;
+        int len = utf8_char_len(c);
+        width += current_col_width;
+        text += len;
+    }
+    return width;
+}
+
+int graphics_loadimage(const char *filename, int mode) {
+    (void)mode;
+    if (!filename || !renderer) return 0;
+
+    int slot_idx = -1;
+    for (int i = 0; i < MAX_IMAGE_SLOTS; i++) {
+        if (!image_slots[i].in_use) { slot_idx = i; break; }
+    }
+    if (slot_idx < 0) return 0;
+
+    SDL_Surface *surface = IMG_Load(filename);
+    if (!surface) return 0;
+    SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
+    if (!texture) {
+        SDL_DestroySurface(surface);
+        return 0;
+    }
+    image_slots[slot_idx].texture = texture;
+    image_slots[slot_idx].width = surface->w;
+    image_slots[slot_idx].height = surface->h;
+    image_slots[slot_idx].in_use = 1;
+    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+    SDL_DestroySurface(surface);
+    return slot_idx + 1;
+}
+
+int graphics_freeimage(int handle) {
+    if (!renderer || handle < 1 || handle > MAX_IMAGE_SLOTS ||
+        !image_slots[handle - 1].in_use) return 0;
+
+    ImageSlot *slot = &image_slots[handle - 1];
+    SDL_DestroyTexture(slot->texture);
+    slot->texture = NULL;
+    slot->width = 0;
+    slot->height = 0;
+    slot->in_use = 0;
+    return 1;
+}
+
+int graphics_putimage(int x1, int y1, int x2, int y2, int handle,
+                      int sx1, int sy1, int sx2, int sy2, int has_source) {
+    if (!renderer || !canvas || handle < 1 || handle > MAX_IMAGE_SLOTS ||
+        !image_slots[handle - 1].in_use) return 0;
+
+    ImageSlot *slot = &image_slots[handle - 1];
+    if (!has_source) {
+        sx1 = 0; sy1 = 0;
+        sx2 = slot->width - 1; sy2 = slot->height - 1;
+    }
+    if (sx1 > sx2) { int temp = sx1; sx1 = sx2; sx2 = temp; }
+    if (sy1 > sy2) { int temp = sy1; sy1 = sy2; sy2 = temp; }
+    if (x2 < x1 || y2 < y1) {
+        x2 = x1 + (sx2 - sx1);
+        y2 = y1 + (sy2 - sy1);
+    }
+    if (sx1 < 0 || sy1 < 0 || sx2 >= slot->width || sy2 >= slot->height) return 0;
+
+    double xs = (double)canvas_width / mode_res_w;
+    double ys = (double)canvas_height / mode_res_h;
+    SDL_FRect source = {(float)sx1, (float)sy1,
+                        (float)(sx2 - sx1 + 1), (float)(sy2 - sy1 + 1)};
+    SDL_FRect dest = {(float)(x1 * xs), (float)(y1 * ys),
+                      (float)((x2 - x1 + 1) * xs),
+                      (float)((y2 - y1 + 1) * ys)};
+    SDL_SetRenderTarget(renderer, canvas);
+    SDL_RenderTexture(renderer, slot->texture, &source, &dest);
+    update_graphics();
+    return 1;
+}
+
+/* ---- Font slot management for _LOADFONT / _FONT / _FREEFONT ---- */
+
+#define MAX_FONT_SLOTS 32
+
+typedef struct {
+    TTF_Font *font;
+    SDL_Texture *glyph_cache[128];
+    int col_width;
+    int row_height;
+    int in_use;
+} FontSlot;
+
+static FontSlot font_slots[MAX_FONT_SLOTS];
+static int active_font_slot = -1;  /* -1 = default built-in font */
+
+/* Return the glyph cache for the currently active font */
+static SDL_Texture **get_active_glyph_cache(void) {
+    if (active_font_slot >= 0 && font_slots[active_font_slot].in_use) {
+        return font_slots[active_font_slot].glyph_cache;
+    }
+    return glyph_cache;
+}
+
+/* Helper: build glyph cache for a font slot */
+static void build_slot_glyph_cache(FontSlot *slot) {
+    if (!slot->font || !renderer) return;
+    SDL_Color white = {255, 255, 255, 255};
+    for (int i = 32; i < 127; i++) {
+        if (slot->glyph_cache[i]) {
+            SDL_DestroyTexture(slot->glyph_cache[i]);
+            slot->glyph_cache[i] = NULL;
+        }
+        char s[2] = {(char)i, 0};
+        SDL_Surface* surf = TTF_RenderText_Blended(slot->font, s, 0, white);
+        if (surf) {
+            slot->glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, surf);
+            if (slot->glyph_cache[i]) {
+                SDL_SetTextureBlendMode(slot->glyph_cache[i], SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(slot->glyph_cache[i], SDL_SCALEMODE_NEAREST);
+            }
+            SDL_DestroySurface(surf);
+        }
+    }
+}
+
+int graphics_loadfont(const char *filename, int size) {
+    if (!filename || size <= 0) return 0;
+    TTF_Init();
+
+    /* Find a free slot (slots 0..MAX_FONT_SLOTS-1) */
+    int slot_idx = -1;
+    for (int i = 0; i < MAX_FONT_SLOTS; i++) {
+        if (!font_slots[i].in_use) { slot_idx = i; break; }
+    }
+    if (slot_idx < 0) return 0;  /* no free slots */
+
+    TTF_Font *loaded = TTF_OpenFont(filename, (float)size);
+    const char *search_prefixes[] = {
+        "./",
+        "../",
+        "/usr/local/share/basika/",
+        "/System/Library/Fonts/",
+        "/System/Library/Fonts/Supplemental/",
+        "/Library/Fonts/",
+        NULL
+    };
+    if (!loaded) {
+        for (int i = 0; search_prefixes[i] != NULL; i++) {
+            char alt_path[512];
+            snprintf(alt_path, sizeof(alt_path), "%s%s", search_prefixes[i], filename);
+            loaded = TTF_OpenFont(alt_path, (float)size);
+            if (loaded) break;
+        }
+    }
+    if (!loaded) {
+        const char *base = strrchr(filename, '/');
+        base = base ? base + 1 : filename;
+        for (int i = 0; search_prefixes[i] != NULL; i++) {
+            char alt_path[512];
+            snprintf(alt_path, sizeof(alt_path), "%s%s", search_prefixes[i], base);
+            loaded = TTF_OpenFont(alt_path, (float)size);
+            if (loaded) break;
+        }
+    }
+    if (!loaded) {
+        fprintf(stderr, "_LOADFONT error: Could not open font '%s': %s\n", filename, SDL_GetError());
+        return 0;
+    }
+
+    FontSlot *slot = &font_slots[slot_idx];
+    slot->font = loaded;
+    slot->in_use = 1;
+    memset(slot->glyph_cache, 0, sizeof(slot->glyph_cache));
+
+    /* Compute glyph metrics */
+    int glyph_w = 0, glyph_h = 0;
+    TTF_GetStringSize(loaded, "W", 0, &glyph_w, &glyph_h);
+    if (glyph_w > 0 && glyph_h > 0) {
+        slot->col_width = glyph_w;
+        slot->row_height = glyph_h;
+        int line_skip = TTF_GetFontLineSkip(loaded);
+        if (line_skip > slot->row_height) slot->row_height = line_skip;
+    } else {
+        slot->col_width = size / 2;
+        slot->row_height = size;
+    }
+
+    if (renderer) build_slot_glyph_cache(slot);
+
+    /* Handle is slot_idx + 1 (handles are 1-based; 0 means error) */
+    return slot_idx + 1;
+}
+
+static TTF_Font *default_font = NULL;
+
+int graphics_setfont(int handle) {
+    if (handle <= 0 || handle > MAX_FONT_SLOTS) {
+        /* Handle 0 or negative: revert to the default built-in font */
+        if (handle == 0) {
+            active_font_slot = -1;
+            if (default_font) font = default_font;
+            /* Restore default font metrics */
+            current_col_width = canvas_width / text_columns;
+            current_row_height = canvas_height / text_rows;
+            if (default_font) {
+                int glyph_w = 0, glyph_h = 0;
+                if (TTF_GetStringSize(default_font, "W", 0, &glyph_w, &glyph_h)) {
+                    int line_skip = TTF_GetFontLineSkip(default_font);
+                    if (line_skip > current_row_height) current_row_height = line_skip;
+                    if (glyph_h + 2 > current_row_height) current_row_height = glyph_h + 2;
+                }
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    int slot_idx = handle - 1;
+    if (!font_slots[slot_idx].in_use) return 0;
+
+    FontSlot *slot = &font_slots[slot_idx];
+    /* Save the default font pointer before first switch */
+    if (!default_font && font) default_font = font;
+    active_font_slot = slot_idx;
+    font = slot->font;
+
+    /* Build glyph cache for the slot if it was loaded before renderer was ready */
+    if (renderer && slot->font && !slot->glyph_cache[32]) {
+        build_slot_glyph_cache(slot);
+    }
+
+    /* Update active metrics to the slot's font (no glyph cache pointer copying) */
+    current_col_width = slot->col_width;
+    current_row_height = slot->row_height;
+
+    return 1;
+}
+
+int graphics_freefont(int handle) {
+    if (handle <= 0 || handle > MAX_FONT_SLOTS) return 0;
+    int slot_idx = handle - 1;
+    if (!font_slots[slot_idx].in_use) return 0;
+
+    /* Cannot free the currently active font */
+    if (active_font_slot == slot_idx) return 0;
+
+    FontSlot *slot = &font_slots[slot_idx];
+    for (int i = 0; i < 128; i++) {
+        if (slot->glyph_cache[i]) { SDL_DestroyTexture(slot->glyph_cache[i]); slot->glyph_cache[i] = NULL; }
+    }
+    TTF_CloseFont(slot->font);
+    slot->font = NULL;
+    slot->in_use = 0;
+    return 1;
 }
 
 void set_text_cursor(int row, int col) {
@@ -672,16 +1072,21 @@ int graphics_save_screenshot(const char *filename) {
     if (!renderer || !canvas || !filename) return 0;
 
     SDL_SetRenderTarget(renderer, canvas);
-    SDL_Surface *surf = SDL_RenderReadPixels(renderer, NULL);
-    if (!surf) return 0;
+    SDL_Surface *surf = SDL_RenderReadPixels(renderer, &(SDL_Rect){0, 0, canvas_width, canvas_height});
+    if (!surf) {
+        fprintf(stderr, "RenderReadPixels failed: %s\n", SDL_GetError());
+        return 0;
+    }
 
     int result = 0;
     const char *ext = strrchr(filename, '.');
     
     if (ext && strcasecmp(ext, ".png") == 0) {
         if (IMG_SavePNG(surf, filename)) result = 1;
+        else fprintf(stderr, "IMG_SavePNG failed: %s\n", SDL_GetError());
     } else if (ext && (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0)) {
         if (IMG_SaveJPG(surf, filename, 90)) result = 1;
+        else fprintf(stderr, "IMG_SaveJPG failed: %s\n", SDL_GetError());
     }
 
     SDL_DestroySurface(surf);
@@ -1048,8 +1453,31 @@ void wait_for_keypress() {
 }
 
 void close_graphics() {
+    /* Restore font to default before cleanup to avoid double-close */
+    if (active_font_slot >= 0 && default_font) {
+        font = default_font;
+    }
+    active_font_slot = -1;
+    default_font = NULL;
+
+    /* Free user-loaded font slots */
+    for (int s = 0; s < MAX_FONT_SLOTS; s++) {
+        if (font_slots[s].in_use) {
+            for (int i = 0; i < 128; i++) {
+                if (font_slots[s].glyph_cache[i]) SDL_DestroyTexture(font_slots[s].glyph_cache[i]);
+            }
+            TTF_CloseFont(font_slots[s].font);
+            font_slots[s].in_use = 0;
+        }
+    }
+
     for (int i = 0; i < 128; i++) {
         if (glyph_cache[i]) SDL_DestroyTexture(glyph_cache[i]);
+    }
+    for (int i = 0; i < MAX_IMAGE_SLOTS; i++) {
+        if (image_slots[i].texture) SDL_DestroyTexture(image_slots[i].texture);
+        image_slots[i].texture = NULL;
+        image_slots[i].in_use = 0;
     }
     if (font) TTF_CloseFont(font);
     if (canvas) SDL_DestroyTexture(canvas);

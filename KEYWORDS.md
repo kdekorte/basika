@@ -1,5 +1,26 @@
 # Supported BASIKA Keywords and Syntax
 
+## Complete Keyword Index
+
+The following is the complete keyword set recognized by the lexer:
+
+`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CHDIR`,
+`CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
+`CVS`, `DATA`, `DATE$`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
+`DELETE`, `DIM`, `DRAW`, `ELSE`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
+`ERROR`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `GET`, `GET$`, `GOSUB`, `GOTO`,
+`HEX$`, `IF`, `INKEY$`, `INPUT`, `INSTR`, `INT`, `KEY`, `KILL`, `LCASE$`,
+`LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LSET`,
+`LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
+`NOT`, `OCT$`, `OFF`, `ON`, `OPEN`, `OPTION`, `OR`, `PAINT`, `PEEK`, `PLAY`,
+`POKE`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
+`RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
+`SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
+`SPC`, `SQR`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
+`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
+`VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_FONT`, `_FREEFONT`, `_FREEIMAGE`,
+`_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`.
+
 ## Line Numbers and Labels
 
 Line numbers are optional. Programs may use traditional line numbers (`10 PRINT "Hi"`),
@@ -88,14 +109,26 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `PUT (x,y), array[, action]`: Places a captured area on the screen. Actions: `PSET`, `PRESET`, `AND`, `OR`, `XOR` (default).
 - `SCREEN mode`: Sets graphics mode.
 - `SCREENSHOT "filename.png"`: Saves the current graphics window content to a file. Supports `.png` and `.jpg`/`.jpeg` extensions.
+- `_FONT handle`: Sets the active font to the loaded font specified by `handle` (or `0` to restore default font).
+- `_FREEFONT handle`: Frees a loaded font handle.
+- `_LOADFONT("fontfile.ttf", size)`: Loads a TTF/OTF font file at the specified pixel size and returns a numeric font handle.
+- `_PRINTSTRING (x, y), text$`: Draws `text$` at pixel coordinates `(x, y)` using the current `COLOR`. Does not move the text cursor or scroll. Works like QB64's `_PRINTSTRING`.
+- `_PRINTWIDTH(text$)`: Returns the pixel width that `text$` would occupy when rendered with the current font. Useful for centering text or layout calculations.
 - `SLEEP ms`: Pauses for a specified number of milliseconds.
 - `SOUND freq, duration`: Produces a tone.
 - `VIEW [(x1,y1)-(x2,y2)[, [fillcolor][, border]]]`: Defines a physical viewport (in screen pixels). All subsequent graphics commands are clipped to this region. Coordinates are relative to the viewport origin unless `VIEW SCREEN` is used (absolute). Omit coordinates to reset.
 - `WINDOW [(x1,y1)-(x2,y2)]`: Maps a custom logical coordinate system onto the current viewport. After this call, all graphics commands accept logical coordinates. `(x1,y1)` is the bottom-left and `(x2,y2)` is the top-right by default (Y increases upward, like math). Use `WINDOW SCREEN` to keep Y increasing downward. Omit coordinates to reset to screen coordinates.
+- `_LOADIMAGE("filename", mode)`: Loads an image file and returns a numeric image handle. The optional mode is accepted for QB64 compatibility.
+- `_PUTIMAGE (x1,y1), handle`: Draws an image at the destination position. A destination rectangle can be supplied as `(x1,y1)-(x2,y2)` to scale the image; source rectangles are supported with the corresponding QB64 syntax.
+- `_FREEIMAGE handle`: Releases a loaded image handle so its texture resources can be reused.
 
 ## Numeric Functions
 - `ABS(n)`, `SQR(n)`, `SIN(n)`, `COS(n)`, `TAN(n)`, `ATN(n)`
 - `EXP(n)`, `LOG(n)`, `INT(n)`, `FIX(n)`, `RND[(n)]`, `SGN(n)`
+- `ARGC`: Number of command-line arguments.
+- `ARGV$(index)`: Returns a command-line argument by index.
+- `CVI(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a binary string to integer, single, or double precision.
+- `EOF(n)`: Returns nonzero when file #n is at end of file.
 - `LOF(n)`: Length of file #n in bytes.
 - `LOC(n)`: Current position in file #n.
 - `ASC(s$)`: ASCII value of first character.
@@ -108,6 +141,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 
 ## String Functions
 - `CHR$(n)`: Character from ASCII code.
+- `COMMAND$`: Returns the command-line tail passed to the program.
 - `DATE$`: Current system date.
 - `ENVIRON$(name | index)`: Retrieve environment variable.
 - `GET$(#n, record, length)`: Read string from file.
@@ -116,7 +150,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `LCASE$(s$)` / `UCASE$(s$)`: Case conversion.
 - `LEFT$(s$, n)`, `RIGHT$(s$, n)`, `MID$(s$, start[, n])`: Substring.
 - `LTRIM$(s$)`, `RTRIM$(s$)`, `TRIM$(s$)`: Whitespace removal.
-- `REVERSE$(s$)`: Reverses a string.
+- `MKD$(n)`, `MKI$(n)`, `MKS$(n)`: Convert numeric values to binary strings.
+- `REVERSE(s$)`: Reverses a string.
 - `SPACE$(n)`: Returns string of spaces.
 - `STR$(n)`: Converts number to string.
 - `TIME$`: Current system time.

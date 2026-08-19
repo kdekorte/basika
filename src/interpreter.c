@@ -1698,7 +1698,41 @@ static double primary_tok(TokenStream *ts) {
         return val;
     }
 
-    if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD) {
+    if (t.type == TOKEN_LOADFONT) {
+        /* _LOADFONT(filename$, size%) -> handle */
+        if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+            ts->pos++;
+            char buf[512] = "";
+            parse_string_expression_tok(ts, buf, sizeof(buf));
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
+            int size = (int)evaluate_expression_tok(ts);
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            if (!graphics_is_active()) init_graphics();
+            fprintf(stderr, "DEBUG _LOADFONT: buf='%s' size=%d\n", buf, size);
+            int result = graphics_loadfont(buf, size);
+            fprintf(stderr, "DEBUG _LOADFONT: result=%d\n", result);
+            return (double)result;
+        }
+        return 0;
+    }
+    if (t.type == TOKEN_LOADIMAGE) {
+        /* _LOADIMAGE(filename$, mode&) -> handle */
+        if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+            ts->pos++;
+            char buf[512] = "";
+            parse_string_expression_tok(ts, buf, sizeof(buf));
+            int mode = 32;
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+                ts->pos++;
+                mode = (int)evaluate_expression_tok(ts);
+            }
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            if (!graphics_is_active()) init_graphics();
+            return (double)graphics_loadimage(buf, mode);
+        }
+        return 0;
+    }
+    if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
         TokenType ft = t.type;
         int has_arg = 0;
         double arg = 0;
@@ -1753,13 +1787,14 @@ static double primary_tok(TokenStream *ts) {
                     return val;
                 }
             }
-            if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL) {
+            if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
                 char buf[256] = "";
                 parse_string_expression_tok(ts, buf, sizeof(buf));
                 if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                 if (ft == TOKEN_ASC) return buf[0] ? (double)(unsigned char)buf[0] : 0;
                 if (ft == TOKEN_LEN) return (double)strlen(buf);
                 if (ft == TOKEN_VAL) return atof(buf);
+                if (ft == TOKEN_PRINTWIDTH) return (double)graphics_printwidth(buf);
             }
             if (ft == TOKEN_INSTR) {
                 char s1[256] = "";
@@ -2031,7 +2066,39 @@ static double primary(const char **input) {
         get_next_token(input); // consume ')'
         return val;
     }
-    if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD) {
+    if (t.type == TOKEN_LOADFONT) {
+        /* _LOADFONT(filename$, size%) -> handle */
+        Token next = get_next_token(input);
+        if (next.type == TOKEN_LPAREN) {
+            char buf[512] = "";
+            parse_string_expression(input, buf, sizeof(buf));
+            get_next_token(input); // consume comma
+            int size = (int)evaluate_expression(input);
+            get_next_token(input); // consume ')'
+            if (!graphics_is_active()) init_graphics();
+            fprintf(stderr, "DEBUG _LOADFONT(2): buf='%s' size=%d\n", buf, size);
+            int result2 = graphics_loadfont(buf, size);
+            fprintf(stderr, "DEBUG _LOADFONT(2): result=%d\n", result2);
+            return (double)result2;
+        }
+        return 0;
+    }
+    if (t.type == TOKEN_LOADIMAGE) {
+        /* _LOADIMAGE(filename$, mode&) -> handle */
+        Token next = get_next_token(input);
+        if (next.type == TOKEN_LPAREN) {
+            char buf[512] = "";
+            parse_string_expression(input, buf, sizeof(buf));
+            int mode = 32;
+            Token separator = get_next_token(input);
+            if (separator.type == TOKEN_COMMA) mode = (int)evaluate_expression(input);
+            get_next_token(input); // consume ')'
+            if (!graphics_is_active()) init_graphics();
+            return (double)graphics_loadimage(buf, mode);
+        }
+        return 0;
+    }
+    if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
         TokenType ft = t.type;
         const char *saved = *input;
         Token next = get_next_token(input);
@@ -2085,13 +2152,14 @@ static double primary(const char **input) {
                     return val;
                 }
             }
-            if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL) {
+            if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
                 char buf[256] = "";
                 parse_string_expression(input, buf, sizeof(buf));
                 get_next_token(input); // consume ')'
                 if (ft == TOKEN_ASC) return buf[0] ? (double)(unsigned char)buf[0] : 0;
                 if (ft == TOKEN_LEN) return (double)strlen(buf);
                 if (ft == TOKEN_VAL) return atof(buf);
+                if (ft == TOKEN_PRINTWIDTH) return (double)graphics_printwidth(buf);
             }
             if (ft == TOKEN_INSTR) {
                 char s1[256] = "";
@@ -3507,9 +3575,45 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             draw_paint(x, y, col, border);
         } else if (t.type == TOKEN_SCREEN) {
-            int mode = (int)evaluate_expression(&ptr);
-            init_graphics();
-            set_screen_mode(mode); 
+            const char *saved_screen = ptr;
+            Token nxt = get_next_token(&ptr);
+            if (nxt.type == TOKEN_NEWIMAGE) {
+                Token lparen = get_next_token(&ptr);
+                if (lparen.type == TOKEN_LPAREN) {
+                    int w = (int)evaluate_expression(&ptr);
+                    Token comma1 = get_next_token(&ptr);
+                    if (comma1.type == TOKEN_COMMA) {
+                        int h = (int)evaluate_expression(&ptr);
+                        int colors = 256;
+                        const char *saved_comma2 = ptr;
+                        Token comma2 = get_next_token(&ptr);
+                        if (comma2.type == TOKEN_COMMA) {
+                            colors = (int)evaluate_expression(&ptr);
+                            Token rparen = get_next_token(&ptr);
+                            (void)rparen;
+                        } else if (comma2.type == TOKEN_RPAREN) {
+                            // Done
+                        } else {
+                            ptr = saved_comma2;
+                        }
+                        if (w <= 0 || h <= 0) {
+                            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                        } else {
+                            init_graphics();
+                            set_screen_newimage(w, h, colors);
+                        }
+                    } else {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                    }
+                } else {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                }
+            } else {
+                ptr = saved_screen;
+                int mode = (int)evaluate_expression(&ptr);
+                init_graphics();
+                set_screen_mode(mode); 
+            }
         } else if (t.type == TOKEN_WINDOW) {
             const char *saved = ptr;
             Token nxt = get_next_token(&ptr);
@@ -3588,14 +3692,20 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             } 
         } else if (t.type == TOKEN_LOCATE) {
             int row = (int)evaluate_expression(&ptr);
+            int col = print_col + 1;
             const char *saved_comma = ptr;
             if (get_next_token(&ptr).type == TOKEN_COMMA) {
-                int col = (int)evaluate_expression(&ptr);
-                set_text_cursor(row, col);
-                print_col = col - 1;
+                col = (int)evaluate_expression(&ptr);
             } else {
                 ptr = saved_comma;
-                set_text_cursor(row, print_col + 1);
+            }
+            int max_r = graphics_get_text_rows();
+            int max_c = graphics_get_text_cols();
+            if (row < 1 || row > max_r || col < 1 || col > max_c) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            } else {
+                set_text_cursor(row, col);
+                print_col = col - 1;
             }
         } else if (t.type == TOKEN_CLS) {
             graphics_cls();
@@ -3814,6 +3924,57 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 ptr = saved;
                 report_runtime_error(ERR_SYNTAX_ERROR);
             }
+        } else if (t.type == TOKEN_FREEIMAGE) {
+            int handle = (int)evaluate_expression(&ptr);
+            if (!graphics_freeimage(handle)) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
+        } else if (t.type == TOKEN_PUTIMAGE) {
+            int x1 = 0, y1 = 0, x2 = -1, y2 = -1;
+            int sx1 = 0, sy1 = 0, sx2 = 0, sy2 = 0;
+            int has_source = 0;
+            Token next = get_next_token(&ptr);
+            if (next.type == TOKEN_LPAREN) {
+                x1 = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                y1 = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                Token separator = get_next_token(&ptr);
+                if (separator.type == TOKEN_MINUS) {
+                    if (get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                    x2 = (int)evaluate_expression(&ptr);
+                    if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                    y2 = (int)evaluate_expression(&ptr);
+                    if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                    if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                } else if (separator.type != TOKEN_COMMA) {
+                    report_runtime_error(ERR_SYNTAX_ERROR); return;
+                }
+            } else if (next.type != TOKEN_COMMA) {
+                report_runtime_error(ERR_SYNTAX_ERROR); return;
+            }
+
+            int handle = (int)evaluate_expression(&ptr);
+            const char *after_handle = ptr;
+            Token source_separator = get_next_token(&ptr);
+            if (source_separator.type == TOKEN_COMMA) {
+                if (get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                sx1 = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                sy1 = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_RPAREN || get_next_token(&ptr).type != TOKEN_MINUS || get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                sx2 = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                sy2 = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                has_source = 1;
+            } else {
+                ptr = after_handle;
+            }
+            if (!graphics_is_active()) init_graphics();
+            if (!graphics_putimage(x1, y1, x2, y2, handle, sx1, sy1, sx2, sy2, has_source)) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
         } else if (t.type == TOKEN_SCREENSHOT) {
             char filename[256] = "";
             if (!parse_string_expression(&ptr, filename, sizeof(filename))) {
@@ -3826,6 +3987,49 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (!graphics_save_screenshot(filename)) {
                     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
                 }
+            }
+        } else if (t.type == TOKEN_PRINTSTRING) {
+            /* _PRINTSTRING (x, y), text$ */
+            Token lparen = get_next_token(&ptr);
+            if (lparen.type != TOKEN_LPAREN) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            int px = (int)evaluate_expression(&ptr);
+            Token comma1 = get_next_token(&ptr);
+            if (comma1.type != TOKEN_COMMA) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            int py = (int)evaluate_expression(&ptr);
+            Token rparen = get_next_token(&ptr);
+            if (rparen.type != TOKEN_RPAREN) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            Token comma2 = get_next_token(&ptr);
+            if (comma2.type != TOKEN_COMMA) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            char text[512] = "";
+            parse_string_expression(&ptr, text, sizeof(text));
+            if (!graphics_is_active()) {
+                init_graphics();
+            }
+            graphics_printstring(px, py, text);
+        } else if (t.type == TOKEN_FONT) {
+            /* _FONT handle% */
+            int handle = (int)evaluate_expression(&ptr);
+            if (!graphics_is_active()) init_graphics();
+            if (!graphics_setfont(handle)) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
+        } else if (t.type == TOKEN_FREEFONT) {
+            /* _FREEFONT handle% */
+            int handle = (int)evaluate_expression(&ptr);
+            if (!graphics_freefont(handle)) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else {
             // Token was not a recognized command or valid assignment

@@ -9,10 +9,6 @@ typedef struct {
     TokenType type;
 } KeywordMap;
 
-static int compare_keywords(const void *a, const void *b) {
-    return strcasecmp(((KeywordMap *)a)->keyword, ((KeywordMap *)b)->keyword);
-}
-
 static const KeywordMap keyword_table[] = {
     {"ABS", TOKEN_ABS},
     {"AND", TOKEN_AND},
@@ -150,6 +146,15 @@ static const KeywordMap keyword_table[] = {
     {"WHILE", TOKEN_WHILE},
     {"WINDOW", TOKEN_WINDOW},
     {"XOR", TOKEN_XOR},
+    {"_FONT", TOKEN_FONT},
+    {"_FREEFONT", TOKEN_FREEFONT},
+    {"_FREEIMAGE", TOKEN_FREEIMAGE},
+    {"_LOADFONT", TOKEN_LOADFONT},
+    {"_LOADIMAGE", TOKEN_LOADIMAGE},
+    {"_NEWIMAGE", TOKEN_NEWIMAGE},
+    {"_PRINTSTRING", TOKEN_PRINTSTRING},
+    {"_PRINTWIDTH", TOKEN_PRINTWIDTH},
+    {"_PUTIMAGE", TOKEN_PUTIMAGE},
 };
 
 
@@ -250,8 +255,13 @@ Token get_next_token(const char **input) {
     while ((isalnum(**input) || **input == '$' || **input == '%' || **input == '!' || **input == '#' || **input == '_') && i < 63) buffer[i++] = *(*input)++;
     buffer[i] = '\0';
 
-    KeywordMap key = {buffer, 0};
-    KeywordMap *res = bsearch(&key, keyword_table, sizeof(keyword_table) / sizeof(keyword_table[0]), sizeof(KeywordMap), compare_keywords);
+    KeywordMap *res = NULL;
+    for (size_t keyword_idx = 0; keyword_idx < sizeof(keyword_table) / sizeof(keyword_table[0]); keyword_idx++) {
+        if (strcasecmp(buffer, keyword_table[keyword_idx].keyword) == 0) {
+            res = (KeywordMap *)&keyword_table[keyword_idx];
+            break;
+        }
+    }
 
     if (res) {
         token.type = res->type;

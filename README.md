@@ -30,6 +30,7 @@ brew untap kdekorte/basika
 ## Build from Source
 
 Requirements:
+
 - `gcc`
 - `pkg-config`
 - `SDL3`, `SDL3_ttf`, `SDL3_mixer`, and `SDL3_image` development headers
@@ -39,7 +40,6 @@ Build with:
 ```sh
 make
 ```
-
 
 ## Run
 
@@ -73,6 +73,18 @@ Run in headless graphics mode (virtual framebuffer without showing a window, e.g
 ./basika --headless demo/hello.bas
 ```
 
+Graphics demos can be run with a visible window using `-w`:
+
+```sh
+./basika -w demo/image_demo.bas
+./basika -w demo/printstring.bas
+./basika -w demo/randomtext.bas
+```
+
+Image demos require `SDL3_image` and load the repository fixture from
+`tests/image_fixture.bmp`. Use `--headless` when a windowing environment is not
+available.
+
 Show help:
 
 ```sh
@@ -89,10 +101,19 @@ make test
 
 ## Supported features
 
-Basika supports a wide range of IBM BASICA-compatible commands, including file I/O, graphics, sound, and robust control flow. 
+Basika supports a wide range of IBM BASICA-compatible commands, including file I/O,
+graphics, sound, labels, optional line numbers, loaded fonts, and image handles.
+Graphics image handles are managed with `_LOADIMAGE`, `_PUTIMAGE`, and
+`_FREEIMAGE`; loaded fonts use `_LOADFONT`, `_FONT`, and `_FREEFONT`.
 
 For a full list of supported commands and their exact syntax, please refer to KEYWORDS.md.
 
 ## Future reminders
 
 See `TODO.md` for planned improvements and future work items.
+
+## Documentation
+
+- `KEYWORDS.md`: complete lexer keyword index and syntax reference.
+- `ERROR_CODES.md`: runtime error codes and messages.
+- `CHANGELOG.md`: chronological feature and maintenance history.
