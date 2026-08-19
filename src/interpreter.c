@@ -538,14 +538,50 @@ static BasicString *basic_string_create(const void *data, size_t length) {
     return value;
 }
 
+static int basic_string_reserve(BasicString *value, size_t required) {
+    if (!value) return 0;
+    if (required <= value->capacity) return 1;
+    size_t capacity = value->capacity ? value->capacity : 16;
+    while (capacity < required) {
+        if (capacity > SIZE_MAX / 2) {
+            capacity = required;
+            break;
+        }
+        capacity *= 2;
+    }
+    unsigned char *data = realloc(value->data, capacity);
+    if (!data) return 0;
+    value->data = data;
+    value->capacity = capacity;
+    return 1;
+}
+
+int basic_string_assign(BasicString **target, const void *data, size_t length) {
+    if (!target) return 0;
+    if (!*target) {
+        *target = basic_string_create(NULL, 0);
+        if (!*target) return 0;
+    }
+    BasicString *value = *target;
+    if (!basic_string_reserve(value, length + 1)) return 0;
+    if (data && length) memcpy(value->data, data, length);
+    value->data[length] = '\0';
+    value->length = length;
+    return 1;
+}
+
+int basic_string_append(BasicString *target, const void *data, size_t length) {
+    if (!target || (!data && length) || !basic_string_reserve(target, target->length + length + 1)) return 0;
+    if (length) memcpy(target->data + target->length, data, length);
+    target->length += length;
+    target->data[target->length] = '\0';
+    return 1;
+}
+
 static void basic_string_destroy(BasicString *value) {
     if (!value) return;
     free(value->data);
     free(value);
-}
-
-static BasicString *basic_string_from_cstr(const char *value) {
-    return basic_string_create(value ? value : "", value ? strlen(value) : 0);
 }
 
 static int deflate_string(const char *input, char *output, int output_size) {
@@ -1579,11 +1615,9 @@ static void set_string_variable_with_align(int idx, int array_idx, const char *v
 
     if (array_idx >= 0) {
         if (!vars[idx].s_array || array_idx < 0 || array_idx >= vars[idx].array_size) return;
-        basic_string_destroy(vars[idx].s_array[array_idx]);
-        vars[idx].s_array[array_idx] = basic_string_from_cstr(value);
+        basic_string_assign(&vars[idx].s_array[array_idx], value, strlen(value));
     } else {
-        basic_string_destroy(vars[idx].s_value);
-        vars[idx].s_value = basic_string_from_cstr(value);
+        basic_string_assign(&vars[idx].s_value, value, strlen(value));
     }
 }
 
@@ -1602,11 +1636,9 @@ static void trim_string(char *s) {
 static void assign_input_value(int idx, int array_idx, int is_string, const char *value) {
     if (is_string) {
         if (array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size) {
-            basic_string_destroy(vars[idx].s_array[array_idx]);
-            vars[idx].s_array[array_idx] = basic_string_from_cstr(value);
+            basic_string_assign(&vars[idx].s_array[array_idx], value, strlen(value));
         } else {
-            basic_string_destroy(vars[idx].s_value);
-            vars[idx].s_value = basic_string_from_cstr(value);
+            basic_string_assign(&vars[idx].s_value, value, strlen(value));
         }
     } else {
         set_numeric_variable(idx, array_idx, atof(value));

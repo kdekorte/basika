@@ -70,6 +70,9 @@ typedef struct {
     size_t capacity;
 } BasicString;
 
+int basic_string_assign(BasicString **target, const void *data, size_t length);
+int basic_string_append(BasicString *target, const void *data, size_t length);
+
 typedef struct {
     char name[32];
     double value;
