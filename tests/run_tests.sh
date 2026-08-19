@@ -70,6 +70,7 @@ TESTS=(
   "tests/more_string_funcs"
   "tests/string_numeric_funcs"
   "tests/compression_test"
+  "tests/long_string_test"
   "tests/mki_mks_mkd"
   "tests/input_multi"
   "tests/get_dollar"

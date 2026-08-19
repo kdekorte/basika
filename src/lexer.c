@@ -251,10 +251,10 @@ Token get_next_token(const char **input) {
     if (**input == '\\') { (*input)++; token.type = TOKEN_IDIV; return token; }
     if (**input == '#') { (*input)++; token.type = TOKEN_HASH; strcpy(token.text, "#"); return token; }
 
-    char buffer[64];
+    char buffer[BASIC_TOKEN_TEXT_MAX];
     int i = 0;
     // Accept alphanumeric, type suffixes ($, %, !, #), and underscore in identifiers
-    while ((isalnum(**input) || **input == '$' || **input == '%' || **input == '!' || **input == '#' || **input == '_') && i < 63) buffer[i++] = *(*input)++;
+    while ((isalnum(**input) || **input == '$' || **input == '%' || **input == '!' || **input == '#' || **input == '_') && i < BASIC_TOKEN_TEXT_MAX - 1) buffer[i++] = *(*input)++;
     buffer[i] = '\0';
 
     KeywordMap *res = NULL;

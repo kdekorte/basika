@@ -525,7 +525,7 @@ static int is_string_token(Token t);
 
 static int deflate_string(const char *input, char *output, int output_size) {
     uLong source_len = (uLong)strlen(input);
-    Bytef compressed[256];
+    Bytef compressed[BASIC_STRING_MAX];
     uLong compressed_len = sizeof(compressed);
     if (compress2(compressed, &compressed_len, (const Bytef *)input, source_len, Z_DEFAULT_COMPRESSION) != Z_OK ||
         compressed_len * 2 + 1 >= (uLong)output_size) {
@@ -543,11 +543,11 @@ static int deflate_string(const char *input, char *output, int output_size) {
 
 static int inflate_string(const char *input, char *output, int output_size) {
     size_t encoded_len = strlen(input);
-    if (encoded_len == 0 || (encoded_len % 2) != 0 || encoded_len / 2 > 256) {
+    if (encoded_len == 0 || (encoded_len % 2) != 0 || encoded_len / 2 > BASIC_STRING_MAX / 2) {
         output[0] = '\0';
         return 0;
     }
-    Bytef compressed[256];
+    Bytef compressed[BASIC_STRING_MAX / 2];
     for (size_t i = 0; i < encoded_len; i += 2) {
         unsigned int byte = 0;
         if (sscanf(input + i, "%2x", &byte) != 1) {
@@ -1010,7 +1010,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
     int first = 1;
 
     while (1) {
-        char term[256] = "";
+        char term[BASIC_STRING_MAX] = "";
         Token t = ts->tokens[ts->pos];
 
         if (t.type == TOKEN_CHR || t.type == TOKEN_TAB) {
@@ -1029,7 +1029,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             TokenType ft = t.type;
             ts->pos++; // func
             ts->pos++; // (
-            char base[256] = "";
+            char base[BASIC_STRING_MAX] = "";
             parse_string_expression_tok(ts, base, sizeof(base));
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++; // ,
             int n1 = (int)evaluate_expression_tok(ts);
@@ -1070,7 +1070,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             int n = (int)evaluate_expression_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++; // ,
             char c = ' ';
-            char arg_buf[256] = "";
+            char arg_buf[BASIC_STRING_MAX] = "";
             int is_str = is_string_token(ts->tokens[ts->pos]);
             if (is_str) {
                 parse_string_expression_tok(ts, arg_buf, sizeof(arg_buf));
@@ -1084,7 +1084,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             ts->pos++; // function
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
-            char input[256] = "";
+            char input[BASIC_STRING_MAX] = "";
             parse_string_expression_tok(ts, input, sizeof(input));
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (t.type == TOKEN_DEFLATE) {
@@ -1122,7 +1122,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             }
             long offset = (long)((rec - 1) * len);
             fseek(file_handles[fnum], offset, SEEK_SET);
-            char buf[512];
+            char buf[BASIC_STRING_MAX];
             size_t r = fread(buf, 1, len, file_handles[fnum]);
             if (r < (size_t)len) {
                 for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
@@ -1152,7 +1152,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             TokenType ft = t.type;
             ts->pos++; // func
             ts->pos++; // (
-            char base[256] = "";
+            char base[BASIC_STRING_MAX] = "";
             parse_string_expression_tok(ts, base, sizeof(base));
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
             if (ft == TOKEN_UCASE) {
@@ -1202,7 +1202,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
         } else if (t.type == TOKEN_ENVIRON) {
             ts->pos++; // environ$
             ts->pos++; // (
-            char arg_val[256] = "";
+            char arg_val[BASIC_STRING_MAX] = "";
             int is_str = is_string_token(ts->tokens[ts->pos]);
             if (is_str) {
                 parse_string_expression_tok(ts, arg_val, sizeof(arg_val));
@@ -1257,7 +1257,7 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             if (idx == -1) idx = find_variable(t.text);
             ts->pos++;
             int array_idx = parse_array_index_tok(ts, idx);
-            char temp[256] = "";
+            char temp[BASIC_STRING_MAX] = "";
             get_string_variable_value(idx, array_idx, temp, sizeof(temp));
             strncpy(term, temp, sizeof(term) - 1);
         } else {
@@ -1285,7 +1285,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
     int first = 1;
 
     while (1) {
-        char term[256] = "";
+        char term[BASIC_STRING_MAX] = "";
         const char *saved = *input;
         Token t = get_next_token(input);
 
@@ -1303,7 +1303,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
         } else if (t.type == TOKEN_LEFT || t.type == TOKEN_RIGHT || t.type == TOKEN_MID) {
             TokenType ft = t.type;
             get_next_token(input); // (
-            char base[256] = "";
+            char base[BASIC_STRING_MAX] = "";
             parse_string_expression(input, base, sizeof(base));
             get_next_token(input); // ,
             int n1 = (int)evaluate_expression(input);
@@ -1341,7 +1341,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
             int n = (int)evaluate_expression(input);
             get_next_token(input); // ,
             char c = ' ';
-            char arg_buf[256] = "";
+            char arg_buf[BASIC_STRING_MAX] = "";
             const char *saved_arg = *input;
             if (parse_string_expression(input, arg_buf, sizeof(arg_buf))) {
                 if (arg_buf[0]) c = arg_buf[0];
@@ -1354,7 +1354,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
             memset(term, c, n); term[n] = '\0';
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             get_next_token(input); // (
-            char source[256] = "";
+            char source[BASIC_STRING_MAX] = "";
             parse_string_expression(input, source, sizeof(source));
             get_next_token(input); // )
             if (t.type == TOKEN_DEFLATE) {
@@ -1395,7 +1395,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
             }
             long offset = (long)((rec - 1) * len);
             fseek(file_handles[fnum], offset, SEEK_SET);
-            char buf[512];
+            char buf[BASIC_STRING_MAX];
             size_t r = fread(buf, 1, len, file_handles[fnum]);
             if (r < (size_t)len) {
                 for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
@@ -1423,7 +1423,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
         } else if (t.type == TOKEN_UCASE || t.type == TOKEN_LCASE || t.type == TOKEN_TRIM || t.type == TOKEN_LTRIM || t.type == TOKEN_RTRIM) {
             TokenType ft = t.type;
             get_next_token(input); // (
-            char base[256] = "";
+            char base[BASIC_STRING_MAX] = "";
             parse_string_expression(input, base, sizeof(base));
             get_next_token(input); // )
             if (ft == TOKEN_UCASE) {
@@ -1470,7 +1470,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
             }
         } else if (t.type == TOKEN_ENVIRON) {
             get_next_token(input); // (
-            char arg_val[256] = "";
+            char arg_val[BASIC_STRING_MAX] = "";
             int is_str = parse_string_expression(input, arg_val, sizeof(arg_val));
             if (is_str) {
                 char *ev = getenv(arg_val);
@@ -1518,7 +1518,7 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
         } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
             int idx = find_variable(t.text);
             int array_idx = parse_array_index(input, idx);
-            char temp[256] = "";
+            char temp[BASIC_STRING_MAX] = "";
             get_string_variable_value(idx, array_idx, temp, sizeof(temp));
             strncpy(term, temp, sizeof(term) - 1);
         } else {
@@ -1629,7 +1629,7 @@ static void execute_assignment(const char **input, Token var_token) {
     }
 
     if (is_string_var(var_token.text)) {
-        char value[256] = "";
+        char value[BASIC_STRING_MAX] = "";
         const char *expr_saved = *input;
         Token tok = get_next_token(input);
         if (tok.type == TOKEN_STRING) {
@@ -1767,7 +1767,7 @@ static double primary_tok(TokenStream *ts) {
         /* _LOADFONT(filename$, size%) -> handle */
         if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
             ts->pos++;
-            char buf[512] = "";
+            char buf[BASIC_STRING_MAX] = "";
             parse_string_expression_tok(ts, buf, sizeof(buf));
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             int size = (int)evaluate_expression_tok(ts);
@@ -1784,7 +1784,7 @@ static double primary_tok(TokenStream *ts) {
         /* _LOADIMAGE(filename$, mode&) -> handle */
         if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
             ts->pos++;
-            char buf[512] = "";
+            char buf[BASIC_STRING_MAX] = "";
             parse_string_expression_tok(ts, buf, sizeof(buf));
             int mode = 32;
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
@@ -1820,7 +1820,7 @@ static double primary_tok(TokenStream *ts) {
                 return 61440.0 + var_idx * 256.0;
             }
             if (ft == TOKEN_CVI || ft == TOKEN_CVS || ft == TOKEN_CVD) {
-                char buf[256] = "";
+                char buf[BASIC_STRING_MAX] = "";
                 int len = 0;
                 Token arg_tok = ts->tokens[ts->pos];
                 if (arg_tok.type == TOKEN_IDENTIFIER && is_string_var(arg_tok.text)) {
@@ -1853,7 +1853,7 @@ static double primary_tok(TokenStream *ts) {
                 }
             }
             if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
-                char buf[256] = "";
+                char buf[BASIC_STRING_MAX] = "";
                 parse_string_expression_tok(ts, buf, sizeof(buf));
                 if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                 if (ft == TOKEN_ASC) return buf[0] ? (double)(unsigned char)buf[0] : 0;
@@ -1862,8 +1862,8 @@ static double primary_tok(TokenStream *ts) {
                 if (ft == TOKEN_PRINTWIDTH) return (double)graphics_printwidth(buf);
             }
             if (ft == TOKEN_INSTR) {
-                char s1[256] = "";
-                char s2[256] = "";
+                char s1[BASIC_STRING_MAX] = "";
+                char s2[BASIC_STRING_MAX] = "";
                 int start = 1;
                 Token next = ts->tokens[ts->pos];
                 if (next.type != TOKEN_STRING && next.type != TOKEN_IDENTIFIER) {
@@ -2135,7 +2135,7 @@ static double primary(const char **input) {
         /* _LOADFONT(filename$, size%) -> handle */
         Token next = get_next_token(input);
         if (next.type == TOKEN_LPAREN) {
-            char buf[512] = "";
+            char buf[BASIC_STRING_MAX] = "";
             parse_string_expression(input, buf, sizeof(buf));
             get_next_token(input); // consume comma
             int size = (int)evaluate_expression(input);
@@ -2152,7 +2152,7 @@ static double primary(const char **input) {
         /* _LOADIMAGE(filename$, mode&) -> handle */
         Token next = get_next_token(input);
         if (next.type == TOKEN_LPAREN) {
-            char buf[512] = "";
+            char buf[BASIC_STRING_MAX] = "";
             parse_string_expression(input, buf, sizeof(buf));
             int mode = 32;
             Token separator = get_next_token(input);
@@ -2185,7 +2185,7 @@ static double primary(const char **input) {
                 return 61440.0 + var_idx * 256.0;
             }
             if (ft == TOKEN_CVI || ft == TOKEN_CVS || ft == TOKEN_CVD) {
-                char buf[256] = "";
+                char buf[BASIC_STRING_MAX] = "";
                 int len = 0;
                 const char *saved_tok = *input;
                 Token arg_tok = get_next_token(input);
@@ -2218,7 +2218,7 @@ static double primary(const char **input) {
                 }
             }
             if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
-                char buf[256] = "";
+                char buf[BASIC_STRING_MAX] = "";
                 parse_string_expression(input, buf, sizeof(buf));
                 get_next_token(input); // consume ')'
                 if (ft == TOKEN_ASC) return buf[0] ? (double)(unsigned char)buf[0] : 0;
@@ -2227,8 +2227,8 @@ static double primary(const char **input) {
                 if (ft == TOKEN_PRINTWIDTH) return (double)graphics_printwidth(buf);
             }
             if (ft == TOKEN_INSTR) {
-                char s1[256] = "";
-                char s2[256] = "";
+                char s1[BASIC_STRING_MAX] = "";
+                char s2[BASIC_STRING_MAX] = "";
                 int start = 1;
                 const char *saved_instr = *input;
                 Token first_arg = get_next_token(input);
@@ -2433,7 +2433,7 @@ double evaluate_expression(const char **input) {
     const char *peek_ptr = *input;
     Token peek_tok = get_next_token(&peek_ptr);
     if (is_string_token(peek_tok)) {
-        char s1[256], s2[256];
+        char s1[BASIC_STRING_MAX], s2[BASIC_STRING_MAX];
         parse_string_expression(input, s1, sizeof(s1));
         const char *op_saved = *input;
         Token t = get_next_token(input);
@@ -2681,7 +2681,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 char val_buf[512] = "";
                 if (is_string_token(next)) {
                     ptr = item_saved;
-                    char value[256] = "";
+                    char value[BASIC_STRING_MAX] = "";
                     parse_string_expression(&ptr, value, sizeof(value));
                     if (using_mode) apply_basika_using_str(using_fmt, value, val_buf, sizeof(val_buf));
                     else strcpy(val_buf, value);
@@ -2944,7 +2944,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             } else {
                 // Element swapping
                 if (is_str1) {
-                    char s1[256], s2[256];
+                    char s1[BASIC_STRING_MAX], s2[BASIC_STRING_MAX];
                     get_string_variable_value(idx1, a_idx1, s1, sizeof(s1));
                     get_string_variable_value(idx2, a_idx2, s2, sizeof(s2));
                     set_string_variable(idx1, a_idx1, s2);
@@ -3067,7 +3067,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
             }
-            char value[256] = "";
+            char value[BASIC_STRING_MAX] = "";
             parse_string_expression(&ptr, value, sizeof(value));
             set_string_variable_with_align(idx, array_idx, value, t.type == TOKEN_RSET);
         } else if (t.type == TOKEN_CLOSE) {
@@ -3362,7 +3362,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             char *saveptr = NULL;
             char *value_token = strtok_r(line, ",;", &saveptr);
             for (int i = 0; i < input_var_count; i++) {
-                char value[256] = "";
+                char value[BASIC_STRING_MAX] = "";
                 if (value_token) {
                     strncpy(value, value_token, sizeof(value) - 1);
                     value[sizeof(value) - 1] = '\0';
@@ -3375,7 +3375,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             Token var = get_next_token(&ptr);
             int idx = find_variable(var.text);
             int array_idx = parse_array_index(&ptr, idx);
-            char target[256] = "";
+            char target[BASIC_STRING_MAX] = "";
             get_string_variable_value(idx, array_idx, target, sizeof(target));
             if (target[0]) {
                 size_t len = strlen(target);
@@ -3875,7 +3875,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                             } else if (tok.type == TOKEN_IDENTIFIER && is_string_var(tok.text)) {
                                 int src_idx = find_variable(tok.text);
                                 int src_array_idx = parse_array_index(&ptr, src_idx);
-                                char temp[512] = "";
+                                char temp[BASIC_STRING_MAX] = "";
                                 get_string_variable_value(src_idx, src_array_idx, temp, sizeof(temp));
                                 strncpy(data, temp, sizeof(data) - 1);
                             } else {
@@ -3890,7 +3890,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         } else {
                             long offset = (long)((rec - 1) * len);
                             fseek(file_handles[fnum], offset, SEEK_SET);
-                            char buf[512];
+                            char buf[BASIC_STRING_MAX];
                             memset(buf, ' ', len);
                             strncpy(buf, data, len);
                             fwrite(buf, 1, len, file_handles[fnum]);
@@ -3971,7 +3971,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                                 } else {
                                     long offset = (long)((rec - 1) * len);
                                     fseek(file_handles[fnum], offset, SEEK_SET);
-                                    char buf[512];
+                                    char buf[BASIC_STRING_MAX];
                                     size_t r = fread(buf, 1, len, file_handles[fnum]);
                                     if (r < (size_t)len) {
                                         for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
@@ -4548,7 +4548,7 @@ void run_program() {
                     ts.pos++;
                     if (is_string_var(t.text)) {
                         const char *temp_ptr = ts.tokens[ts.pos].start_ptr;
-                        char value[256] = "";
+                        char value[BASIC_STRING_MAX] = "";
                         parse_string_expression(&temp_ptr, value, sizeof(value));
                         set_string_variable(idx, array_idx, value);
                         // Sync ts.pos

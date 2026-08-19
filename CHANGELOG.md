@@ -12,6 +12,7 @@ All notable changes to this project are recorded in this file.
 - **Image Demo Asset**: Replaced the weak screenshot fixture with a colorful BMP asset that makes full-image, scaled, and cropped `_PUTIMAGE` output easier to compare.
 - **Parser Fixes**: Fixed `_PUTIMAGE` lookahead so a successful draw does not leave the command parser positioned at the wrong token boundary. Added Makefile header dependencies to avoid stale token enum objects.
 - **Demo Corrections**: Kept `randomtext.bas` within the active `SCREEN 12` text area and restored bright text before its completion message.
+- **String Buffers**: Increased practical parser string capacity from 255 to 511 characters and added long-string compression coverage; full QB64-scale binary strings remain future work.
 
 ## 2026-07-06
 

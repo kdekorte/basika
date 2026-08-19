@@ -4,6 +4,10 @@
 
 The following is the complete keyword set recognized by the lexer:
 
+String values currently support up to 511 characters through the interpreter's
+stack-based expression parser. Larger QB64-style strings require a future
+length-aware heap-backed parser refactor.
+
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,

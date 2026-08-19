@@ -2,6 +2,8 @@
 #define COMMON_H
 
 #define BASIKA_VERSION "0.99.2"
+#define BASIC_STRING_MAX 512
+#define BASIC_TOKEN_TEXT_MAX 4096
 
 typedef enum {
     TOKEN_NUMBER, TOKEN_STRING, TOKEN_IDENTIFIER,
@@ -44,7 +46,7 @@ typedef enum {
 
 typedef struct {
     TokenType type;
-    char text[256];
+    char text[BASIC_TOKEN_TEXT_MAX];
     int int_val;
     double double_val;
     int is_double;
