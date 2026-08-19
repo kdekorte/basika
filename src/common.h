@@ -65,11 +65,17 @@ typedef struct Statement {
 
 // Simple variable storage
 typedef struct {
+    unsigned char *data;
+    size_t length;
+    size_t capacity;
+} BasicString;
+
+typedef struct {
     char name[32];
     double value;
-    char *s_value;
+    BasicString *s_value;
     double *array;
-    char **s_array;
+    BasicString **s_array;
     int array_size;
     int num_dims;
     int dims[3];  // Support up to 3D arrays

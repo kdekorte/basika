@@ -523,6 +523,31 @@ static int is_string_var(const char *name) {
 // Forward declaration for is_string_token (used in parse_string_expression_tok)
 static int is_string_token(Token t);
 
+static BasicString *basic_string_create(const void *data, size_t length) {
+    BasicString *value = malloc(sizeof(*value));
+    if (!value) return NULL;
+    value->capacity = length + 1;
+    value->data = malloc(value->capacity);
+    if (!value->data) {
+        free(value);
+        return NULL;
+    }
+    if (data && length) memcpy(value->data, data, length);
+    value->data[length] = '\0';
+    value->length = length;
+    return value;
+}
+
+static void basic_string_destroy(BasicString *value) {
+    if (!value) return;
+    free(value->data);
+    free(value);
+}
+
+static BasicString *basic_string_from_cstr(const char *value) {
+    return basic_string_create(value ? value : "", value ? strlen(value) : 0);
+}
+
 static int deflate_string(const char *input, char *output, int output_size) {
     uLong source_len = (uLong)strlen(input);
     Bytef compressed[BASIC_STRING_MAX];
@@ -959,10 +984,10 @@ static void get_string_variable_value(int idx, int array_idx, char *dest, int de
 
     if (array_idx >= 0) {
         if (vars[idx].s_array && array_idx >= 0 && array_idx < vars[idx].array_size && vars[idx].s_array[array_idx]) {
-            src = vars[idx].s_array[array_idx];
+            src = (const char *)vars[idx].s_array[array_idx]->data;
         }
     } else {
-        if (vars[idx].s_value) src = vars[idx].s_value;
+        if (vars[idx].s_value) src = (const char *)vars[idx].s_value->data;
     }
     strncpy(dest, src, dest_size - 1);
     dest[dest_size - 1] = '\0';
@@ -987,10 +1012,10 @@ static int get_string_variable_raw(int idx, int array_idx, char *dest, int dest_
     const char *src = "";
     if (array_idx >= 0) {
         if (vars[idx].s_array && array_idx >= 0 && array_idx < vars[idx].array_size && vars[idx].s_array[array_idx]) {
-            src = vars[idx].s_array[array_idx];
+            src = (const char *)vars[idx].s_array[array_idx]->data;
         }
     } else {
-        if (vars[idx].s_value) src = vars[idx].s_value;
+        if (vars[idx].s_value) src = (const char *)vars[idx].s_value->data;
     }
     int len = (int)strlen(src);
     if (len >= dest_size) len = dest_size - 1;
@@ -1554,11 +1579,11 @@ static void set_string_variable_with_align(int idx, int array_idx, const char *v
 
     if (array_idx >= 0) {
         if (!vars[idx].s_array || array_idx < 0 || array_idx >= vars[idx].array_size) return;
-        if (vars[idx].s_array[array_idx]) free(vars[idx].s_array[array_idx]);
-        vars[idx].s_array[array_idx] = strdup(value);
+        basic_string_destroy(vars[idx].s_array[array_idx]);
+        vars[idx].s_array[array_idx] = basic_string_from_cstr(value);
     } else {
-        if (vars[idx].s_value) free(vars[idx].s_value);
-        vars[idx].s_value = strdup(value);
+        basic_string_destroy(vars[idx].s_value);
+        vars[idx].s_value = basic_string_from_cstr(value);
     }
 }
 
@@ -1577,11 +1602,11 @@ static void trim_string(char *s) {
 static void assign_input_value(int idx, int array_idx, int is_string, const char *value) {
     if (is_string) {
         if (array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size) {
-            if (vars[idx].s_array[array_idx]) free(vars[idx].s_array[array_idx]);
-            vars[idx].s_array[array_idx] = strdup(value);
+            basic_string_destroy(vars[idx].s_array[array_idx]);
+            vars[idx].s_array[array_idx] = basic_string_from_cstr(value);
         } else {
-            if (vars[idx].s_value) free(vars[idx].s_value);
-            vars[idx].s_value = strdup(value);
+            basic_string_destroy(vars[idx].s_value);
+            vars[idx].s_value = basic_string_from_cstr(value);
         }
     } else {
         set_numeric_variable(idx, array_idx, atof(value));
@@ -1653,13 +1678,13 @@ static void clear_variables(int keep_registry) {
         }
         if (vars[i].s_array) {
             for (int j = 0; j < vars[i].array_size; j++) {
-                free(vars[i].s_array[j]);
+                basic_string_destroy(vars[i].s_array[j]);
             }
             free(vars[i].s_array);
             vars[i].s_array = NULL;
         }
         if (vars[i].s_value) {
-            free(vars[i].s_value);
+            basic_string_destroy(vars[i].s_value);
             vars[i].s_value = NULL;
         }
         vars[i].array_size = 0;
@@ -2933,9 +2958,9 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             if (a_idx1 == -1 && a_idx2 == -1) {
                 // Swapping entire variables/arrays
                 double tmp_val = vars[idx1].value; vars[idx1].value = vars[idx2].value; vars[idx2].value = tmp_val;
-                char *tmp_sval = vars[idx1].s_value; vars[idx1].s_value = vars[idx2].s_value; vars[idx2].s_value = tmp_sval;
+                BasicString *tmp_sval = vars[idx1].s_value; vars[idx1].s_value = vars[idx2].s_value; vars[idx2].s_value = tmp_sval;
                 double *tmp_arr = vars[idx1].array; vars[idx1].array = vars[idx2].array; vars[idx2].array = tmp_arr;
-                char **tmp_sarr = vars[idx1].s_array; vars[idx1].s_array = vars[idx2].s_array; vars[idx2].s_array = tmp_sarr;
+                BasicString **tmp_sarr = vars[idx1].s_array; vars[idx1].s_array = vars[idx2].s_array; vars[idx2].s_array = tmp_sarr;
                 int tmp_size = vars[idx1].array_size; vars[idx1].array_size = vars[idx2].array_size; vars[idx2].array_size = tmp_size;
                 int tmp_dims = vars[idx1].num_dims; vars[idx1].num_dims = vars[idx2].num_dims; vars[idx2].num_dims = tmp_dims;
                 for (int i = 0; i < 3; i++) {
@@ -3246,13 +3271,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (is_string_var(var.text)) {
                     // erase string variable or string array element
                     if (array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size) {
-                        if (vars[idx].s_array[array_idx]) free(vars[idx].s_array[array_idx]);
+                        basic_string_destroy(vars[idx].s_array[array_idx]);
                         vars[idx].s_array[array_idx] = NULL;
                     } else if (vars[idx].s_array) {
                         // ERASE S$ with no index on a string array: release all memory
                         for (int i = 0; i < vars[idx].array_size; i++) {
                             if (vars[idx].s_array[i]) {
-                                free(vars[idx].s_array[i]);
+                                basic_string_destroy(vars[idx].s_array[i]);
                             }
                         }
                         free(vars[idx].s_array);
@@ -3260,7 +3285,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         vars[idx].array_size = 0;
                         vars[idx].num_dims = 0;
                     } else if (array_idx == -1) { // Scalar string variable
-                        if (vars[idx].s_value) free(vars[idx].s_value);
+                        basic_string_destroy(vars[idx].s_value);
                         vars[idx].s_value = NULL;
                     }
                 } else {
@@ -3454,7 +3479,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         report_runtime_error(ERR_DUPLICATE_DEFINITION);
                         break;
                     }
-                    vars[idx].s_array = calloc(total_size, sizeof(char*));
+                    vars[idx].s_array = calloc(total_size, sizeof(BasicString *));
                 } else {
                     if (vars[idx].array) {
                         report_runtime_error(ERR_DUPLICATE_DEFINITION);
