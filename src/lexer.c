@@ -32,6 +32,7 @@ static const KeywordMap keyword_table[] = {
     {"CVS", TOKEN_CVS},
     {"DATA", TOKEN_DATA},
     {"DATE$", TOKEN_DATE},
+    {"_DEFLATE$", TOKEN_DEFLATE},
     {"DEF", TOKEN_DEF},
     {"DEFDBL", TOKEN_DEFDBL},
     {"DEFINT", TOKEN_DEFINT},
@@ -155,6 +156,7 @@ static const KeywordMap keyword_table[] = {
     {"_PRINTSTRING", TOKEN_PRINTSTRING},
     {"_PRINTWIDTH", TOKEN_PRINTWIDTH},
     {"_PUTIMAGE", TOKEN_PUTIMAGE},
+    {"_INFLATE$", TOKEN_INFLATE},
 };
 
 

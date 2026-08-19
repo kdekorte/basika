@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -O3 -march=native -Wall -Wextra -I./src $(shell pkg-config --cflags sdl3 sdl3-ttf sdl3-mixer sdl3-image)
-LDFLAGS = $(shell pkg-config --libs sdl3 sdl3-ttf sdl3-mixer sdl3-image) -lm
+LDFLAGS = $(shell pkg-config --libs sdl3 sdl3-ttf sdl3-mixer sdl3-image) -lz -lm
 
 PREFIX ?= /usr/local
 DESTDIR ?=

@@ -19,7 +19,8 @@ The following is the complete keyword set recognized by the lexer:
 `SPC`, `SQR`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_FONT`, `_FREEFONT`, `_FREEIMAGE`,
-`_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`.
+`_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
+`_DEFLATE$`, `_INFLATE$`.
 
 ## Line Numbers and Labels
 
@@ -121,6 +122,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `_LOADIMAGE("filename", mode)`: Loads an image file and returns a numeric image handle. The optional mode is accepted for QB64 compatibility.
 - `_PUTIMAGE (x1,y1), handle`: Draws an image at the destination position. A destination rectangle can be supplied as `(x1,y1)-(x2,y2)` to scale the image; source rectangles are supported with the corresponding QB64 syntax.
 - `_FREEIMAGE handle`: Releases a loaded image handle so its texture resources can be reused.
+- `_DEFLATE$(text$)`: Compresses a string with zlib and returns a lossless encoded compressed string.
+- `_INFLATE$(data$)`: Decompresses a string returned by `_DEFLATE$`; invalid input returns an empty string.
 
 ## Numeric Functions
 - `ABS(n)`, `SQR(n)`, `SIN(n)`, `COS(n)`, `TAN(n)`, `ATN(n)`

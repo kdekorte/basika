@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/select.h>
+#include <zlib.h>
 #include "interpreter.h"
 #include "lexer.h"
 #include "program.h"
@@ -521,6 +522,49 @@ static int is_string_var(const char *name) {
 
 // Forward declaration for is_string_token (used in parse_string_expression_tok)
 static int is_string_token(Token t);
+
+static int deflate_string(const char *input, char *output, int output_size) {
+    uLong source_len = (uLong)strlen(input);
+    Bytef compressed[256];
+    uLong compressed_len = sizeof(compressed);
+    if (compress2(compressed, &compressed_len, (const Bytef *)input, source_len, Z_DEFAULT_COMPRESSION) != Z_OK ||
+        compressed_len * 2 + 1 >= (uLong)output_size) {
+        output[0] = '\0';
+        return 0;
+    }
+    static const char hex[] = "0123456789ABCDEF";
+    for (uLong i = 0; i < compressed_len; i++) {
+        output[i * 2] = hex[compressed[i] >> 4];
+        output[i * 2 + 1] = hex[compressed[i] & 15];
+    }
+    output[compressed_len * 2] = '\0';
+    return (int)(compressed_len * 2);
+}
+
+static int inflate_string(const char *input, char *output, int output_size) {
+    size_t encoded_len = strlen(input);
+    if (encoded_len == 0 || (encoded_len % 2) != 0 || encoded_len / 2 > 256) {
+        output[0] = '\0';
+        return 0;
+    }
+    Bytef compressed[256];
+    for (size_t i = 0; i < encoded_len; i += 2) {
+        unsigned int byte = 0;
+        if (sscanf(input + i, "%2x", &byte) != 1) {
+            output[0] = '\0';
+            return 0;
+        }
+        compressed[i / 2] = (Bytef)byte;
+    }
+    uLong decompressed_len = (uLong)(output_size - 1);
+    int result = uncompress((Bytef *)output, &decompressed_len, compressed, (uLong)(encoded_len / 2));
+    if (result != Z_OK || decompressed_len >= (uLong)output_size) {
+        output[0] = '\0';
+        return 0;
+    }
+    output[decompressed_len] = '\0';
+    return (int)decompressed_len;
+}
 
 static unsigned int hash_name(const char *name) {
     unsigned int hash = 5381;
@@ -1037,6 +1081,17 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
             if (n < 0) n = 0; if (n > 255) n = 255;
             memset(term, c, n); term[n] = '\0';
+        } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
+            ts->pos++; // function
+            if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
+            char input[256] = "";
+            parse_string_expression_tok(ts, input, sizeof(input));
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            if (t.type == TOKEN_DEFLATE) {
+                deflate_string(input, term, sizeof(term));
+            } else {
+                inflate_string(input, term, sizeof(term));
+            }
         } else if (t.type == TOKEN_COMMANDS) {
             ts->pos++;
             strncpy(term, internal_command_line, sizeof(term) - 1);
@@ -1297,6 +1352,16 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
             get_next_token(input); // )
             if (n < 0) n = 0; if (n > 255) n = 255;
             memset(term, c, n); term[n] = '\0';
+        } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
+            get_next_token(input); // (
+            char source[256] = "";
+            parse_string_expression(input, source, sizeof(source));
+            get_next_token(input); // )
+            if (t.type == TOKEN_DEFLATE) {
+                deflate_string(source, term, sizeof(term));
+            } else {
+                inflate_string(source, term, sizeof(term));
+            }
         } else if (t.type == TOKEN_COMMANDS) {
             strncpy(term, internal_command_line, sizeof(term) - 1);
             term[sizeof(term) - 1] = '\0';
@@ -1641,7 +1706,7 @@ static int is_string_token(Token t) {
             t.type == TOKEN_TRIM || t.type == TOKEN_LTRIM || t.type == TOKEN_RTRIM ||
             t.type == TOKEN_STR || t.type == TOKEN_HEX || t.type == TOKEN_OCT ||
             t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD ||
-            t.type == TOKEN_STRING_FUNC || t.type == TOKEN_INKEY || t.type == TOKEN_GETS || t.type == TOKEN_ENVIRON ||
+            t.type == TOKEN_STRING_FUNC || t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE || t.type == TOKEN_INKEY || t.type == TOKEN_GETS || t.type == TOKEN_ENVIRON ||
             t.type == TOKEN_TIME || t.type == TOKEN_DATE || t.type == TOKEN_TAB ||
             t.type == TOKEN_SPACE || t.type == TOKEN_SPC ||
             t.type == TOKEN_ARGVS || t.type == TOKEN_COMMANDS);
