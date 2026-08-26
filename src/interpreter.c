@@ -578,6 +578,60 @@ int basic_string_append(BasicString *target, const void *data, size_t length) {
     return 1;
 }
 
+static int append_string_variable_value(BasicString *target, int idx, int array_idx) {
+    if (idx < 0 || idx >= var_count) return 0;
+    BasicString *value = array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size
+        ? vars[idx].s_array[array_idx] : vars[idx].s_value;
+    if (!value) return 1;
+    return basic_string_append(target, value->data, value->length);
+}
+
+static int parse_dynamic_string_expression(const char **input, BasicString *out) {
+    int parsed = 0;
+    while (1) {
+        const char *saved = *input;
+        Token token = get_next_token(input);
+        int term_parsed = 0;
+        if (token.type == TOKEN_STRING) {
+            term_parsed = basic_string_append(out, token.text, strlen(token.text));
+        } else if (token.type == TOKEN_IDENTIFIER && is_string_var(token.text)) {
+            int idx = find_variable(token.text);
+            int array_idx = parse_array_index(input, idx);
+            term_parsed = append_string_variable_value(out, idx, array_idx);
+        } else if (token.type == TOKEN_STRING_FUNC) {
+            Token open = get_next_token(input);
+            if (open.type != TOKEN_LPAREN) { *input = saved; break; }
+            int count = (int)evaluate_expression(input);
+            if (get_next_token(input).type != TOKEN_COMMA) { *input = saved; break; }
+            Token value_token = get_next_token(input);
+            int character;
+            if (value_token.type == TOKEN_NUMBER) character = (int)value_token.double_val;
+            else if (value_token.type == TOKEN_STRING && value_token.text[0]) character = (unsigned char)value_token.text[0];
+            else { *input = saved; break; }
+            if (get_next_token(input).type != TOKEN_RPAREN || count < 0) { *input = saved; break; }
+            unsigned char block[256];
+            memset(block, character & 0xFF, sizeof(block));
+            while (count > 0) {
+                size_t chunk = count < (int)sizeof(block) ? (size_t)count : sizeof(block);
+                if (!basic_string_append(out, block, chunk)) return 0;
+                count -= (int)chunk;
+            }
+            term_parsed = 1;
+        }
+        if (!term_parsed) {
+            *input = saved;
+            break;
+        }
+        parsed = 1;
+        const char *separator = *input;
+        if (get_next_token(input).type != TOKEN_PLUS) {
+            *input = separator;
+            break;
+        }
+    }
+    return parsed;
+}
+
 static void basic_string_destroy(BasicString *value) {
     if (!value) return;
     free(value->data);
@@ -1686,6 +1740,16 @@ static void execute_assignment(const char **input, Token var_token) {
     }
 
     if (is_string_var(var_token.text)) {
+        BasicString dynamic_value = {0};
+        const char *dynamic_saved = *input;
+        if (parse_dynamic_string_expression(input, &dynamic_value)) {
+            BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
+            basic_string_assign(target, dynamic_value.data, dynamic_value.length);
+            free(dynamic_value.data);
+            return;
+        }
+        *input = dynamic_saved;
+        free(dynamic_value.data);
         char value[BASIC_STRING_MAX] = "";
         const char *expr_saved = *input;
         Token tok = get_next_token(input);
