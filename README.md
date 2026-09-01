@@ -99,6 +99,17 @@ Run the repository test suite:
 make test
 ```
 
+## Dynamic Strings
+
+String variables use heap-backed storage and grow automatically as values are
+assigned, concatenated, or returned from string functions. Multi-megabyte
+values are supported by default; fixed-length `STRING * n` declarations are
+not currently implemented.
+
+`_DEFLATE$` and `_INFLATE$` support lossless compression and decompression of
+dynamic strings, including multi-megabyte round trips. Coverage for dynamic
+growth, string functions, and compression is included in `make test`.
+
 ## Supported features
 
 Basika supports a wide range of IBM BASICA-compatible commands, including file I/O,

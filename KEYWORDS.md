@@ -4,9 +4,9 @@
 
 The following is the complete keyword set recognized by the lexer:
 
-String values currently support up to 511 characters through the interpreter's
-stack-based expression parser. Larger QB64-style strings require a future
-length-aware heap-backed parser refactor.
+String values use length-aware heap-backed storage and grow dynamically as
+needed. Dynamic strings are the default; fixed-length `STRING * n` declarations
+are not currently implemented.
 
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
@@ -126,8 +126,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `_LOADIMAGE("filename", mode)`: Loads an image file and returns a numeric image handle. The optional mode is accepted for QB64 compatibility.
 - `_PUTIMAGE (x1,y1), handle`: Draws an image at the destination position. A destination rectangle can be supplied as `(x1,y1)-(x2,y2)` to scale the image; source rectangles are supported with the corresponding QB64 syntax.
 - `_FREEIMAGE handle`: Releases a loaded image handle so its texture resources can be reused.
-- `_DEFLATE$(text$)`: Compresses a string with zlib and returns a lossless encoded compressed string.
-- `_INFLATE$(data$)`: Decompresses a string returned by `_DEFLATE$`; invalid input returns an empty string.
+- `_DEFLATE$(text$)`: Compresses a dynamic string with zlib and returns a lossless encoded compressed string.
+- `_INFLATE$(data$)`: Decompresses a string returned by `_DEFLATE$`, including multi-megabyte values; invalid input returns an empty string.
 
 ## Numeric Functions
 - `ABS(n)`, `SQR(n)`, `SIN(n)`, `COS(n)`, `TAN(n)`, `ATN(n)`
@@ -147,6 +147,10 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `VARPTR(var)`: Address of a variable.
 
 ## String Functions
+
+All string variables are dynamic and may grow beyond the legacy parser buffer
+size. String functions preserve the full value when assigning or returning
+dynamic strings.
 - `CHR$(n)`: Character from ASCII code.
 - `COMMAND$`: Returns the command-line tail passed to the program.
 - `DATE$`: Current system date.

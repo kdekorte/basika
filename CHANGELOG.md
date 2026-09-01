@@ -2,6 +2,14 @@
 
 All notable changes to this project are recorded in this file.
 
+## 2026-09-01
+
+- **Dynamic Strings**: Added length-aware heap-backed string storage with automatic growth for scalar strings, string arrays, assignments, concatenation, and string functions.
+- **Large-String Compression**: Updated `_DEFLATE$` and `_INFLATE$` to use dynamic buffers and support multi-megabyte round trips.
+- **Parser Compatibility**: Preserved FIELD, DATA/READ, command-line strings, numeric `STRING$` arguments, and string comparisons while removing fixed temporary-buffer limits from dynamic paths.
+- **Performance**: Kept token storage compact to avoid slowing numeric programs.
+- **Testing**: Added dynamic growth, large-string function, and compression round-trip regressions to `make test`.
+
 ## 2026-08-19
 
 - **Image Functions**: Added `_LOADIMAGE`, `_PUTIMAGE`, and `_FREEIMAGE` using SDL3_image textures with numeric handles, alpha blending, scaling, and resource cleanup.
@@ -12,7 +20,7 @@ All notable changes to this project are recorded in this file.
 - **Image Demo Asset**: Replaced the weak screenshot fixture with a colorful BMP asset that makes full-image, scaled, and cropped `_PUTIMAGE` output easier to compare.
 - **Parser Fixes**: Fixed `_PUTIMAGE` lookahead so a successful draw does not leave the command parser positioned at the wrong token boundary. Added Makefile header dependencies to avoid stale token enum objects.
 - **Demo Corrections**: Kept `randomtext.bas` within the active `SCREEN 12` text area and restored bright text before its completion message.
-- **String Buffers**: Increased practical parser string capacity from 255 to 511 characters and added long-string compression coverage; full QB64-scale binary strings remain future work.
+- **String Buffers**: Increased practical parser string capacity from 255 to 511 characters and added long-string compression coverage. This was superseded by the heap-backed dynamic string implementation above.
 
 ## 2026-07-06
 
