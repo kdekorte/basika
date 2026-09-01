@@ -273,6 +273,7 @@ static int arrays_dimensioned = 0;
 static Statement *data_stmt = NULL;
 static const char *data_ptr = NULL;
 static int parse_string_expression(const char **input, char *out, int out_size);
+static int parse_string_expression_heap(const char **input, BasicString *out);
 static int is_string_var(const char *name);
 static int parse_array_index(const char **input, int var_idx);
 static int parse_array_index_tok(TokenStream *ts, int var_idx);
@@ -673,47 +674,67 @@ static void basic_string_release(BasicString *value) {
     value->capacity = 0;
 }
 
-static int deflate_string(const char *input, char *output, int output_size) {
-    uLong source_len = (uLong)strlen(input);
-    Bytef compressed[BASIC_STRING_MAX];
-    uLong compressed_len = sizeof(compressed);
-    if (compress2(compressed, &compressed_len, (const Bytef *)input, source_len, Z_DEFAULT_COMPRESSION) != Z_OK ||
-        compressed_len * 2 + 1 >= (uLong)output_size) {
-        output[0] = '\0';
+static int basic_string_deflate(const BasicString *input, BasicString *output) {
+    if (!input || !output) return 0;
+    uLong compressed_capacity = compressBound((uLong)input->length);
+    Bytef *compressed = malloc(compressed_capacity);
+    if (!compressed) return 0;
+    uLong compressed_len = compressed_capacity;
+    int result = compress2(compressed, &compressed_len, input->data,
+                           (uLong)input->length, Z_DEFAULT_COMPRESSION);
+    if (result != Z_OK || compressed_len > (SIZE_MAX - 1) / 2) {
+        free(compressed);
+        return 0;
+    }
+    if (!basic_string_reserve(output, (size_t)compressed_len * 2 + 1)) {
+        free(compressed);
         return 0;
     }
     static const char hex[] = "0123456789ABCDEF";
     for (uLong i = 0; i < compressed_len; i++) {
-        output[i * 2] = hex[compressed[i] >> 4];
-        output[i * 2 + 1] = hex[compressed[i] & 15];
+        output->data[i * 2] = hex[compressed[i] >> 4];
+        output->data[i * 2 + 1] = hex[compressed[i] & 15];
     }
-    output[compressed_len * 2] = '\0';
-    return (int)(compressed_len * 2);
+    output->length = (size_t)compressed_len * 2;
+    output->data[output->length] = '\0';
+    free(compressed);
+    return 1;
 }
 
-static int inflate_string(const char *input, char *output, int output_size) {
-    size_t encoded_len = strlen(input);
-    if (encoded_len == 0 || (encoded_len % 2) != 0 || encoded_len / 2 > BASIC_STRING_MAX / 2) {
-        output[0] = '\0';
-        return 0;
-    }
-    Bytef compressed[BASIC_STRING_MAX / 2];
+static int basic_string_inflate(const BasicString *input, BasicString *output) {
+    if (!input || !output || input->length == 0 || (input->length % 2) != 0) return 0;
+    size_t encoded_len = input->length;
+    Bytef *compressed = malloc(encoded_len / 2);
+    if (!compressed) return 0;
     for (size_t i = 0; i < encoded_len; i += 2) {
         unsigned int byte = 0;
-        if (sscanf(input + i, "%2x", &byte) != 1) {
-            output[0] = '\0';
+        if (sscanf((const char *)input->data + i, "%2x", &byte) != 1) {
+            free(compressed);
             return 0;
         }
         compressed[i / 2] = (Bytef)byte;
     }
-    uLong decompressed_len = (uLong)(output_size - 1);
-    int result = uncompress((Bytef *)output, &decompressed_len, compressed, (uLong)(encoded_len / 2));
-    if (result != Z_OK || decompressed_len >= (uLong)output_size) {
-        output[0] = '\0';
-        return 0;
+    size_t capacity = encoded_len > 1 ? encoded_len : 16;
+    while (1) {
+        if (!basic_string_reserve(output, capacity + 1)) {
+            free(compressed);
+            return 0;
+        }
+        uLong decompressed_len = (uLong)capacity;
+        int result = uncompress(output->data, &decompressed_len, compressed,
+                                (uLong)(encoded_len / 2));
+        if (result == Z_OK) {
+            output->length = (size_t)decompressed_len;
+            output->data[output->length] = '\0';
+            free(compressed);
+            return 1;
+        }
+        if (result != Z_BUF_ERROR || capacity > SIZE_MAX / 2) {
+            free(compressed);
+            return 0;
+        }
+        capacity *= 2;
     }
-    output[decompressed_len] = '\0';
-    return (int)decompressed_len;
 }
 
 static unsigned int hash_name(const char *name) {
@@ -1244,13 +1265,12 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             BasicString input = {0};
             if (!parse_string_expression_tok_heap(ts, &input)) return 0;
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-            char outbuf[BASIC_STRING_MAX] = "";
-            if (t.type == TOKEN_DEFLATE) {
-                deflate_string((const char *)input.data, outbuf, sizeof(outbuf));
-            } else {
-                inflate_string((const char *)input.data, outbuf, sizeof(outbuf));
-            }
-            basic_string_append(&term, outbuf, strlen(outbuf));
+            BasicString output = {0};
+            int ok = t.type == TOKEN_DEFLATE
+                ? basic_string_deflate(&input, &output)
+                : basic_string_inflate(&input, &output);
+            if (ok) basic_string_append(&term, output.data, output.length);
+            basic_string_release(&output);
             basic_string_release(&input);
         } else if (t.type == TOKEN_COMMANDS) {
             ts->pos++;
@@ -1549,16 +1569,16 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             basic_string_release(&arg_buf);
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             get_next_token(input);
-            char source[BASIC_STRING_MAX] = "";
-            parse_string_expression(input, source, sizeof(source));
+            BasicString source = {0};
+            parse_string_expression_heap(input, &source);
             get_next_token(input);
-            char term_buf[BASIC_STRING_MAX] = "";
-            if (t.type == TOKEN_DEFLATE) {
-                deflate_string(source, term_buf, sizeof(term_buf));
-            } else {
-                inflate_string(source, term_buf, sizeof(term_buf));
-            }
-            basic_string_append(&term, term_buf, strlen(term_buf));
+            BasicString output = {0};
+            int ok = t.type == TOKEN_DEFLATE
+                ? basic_string_deflate(&source, &output)
+                : basic_string_inflate(&source, &output);
+            if (ok) basic_string_append(&term, output.data, output.length);
+            basic_string_release(&output);
+            basic_string_release(&source);
         } else if (t.type == TOKEN_COMMANDS) {
             basic_string_append(&term, internal_command_line, strlen(internal_command_line));
         } else if (t.type == TOKEN_ARGVS) {
@@ -4792,10 +4812,11 @@ void run_program() {
                             BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
                             basic_string_assign(target, value.data, value.length);
                         } else {
-                            char fallback[BASIC_STRING_MAX] = "";
+                            basic_string_release(&value);
                             temp_ptr = ts.tokens[ts.pos].start_ptr;
-                            parse_string_expression(&temp_ptr, fallback, sizeof(fallback));
-                            set_string_variable(idx, array_idx, fallback);
+                            parse_string_expression_heap(&temp_ptr, &value);
+                            BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
+                            basic_string_assign(target, value.data, value.length);
                         }
                         basic_string_release(&value);
                         // Sync ts.pos
