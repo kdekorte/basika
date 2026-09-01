@@ -67,6 +67,7 @@ typedef struct {
 } FileFieldState;
 
 static FileFieldState file_field_state[16];
+static int get_field_binding_for_var(int idx, int array_idx, int *out_fnum, FieldBinding *out_binding);
 
 static unsigned int rnd_seed = 1;
 static double last_rnd_value = 0.0;
@@ -580,6 +581,19 @@ int basic_string_append(BasicString *target, const void *data, size_t length) {
 
 static int append_string_variable_value(BasicString *target, int idx, int array_idx) {
     if (idx < 0 || idx >= var_count) return 0;
+    int fnum = 0;
+    FieldBinding binding;
+    if (get_field_binding_for_var(idx, array_idx, &fnum, &binding)) {
+        FileFieldState *state = &file_field_state[fnum];
+        if (state->buffer && binding.offset >= 0 && binding.offset < state->size) {
+            int length = binding.len;
+            if (binding.offset + length > state->size) length = state->size - binding.offset;
+            if (length > 0) {
+                return basic_string_append(target, state->buffer + binding.offset, (size_t)length);
+            }
+        }
+        return 1;
+    }
     BasicString *value = array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size
         ? vars[idx].s_array[array_idx] : vars[idx].s_value;
     if (!value) return 1;
@@ -598,6 +612,18 @@ static int parse_dynamic_string_expression(const char **input, BasicString *out)
             int idx = find_variable(token.text);
             int array_idx = parse_array_index(input, idx);
             term_parsed = append_string_variable_value(out, idx, array_idx);
+        } else if (token.type == TOKEN_COMMANDS) {
+            term_parsed = basic_string_append(out, internal_command_line, strlen(internal_command_line));
+        } else if (token.type == TOKEN_ARGVS) {
+            Token open = get_next_token(input);
+            int index = (int)evaluate_expression(input);
+            Token close = get_next_token(input);
+            if (open.type == TOKEN_LPAREN && close.type == TOKEN_RPAREN &&
+                index >= 0 && index < internal_argc && internal_argv) {
+                term_parsed = basic_string_append(out, internal_argv[index], strlen(internal_argv[index]));
+            } else {
+                *input = saved;
+            }
         } else if (token.type == TOKEN_STRING_FUNC) {
             Token open = get_next_token(input);
             if (open.type != TOKEN_LPAREN) { *input = saved; break; }
@@ -636,6 +662,14 @@ static void basic_string_destroy(BasicString *value) {
     if (!value) return;
     free(value->data);
     free(value);
+}
+
+static void basic_string_release(BasicString *value) {
+    if (!value) return;
+    free(value->data);
+    value->data = NULL;
+    value->length = 0;
+    value->capacity = 0;
 }
 
 static int deflate_string(const char *input, char *output, int output_size) {
@@ -1120,117 +1154,135 @@ static void append_string_value(char *dest, const char *src, int dest_size) {
     strncat(dest, src, dest_size - 1 - used);
 }
 
-static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size) {
-    out[0] = '\0';
-    int first = 1;
+static void basic_string_to_buffer(const BasicString *src, char *out, int out_size) {
+    if (!out || out_size <= 0) return;
+    size_t len = src ? src->length : 0;
+    if (len >= (size_t)out_size) len = (size_t)out_size - 1;
+    if (len > 0 && src && src->data) memcpy(out, src->data, len);
+    out[len] = '\0';
+}
+
+static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
+    int parsed = 0;
 
     while (1) {
-        char term[BASIC_STRING_MAX] = "";
+        BasicString term = {0};
         Token t = ts->tokens[ts->pos];
 
         if (t.type == TOKEN_CHR || t.type == TOKEN_TAB) {
-            ts->pos++; // chr/tab
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             double arg = evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (t.type == TOKEN_CHR) {
-                term[0] = (unsigned char)((int)arg & 0xFF);
-                term[1] = '\0';
+                char c = (char)((int)arg & 0xFF);
+                basic_string_append(&term, &c, 1);
             } else {
                 int w = (int)arg; if (w < 0) w = 0; if (w >= 255) w = 255;
-                memset(term, ' ', w); term[w] = '\0';
+                char *block = malloc((size_t)(w > 0 ? w : 1));
+                if (!block) return 0;
+                memset(block, ' ', (size_t)w);
+                basic_string_append(&term, block, (size_t)w);
+                free(block);
             }
         } else if (t.type == TOKEN_LEFT || t.type == TOKEN_RIGHT || t.type == TOKEN_MID) {
             TokenType ft = t.type;
-            ts->pos++; // func
-            ts->pos++; // (
-            char base[BASIC_STRING_MAX] = "";
-            parse_string_expression_tok(ts, base, sizeof(base));
-            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++; // ,
+            ts->pos++;
+            ts->pos++;
+            BasicString base = {0};
+            if (!parse_string_expression_tok_heap(ts, &base)) return 0;
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             int n1 = (int)evaluate_expression_tok(ts);
             int n2 = -1;
-            if (ft == TOKEN_MID) {
-                if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
-                    ts->pos++;
-                    n2 = (int)evaluate_expression_tok(ts);
-                }
+            if (ft == TOKEN_MID && ts->tokens[ts->pos].type == TOKEN_COMMA) {
+                ts->pos++;
+                n2 = (int)evaluate_expression_tok(ts);
             }
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
-            int slen = (int)strlen(base);
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            int slen = (int)base.length;
             if (ft == TOKEN_LEFT) {
                 int cnt = (n1 < 0) ? 0 : (n1 > slen ? slen : n1);
-                strncpy(term, base, cnt); term[cnt] = '\0';
+                if (cnt > 0) basic_string_append(&term, base.data, (size_t)cnt);
             } else if (ft == TOKEN_RIGHT) {
                 int cnt = (n1 < 0) ? 0 : (n1 > slen ? slen : n1);
-                strncpy(term, base + (slen - cnt > 0 ? slen - cnt : 0), cnt); term[cnt] = '\0';
-            } else { // MID
+                if (cnt > 0) basic_string_append(&term, base.data + (slen - cnt > 0 ? slen - cnt : 0), (size_t)cnt);
+            } else {
                 int start = n1 - 1; if (start < 0) start = 0;
-                if (start >= slen) term[0] = '\0';
-                else {
+                if (start < slen) {
                     int cnt = (n2 == -1) ? (slen - start) : n2;
                     if (cnt < 0) cnt = 0; if (start + cnt > slen) cnt = slen - start;
-                    strncpy(term, base + start, cnt); term[cnt] = '\0';
+                    if (cnt > 0) basic_string_append(&term, base.data + start, (size_t)cnt);
                 }
             }
+            basic_string_release(&base);
         } else if (t.type == TOKEN_SPACE || t.type == TOKEN_SPC) {
-            ts->pos++; // space/spc
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             int n = (int)evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
-            if (n < 0) n = 0; if (n > 255) n = 255;
-            memset(term, ' ', n); term[n] = '\0';
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            if (n < 0) n = 0;
+            char *block = malloc((size_t)(n > 0 ? n : 1));
+            if (!block) return 0;
+            memset(block, ' ', (size_t)n);
+            basic_string_append(&term, block, (size_t)n);
+            free(block);
         } else if (t.type == TOKEN_STRING_FUNC) {
-            ts->pos++; // string$
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             int n = (int)evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++; // ,
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             char c = ' ';
-            char arg_buf[BASIC_STRING_MAX] = "";
-            int is_str = is_string_token(ts->tokens[ts->pos]);
-            if (is_str) {
-                parse_string_expression_tok(ts, arg_buf, sizeof(arg_buf));
-                if (arg_buf[0]) c = arg_buf[0];
+            BasicString arg_buf = {0};
+            if (is_string_token(ts->tokens[ts->pos])) {
+                if (!parse_string_expression_tok_heap(ts, &arg_buf)) return 0;
+                if (arg_buf.length > 0) c = arg_buf.data[0];
             } else {
                 c = (char)evaluate_expression_tok(ts);
             }
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
-            if (n < 0) n = 0; if (n > 255) n = 255;
-            memset(term, c, n); term[n] = '\0';
-        } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
-            ts->pos++; // function
-            if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
-            char input[BASIC_STRING_MAX] = "";
-            parse_string_expression_tok(ts, input, sizeof(input));
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            if (n < 0) n = 0;
+            char *block = malloc((size_t)(n > 0 ? n : 1));
+            if (!block) return 0;
+            memset(block, c, (size_t)n);
+            basic_string_append(&term, block, (size_t)n);
+            free(block);
+            basic_string_release(&arg_buf);
+        } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
+            ts->pos++;
+            if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
+            BasicString input = {0};
+            if (!parse_string_expression_tok_heap(ts, &input)) return 0;
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            char outbuf[BASIC_STRING_MAX] = "";
             if (t.type == TOKEN_DEFLATE) {
-                deflate_string(input, term, sizeof(term));
+                deflate_string((const char *)input.data, outbuf, sizeof(outbuf));
             } else {
-                inflate_string(input, term, sizeof(term));
+                inflate_string((const char *)input.data, outbuf, sizeof(outbuf));
             }
+            basic_string_append(&term, outbuf, strlen(outbuf));
+            basic_string_release(&input);
         } else if (t.type == TOKEN_COMMANDS) {
             ts->pos++;
-            strncpy(term, internal_command_line, sizeof(term) - 1);
-            term[sizeof(term) - 1] = '\0';
+            basic_string_append(&term, internal_command_line, strlen(internal_command_line));
         } else if (t.type == TOKEN_ARGVS) {
-            ts->pos++; // argv$
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             int idx = (int)evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (idx >= 0 && idx < internal_argc && internal_argv) {
-                strncpy(term, internal_argv[idx], sizeof(term) - 1);
-                term[sizeof(term) - 1] = '\0';
+                basic_string_append(&term, internal_argv[idx], strlen(internal_argv[idx]));
             }
         } else if (t.type == TOKEN_GETS) {
-            ts->pos++; // get$
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             int fnum = -1;
             if (ts->tokens[ts->pos].type == TOKEN_HASH) ts->pos++;
             fnum = (int)evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++; // ,
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             int rec = (int)evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++; // ,
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             int len = (int)evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                 report_runtime_error(ERR_BAD_FILE_NUMBER);
                 return 0;
@@ -1245,84 +1297,82 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
             buf[len] = '\0';
             int trim = len - 1;
             while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
-            strncpy(term, buf, sizeof(term) - 1);
-            term[sizeof(term) - 1] = '\0';
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_INKEY) {
             ts->pos++;
             if (graphics_is_active()) {
                 update_graphics();
                 int c = get_graphics_char();
-                if (c) {
-                    term[0] = (char)c;
-                    term[1] = '\0';
-                }
+                if (c) basic_string_append(&term, (char[]){(char)c, '\0'}, 1);
             } else {
                 int c = get_stdin_char();
-                if (c) {
-                    term[0] = (char)c;
-                    term[1] = '\0';
-                }
+                if (c) basic_string_append(&term, (char[]){(char)c, '\0'}, 1);
             }
         } else if (t.type == TOKEN_UCASE || t.type == TOKEN_LCASE || t.type == TOKEN_TRIM || t.type == TOKEN_LTRIM || t.type == TOKEN_RTRIM) {
             TokenType ft = t.type;
-            ts->pos++; // func
-            ts->pos++; // (
-            char base[BASIC_STRING_MAX] = "";
-            parse_string_expression_tok(ts, base, sizeof(base));
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            ts->pos++;
+            ts->pos++;
+            BasicString base = {0};
+            if (!parse_string_expression_tok_heap(ts, &base)) return 0;
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (ft == TOKEN_UCASE) {
-                for (int i = 0; base[i]; i++) base[i] = toupper((unsigned char)base[i]);
+                for (int i = 0; i < (int)base.length; i++) base.data[i] = toupper((unsigned char)base.data[i]);
             } else if (ft == TOKEN_LCASE) {
-                for (int i = 0; base[i]; i++) base[i] = tolower((unsigned char)base[i]);
+                for (int i = 0; i < (int)base.length; i++) base.data[i] = tolower((unsigned char)base.data[i]);
             } else if (ft == TOKEN_TRIM) {
-                int start = 0, end = (int)strlen(base) - 1;
-                while (start <= end && isspace((unsigned char)base[start])) start++;
-                while (end >= start && isspace((unsigned char)base[end])) end--;
+                int start = 0, end = (int)base.length - 1;
+                while (start <= end && isspace((unsigned char)base.data[start])) start++;
+                while (end >= start && isspace((unsigned char)base.data[end])) end--;
                 int len = (end >= start) ? (end - start + 1) : 0;
-                memmove(base, base + start, len);
-                base[len] = '\0';
+                if (len > 0) memmove(base.data, base.data + start, (size_t)len);
+                base.data[len] = '\0';
+                base.length = (size_t)len;
             } else if (ft == TOKEN_LTRIM) {
                 int start = 0;
-                while (base[start] && isspace((unsigned char)base[start])) start++;
+                while (start < (int)base.length && isspace((unsigned char)base.data[start])) start++;
                 if (start > 0) {
-                    int len = (int)strlen(base + start);
-                    memmove(base, base + start, len + 1);
+                    int len = (int)base.length - start;
+                    memmove(base.data, base.data + start, (size_t)len);
+                    base.data[len] = '\0';
+                    base.length = (size_t)len;
                 }
             } else if (ft == TOKEN_RTRIM) {
-                int end = (int)strlen(base) - 1;
-                while (end >= 0 && isspace((unsigned char)base[end])) end--;
-                base[end + 1] = '\0';
+                int end = (int)base.length - 1;
+                while (end >= 0 && isspace((unsigned char)base.data[end])) end--;
+                base.data[end + 1] = '\0';
+                base.length = (size_t)(end + 1);
             }
-            strncpy(term, base, sizeof(term) - 1);
-            term[sizeof(term) - 1] = '\0';
+            basic_string_append(&term, base.data, base.length);
+            basic_string_release(&base);
         } else if (t.type == TOKEN_HEX || t.type == TOKEN_OCT) {
-            ts->pos++; // func
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             double val = evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             int intval = (int)val;
-            if (t.type == TOKEN_HEX) snprintf(term, sizeof(term), "%X", intval);
-            else snprintf(term, sizeof(term), "%o", intval);
+            char buf[128];
+            if (t.type == TOKEN_HEX) snprintf(buf, sizeof(buf), "%X", intval);
+            else snprintf(buf, sizeof(buf), "%o", intval);
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_TIME || t.type == TOKEN_DATE) {
             ts->pos++;
             time_t rawtime;
             struct tm *timeinfo;
             time(&rawtime);
             timeinfo = localtime(&rawtime);
-            if (t.type == TOKEN_TIME) {
-                strftime(term, sizeof(term), "%H:%M:%S", timeinfo);
-            } else {
-                strftime(term, sizeof(term), "%m-%d-%Y", timeinfo);
-            }
+            char buf[128];
+            if (t.type == TOKEN_TIME) strftime(buf, sizeof(buf), "%H:%M:%S", timeinfo);
+            else strftime(buf, sizeof(buf), "%m-%d-%Y", timeinfo);
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_ENVIRON) {
-            ts->pos++; // environ$
-            ts->pos++; // (
-            char arg_val[BASIC_STRING_MAX] = "";
+            ts->pos++;
+            ts->pos++;
+            BasicString arg_val = {0};
             int is_str = is_string_token(ts->tokens[ts->pos]);
             if (is_str) {
-                parse_string_expression_tok(ts, arg_val, sizeof(arg_val));
-                char *ev = getenv(arg_val);
-                if (ev) strncpy(term, ev, sizeof(term)-1);
+                if (!parse_string_expression_tok_heap(ts, &arg_val)) return 0;
+                char *ev = getenv((const char *)arg_val.data);
+                if (ev) basic_string_append(&term, ev, strlen(ev));
             } else {
                 double val = evaluate_expression_tok(ts);
                 int idx = (int)val;
@@ -1331,96 +1381,121 @@ static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size)
                     int count = 1;
                     for (char **e = environ; *e; e++, count++) {
                         if (count == idx) {
-                            strncpy(term, *e, sizeof(term)-1);
+                            basic_string_append(&term, *e, strlen(*e));
                             break;
                         }
                     }
                 }
             }
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            basic_string_release(&arg_val);
         } else if (t.type == TOKEN_STR) {
-            ts->pos++; // str$
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             double val = evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
-            if (val >= 0) snprintf(term, sizeof(term), " %g", val);
-            else snprintf(term, sizeof(term), "%g", val);
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            char buf[128];
+            if (val >= 0) snprintf(buf, sizeof(buf), " %g", val);
+            else snprintf(buf, sizeof(buf), "%g", val);
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
-            ts->pos++; // func
-            ts->pos++; // (
+            ts->pos++;
+            ts->pos++;
             double val = evaluate_expression_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (t.type == TOKEN_MKI) {
                 int ival = (int)val;
-                term[0] = (char)(ival & 0xFF);
-                term[1] = (char)((ival >> 8) & 0xFF);
-                term[2] = '\0';
+                char bytes[3];
+                bytes[0] = (char)(ival & 0xFF); bytes[1] = (char)((ival >> 8) & 0xFF); bytes[2] = '\0';
+                basic_string_append(&term, bytes, 2);
             } else if (t.type == TOKEN_MKS) {
                 float fval = (float)val;
-                memcpy(term, &fval, 4);
-                term[4] = '\0';
+                char bytes[5];
+                memcpy(bytes, &fval, 4); bytes[4] = '\0';
+                basic_string_append(&term, bytes, 4);
             } else {
                 double dval = val;
-                memcpy(term, &dval, 8);
-                term[8] = '\0';
+                char bytes[9];
+                memcpy(bytes, &dval, 8); bytes[8] = '\0';
+                basic_string_append(&term, bytes, 8);
             }
         } else if (t.type == TOKEN_STRING) {
-            strncpy(term, t.text, sizeof(term) - 1);
+            basic_string_append(&term, t.text, strlen(t.text));
             ts->pos++;
         } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
             int idx = t.var_idx;
             if (idx == -1) idx = find_variable(t.text);
             ts->pos++;
             int array_idx = parse_array_index_tok(ts, idx);
-            char temp[BASIC_STRING_MAX] = "";
-            get_string_variable_value(idx, array_idx, temp, sizeof(temp));
-            strncpy(term, temp, sizeof(term) - 1);
+            append_string_variable_value(&term, idx, array_idx);
         } else {
-            if (first) {
-                double val = evaluate_expression_tok(ts);
-                snprintf(out, out_size, "%g", val);
-                return 0;
-            }
-            break;
+            if (parsed) break;
+            double val = evaluate_expression_tok(ts);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%g", val);
+            basic_string_append(&term, buf, strlen(buf));
+            parsed = 1;
+            if (ts->tokens[ts->pos].type != TOKEN_PLUS) break;
+            ts->pos++;
+            continue;
         }
 
-        append_string_value(out, term, out_size);
-        first = 0;
+        parsed = 1;
+        if (!term.length && t.type == TOKEN_STRING && strcmp(t.text, "") == 0) {
+            // allow empty strings as valid terms
+        }
+        basic_string_append(out, term.data, term.length);
+        basic_string_release(&term);
 
         if (ts->tokens[ts->pos].type != TOKEN_PLUS) {
             break;
         }
-        ts->pos++; // consume '+'
+        ts->pos++;
     }
-    return 1;
+    return parsed;
 }
 
-static int parse_string_expression(const char **input, char *out, int out_size) {
-    out[0] = '\0';
-    int first = 1;
+static int parse_string_expression_tok(TokenStream *ts, char *out, int out_size) {
+    BasicString *heap_out = basic_string_create(NULL, 0);
+    if (!heap_out) {
+        out[0] = '\0';
+        return 0;
+    }
+    int ok = parse_string_expression_tok_heap(ts, heap_out);
+    basic_string_to_buffer(heap_out, out, out_size);
+    basic_string_destroy(heap_out);
+    return ok;
+}
+
+static int parse_string_expression_heap(const char **input, BasicString *out) {
+    int parsed = 0;
 
     while (1) {
-        char term[BASIC_STRING_MAX] = "";
+        BasicString term = {0};
         const char *saved = *input;
         Token t = get_next_token(input);
 
         if (t.type == TOKEN_CHR || t.type == TOKEN_TAB) {
-            get_next_token(input); // (
+            get_next_token(input);
             double arg = evaluate_expression(input);
-            get_next_token(input); // )
+            get_next_token(input);
             if (t.type == TOKEN_CHR) {
-                term[0] = (unsigned char)((int)arg & 0xFF);
-                term[1] = '\0';
+                char c = (char)((int)arg & 0xFF);
+                basic_string_append(&term, &c, 1);
             } else {
                 int w = (int)arg; if (w < 0) w = 0; if (w >= 255) w = 255;
-                memset(term, ' ', w); term[w] = '\0';
+                char *block = malloc((size_t)(w > 0 ? w : 1));
+                if (!block) return 0;
+                memset(block, ' ', (size_t)w);
+                basic_string_append(&term, block, (size_t)w);
+                free(block);
             }
         } else if (t.type == TOKEN_LEFT || t.type == TOKEN_RIGHT || t.type == TOKEN_MID) {
             TokenType ft = t.type;
-            get_next_token(input); // (
-            char base[BASIC_STRING_MAX] = "";
-            parse_string_expression(input, base, sizeof(base));
-            get_next_token(input); // ,
+            get_next_token(input);
+            BasicString base = {0};
+            if (!parse_string_expression_heap(input, &base)) return 0;
+            get_next_token(input);
             int n1 = (int)evaluate_expression(input);
             int n2 = -1;
             if (ft == TOKEN_MID) {
@@ -1428,68 +1503,86 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
                 if (get_next_token(input).type == TOKEN_COMMA) n2 = (int)evaluate_expression(input);
                 else *input = comma_saved;
             }
-            get_next_token(input); // )
-            int slen = (int)strlen(base);
+            get_next_token(input);
+            int slen = (int)base.length;
             if (ft == TOKEN_LEFT) {
                 int cnt = (n1 < 0) ? 0 : (n1 > slen ? slen : n1);
-                strncpy(term, base, cnt); term[cnt] = '\0';
+                if (cnt > 0) basic_string_append(&term, base.data, (size_t)cnt);
             } else if (ft == TOKEN_RIGHT) {
                 int cnt = (n1 < 0) ? 0 : (n1 > slen ? slen : n1);
-                strncpy(term, base + (slen - cnt > 0 ? slen - cnt : 0), cnt); term[cnt] = '\0';
-            } else { // MID
+                if (cnt > 0) basic_string_append(&term, base.data + (slen - cnt > 0 ? slen - cnt : 0), (size_t)cnt);
+            } else {
                 int start = n1 - 1; if (start < 0) start = 0;
-                if (start >= slen) term[0] = '\0';
-                else {
+                if (start < slen) {
                     int cnt = (n2 == -1) ? (slen - start) : n2;
                     if (cnt < 0) cnt = 0; if (start + cnt > slen) cnt = slen - start;
-                    strncpy(term, base + start, cnt); term[cnt] = '\0';
+                    if (cnt > 0) basic_string_append(&term, base.data + start, (size_t)cnt);
                 }
             }
+            basic_string_release(&base);
         } else if (t.type == TOKEN_SPACE || t.type == TOKEN_SPC) {
-            get_next_token(input); // (
+            get_next_token(input);
             int n = (int)evaluate_expression(input);
-            get_next_token(input); // )
-            if (n < 0) n = 0; if (n > 255) n = 255;
-            memset(term, ' ', n); term[n] = '\0';
+            get_next_token(input);
+            if (n < 0) n = 0;
+            char *block = malloc((size_t)(n > 0 ? n : 1));
+            if (!block) return 0;
+            memset(block, ' ', (size_t)n);
+            basic_string_append(&term, block, (size_t)n);
+            free(block);
         } else if (t.type == TOKEN_STRING_FUNC) {
-            get_next_token(input); // (
+            get_next_token(input);
             int n = (int)evaluate_expression(input);
-            get_next_token(input); // ,
+            get_next_token(input);
             char c = ' ';
-            char arg_buf[BASIC_STRING_MAX] = "";
-            const char *saved_arg = *input;
-            if (parse_string_expression(input, arg_buf, sizeof(arg_buf))) {
-                if (arg_buf[0]) c = arg_buf[0];
+            BasicString arg_buf = {0};
+            const char *arg_saved = *input;
+            Token arg_token = get_next_token(input);
+            if (arg_token.type == TOKEN_NUMBER) {
+                c = (char)((int)arg_token.double_val & 0xFF);
+            } else if (arg_token.type == TOKEN_STRING) {
+                if (arg_token.text[0]) c = arg_token.text[0];
             } else {
-                *input = saved_arg;
-                c = (char)evaluate_expression(input);
+                *input = arg_saved;
+                if (parse_string_expression_heap(input, &arg_buf) && arg_buf.length > 0) {
+                    c = arg_buf.data[0];
+                }
             }
-            get_next_token(input); // )
-            if (n < 0) n = 0; if (n > 255) n = 255;
-            memset(term, c, n); term[n] = '\0';
+            if (arg_token.type == TOKEN_EOF) {
+                *input = arg_saved;
+            } else {
+                get_next_token(input);
+            }
+            if (n < 0) n = 0;
+            char *block = malloc((size_t)(n > 0 ? n : 1));
+            if (!block) return 0;
+            memset(block, c, (size_t)n);
+            basic_string_append(&term, block, (size_t)n);
+            free(block);
+            basic_string_release(&arg_buf);
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
-            get_next_token(input); // (
+            get_next_token(input);
             char source[BASIC_STRING_MAX] = "";
             parse_string_expression(input, source, sizeof(source));
-            get_next_token(input); // )
+            get_next_token(input);
+            char term_buf[BASIC_STRING_MAX] = "";
             if (t.type == TOKEN_DEFLATE) {
-                deflate_string(source, term, sizeof(term));
+                deflate_string(source, term_buf, sizeof(term_buf));
             } else {
-                inflate_string(source, term, sizeof(term));
+                inflate_string(source, term_buf, sizeof(term_buf));
             }
+            basic_string_append(&term, term_buf, strlen(term_buf));
         } else if (t.type == TOKEN_COMMANDS) {
-            strncpy(term, internal_command_line, sizeof(term) - 1);
-            term[sizeof(term) - 1] = '\0';
+            basic_string_append(&term, internal_command_line, strlen(internal_command_line));
         } else if (t.type == TOKEN_ARGVS) {
-            get_next_token(input); // (
+            get_next_token(input);
             int idx = (int)evaluate_expression(input);
-            get_next_token(input); // )
+            get_next_token(input);
             if (idx >= 0 && idx < internal_argc && internal_argv) {
-                strncpy(term, internal_argv[idx], sizeof(term) - 1);
-                term[sizeof(term) - 1] = '\0';
+                basic_string_append(&term, internal_argv[idx], strlen(internal_argv[idx]));
             }
         } else if (t.type == TOKEN_GETS) {
-            get_next_token(input); // (
+            get_next_token(input);
             int fnum = -1;
             const char *saved_num = *input;
             Token hash_tok = get_next_token(input);
@@ -1499,11 +1592,11 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
                 *input = saved_num;
                 fnum = (int)evaluate_expression(input);
             }
-            get_next_token(input); // ,
+            get_next_token(input);
             int rec = (int)evaluate_expression(input);
-            get_next_token(input); // ,
+            get_next_token(input);
             int len = (int)evaluate_expression(input);
-            get_next_token(input); // )
+            get_next_token(input);
             if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                 report_runtime_error(ERR_BAD_FILE_NUMBER);
                 return 0;
@@ -1518,78 +1611,76 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
             buf[len] = '\0';
             int trim = len - 1;
             while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
-            strncpy(term, buf, sizeof(term) - 1);
-            term[sizeof(term) - 1] = '\0';
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_INKEY) {
             if (graphics_is_active()) {
                 update_graphics();
                 int c = get_graphics_char();
-                if (c) {
-                    term[0] = (char)c;
-                    term[1] = '\0';
-                }
+                if (c) basic_string_append(&term, (char[]){(char)c, '\0'}, 1);
             } else {
                 int c = get_stdin_char();
-                if (c) {
-                    term[0] = (char)c;
-                    term[1] = '\0';
-                }
+                if (c) basic_string_append(&term, (char[]){(char)c, '\0'}, 1);
             }
         } else if (t.type == TOKEN_UCASE || t.type == TOKEN_LCASE || t.type == TOKEN_TRIM || t.type == TOKEN_LTRIM || t.type == TOKEN_RTRIM) {
             TokenType ft = t.type;
-            get_next_token(input); // (
-            char base[BASIC_STRING_MAX] = "";
-            parse_string_expression(input, base, sizeof(base));
-            get_next_token(input); // )
+            get_next_token(input);
+            BasicString base = {0};
+            if (!parse_string_expression_heap(input, &base)) return 0;
+            get_next_token(input);
             if (ft == TOKEN_UCASE) {
-                for (int i = 0; base[i]; i++) base[i] = toupper((unsigned char)base[i]);
+                for (int i = 0; i < (int)base.length; i++) base.data[i] = toupper((unsigned char)base.data[i]);
             } else if (ft == TOKEN_LCASE) {
-                for (int i = 0; base[i]; i++) base[i] = tolower((unsigned char)base[i]);
+                for (int i = 0; i < (int)base.length; i++) base.data[i] = tolower((unsigned char)base.data[i]);
             } else if (ft == TOKEN_TRIM) {
-                int start = 0, end = (int)strlen(base) - 1;
-                while (start <= end && isspace((unsigned char)base[start])) start++;
-                while (end >= start && isspace((unsigned char)base[end])) end--;
+                int start = 0, end = (int)base.length - 1;
+                while (start <= end && isspace((unsigned char)base.data[start])) start++;
+                while (end >= start && isspace((unsigned char)base.data[end])) end--;
                 int len = (end >= start) ? (end - start + 1) : 0;
-                memmove(base, base + start, len);
-                base[len] = '\0';
+                if (len > 0) memmove(base.data, base.data + start, (size_t)len);
+                base.data[len] = '\0';
+                base.length = (size_t)len;
             } else if (ft == TOKEN_LTRIM) {
                 int start = 0;
-                while (base[start] && isspace((unsigned char)base[start])) start++;
+                while (start < (int)base.length && isspace((unsigned char)base.data[start])) start++;
                 if (start > 0) {
-                    int len = (int)strlen(base + start);
-                    memmove(base, base + start, len + 1);
+                    int len = (int)base.length - start;
+                    memmove(base.data, base.data + start, (size_t)len);
+                    base.data[len] = '\0';
+                    base.length = (size_t)len;
                 }
             } else if (ft == TOKEN_RTRIM) {
-                int end = (int)strlen(base) - 1;
-                while (end >= 0 && isspace((unsigned char)base[end])) end--;
-                base[end + 1] = '\0';
+                int end = (int)base.length - 1;
+                while (end >= 0 && isspace((unsigned char)base.data[end])) end--;
+                base.data[end + 1] = '\0';
+                base.length = (size_t)(end + 1);
             }
-            strncpy(term, base, sizeof(term) - 1);
-            term[sizeof(term) - 1] = '\0';
+            basic_string_append(&term, base.data, base.length);
+            basic_string_release(&base);
         } else if (t.type == TOKEN_HEX || t.type == TOKEN_OCT) {
-            get_next_token(input); // (
+            get_next_token(input);
             double val = evaluate_expression(input);
-            get_next_token(input); // )
+            get_next_token(input);
             int intval = (int)val;
-            if (t.type == TOKEN_HEX) snprintf(term, sizeof(term), "%X", intval);
-            else snprintf(term, sizeof(term), "%o", intval);
+            char buf[128];
+            if (t.type == TOKEN_HEX) snprintf(buf, sizeof(buf), "%X", intval);
+            else snprintf(buf, sizeof(buf), "%o", intval);
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_TIME || t.type == TOKEN_DATE) {
             time_t rawtime;
             struct tm *timeinfo;
             time(&rawtime);
             timeinfo = localtime(&rawtime);
-            if (t.type == TOKEN_TIME) {
-                strftime(term, sizeof(term), "%H:%M:%S", timeinfo);
-            } else {
-                strftime(term, sizeof(term), "%m-%d-%Y", timeinfo);
-            }
+            char buf[128];
+            if (t.type == TOKEN_TIME) strftime(buf, sizeof(buf), "%H:%M:%S", timeinfo);
+            else strftime(buf, sizeof(buf), "%m-%d-%Y", timeinfo);
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_ENVIRON) {
-            get_next_token(input); // (
+            get_next_token(input);
             char arg_val[BASIC_STRING_MAX] = "";
             int is_str = parse_string_expression(input, arg_val, sizeof(arg_val));
             if (is_str) {
                 char *ev = getenv(arg_val);
-                if (ev) strncpy(term, ev, sizeof(term)-1);
+                if (ev) basic_string_append(&term, ev, strlen(ev));
             } else {
                 int idx = atoi(arg_val);
                 extern char **environ;
@@ -1597,66 +1688,80 @@ static int parse_string_expression(const char **input, char *out, int out_size) 
                     int count = 1;
                     for (char **e = environ; *e; e++, count++) {
                         if (count == idx) {
-                            strncpy(term, *e, sizeof(term)-1);
+                            basic_string_append(&term, *e, strlen(*e));
                             break;
                         }
                     }
                 }
             }
-            get_next_token(input); // )
+            get_next_token(input);
         } else if (t.type == TOKEN_STR) {
-            get_next_token(input); // (
+            get_next_token(input);
             double val = evaluate_expression(input);
-            get_next_token(input); // )
-            if (val >= 0) snprintf(term, sizeof(term), " %g", val);
-            else snprintf(term, sizeof(term), "%g", val);
+            get_next_token(input);
+            char buf[128];
+            if (val >= 0) snprintf(buf, sizeof(buf), " %g", val);
+            else snprintf(buf, sizeof(buf), "%g", val);
+            basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
-            get_next_token(input); // (
+            get_next_token(input);
             double val = evaluate_expression(input);
-            get_next_token(input); // )
+            get_next_token(input);
             if (t.type == TOKEN_MKI) {
                 int ival = (int)val;
-                term[0] = (char)(ival & 0xFF);
-                term[1] = (char)((ival >> 8) & 0xFF);
-                term[2] = '\0';
+                char bytes[3];
+                bytes[0] = (char)(ival & 0xFF); bytes[1] = (char)((ival >> 8) & 0xFF); bytes[2] = '\0';
+                basic_string_append(&term, bytes, 2);
             } else if (t.type == TOKEN_MKS) {
                 float fval = (float)val;
-                memcpy(term, &fval, 4);
-                term[4] = '\0';
+                char bytes[5];
+                memcpy(bytes, &fval, 4); bytes[4] = '\0';
+                basic_string_append(&term, bytes, 4);
             } else {
                 double dval = val;
-                memcpy(term, &dval, 8);
-                term[8] = '\0';
+                char bytes[9];
+                memcpy(bytes, &dval, 8); bytes[8] = '\0';
+                basic_string_append(&term, bytes, 8);
             }
         } else if (t.type == TOKEN_STRING) {
-            strncpy(term, t.text, sizeof(term) - 1);
+            basic_string_append(&term, t.text, strlen(t.text));
         } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
             int idx = find_variable(t.text);
             int array_idx = parse_array_index(input, idx);
-            char temp[BASIC_STRING_MAX] = "";
-            get_string_variable_value(idx, array_idx, temp, sizeof(temp));
-            strncpy(term, temp, sizeof(term) - 1);
+            append_string_variable_value(&term, idx, array_idx);
         } else {
-            if (first) {
-                *input = saved;
-                double val = evaluate_expression(input);
-                snprintf(out, out_size, "%g", val);
-                return 0;
-            }
+            if (parsed) break;
             *input = saved;
-            break;
+            double val = evaluate_expression(input);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%g", val);
+            basic_string_append(&term, buf, strlen(buf));
+            parsed = 1;
         }
 
-        append_string_value(out, term, out_size);
-        first = 0;
+        parsed = 1;
+        basic_string_append(out, term.data, term.length);
+            basic_string_release(&term);
 
-        const char *sep_saved = *input;
+        const char *separator = *input;
         if (get_next_token(input).type != TOKEN_PLUS) {
-            *input = sep_saved;
+            *input = separator;
             break;
         }
     }
-    return 1;
+    return parsed;
+}
+
+static int parse_string_expression(const char **input, char *out, int out_size) {
+    BasicString *heap_out = basic_string_create(NULL, 0);
+    if (!heap_out) {
+        out[0] = '\0';
+        return 0;
+    }
+    int ok = parse_string_expression_heap(input, heap_out);
+    basic_string_to_buffer(heap_out, out, out_size);
+    basic_string_destroy(heap_out);
+    return ok;
 }
 
 static void set_string_variable_with_align(int idx, int array_idx, const char *value, int right_justify) {
@@ -1974,6 +2079,17 @@ static double primary_tok(TokenStream *ts) {
                 }
             }
             if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
+                if (ft == TOKEN_LEN && ts->tokens[ts->pos].type == TOKEN_IDENTIFIER &&
+                    is_string_var(ts->tokens[ts->pos].text)) {
+                    Token length_token = ts->tokens[ts->pos++];
+                    int length_idx = length_token.var_idx;
+                    if (length_idx == -1) length_idx = find_variable(length_token.text);
+                    int length_array_idx = parse_array_index_tok(ts, length_idx);
+                    BasicString *length_value = length_array_idx >= 0 && vars[length_idx].s_array
+                        ? vars[length_idx].s_array[length_array_idx] : vars[length_idx].s_value;
+                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+                    return length_value ? (double)length_value->length : 0.0;
+                }
                 char buf[BASIC_STRING_MAX] = "";
                 parse_string_expression_tok(ts, buf, sizeof(buf));
                 if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
@@ -2117,6 +2233,14 @@ static double arithmetic_expression_tok(TokenStream *ts) {
 }
 
 static double relational_expression_tok(TokenStream *ts) {
+    if (ts->tokens[ts->pos].type != TOKEN_EOF && is_string_token(ts->tokens[ts->pos])) {
+        const char *input = ts->tokens[ts->pos].start_ptr;
+        double value = evaluate_expression(&input);
+        while (ts->tokens[ts->pos].type != TOKEN_EOF && ts->tokens[ts->pos].start_ptr < input) {
+            ts->pos++;
+        }
+        return value;
+    }
     double val = arithmetic_expression_tok(ts);
     while (1) {
         Token t = ts->tokens[ts->pos];
@@ -2339,6 +2463,19 @@ static double primary(const char **input) {
                 }
             }
             if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
+                if (ft == TOKEN_LEN) {
+                    const char *length_saved = *input;
+                    Token length_token = get_next_token(input);
+                    if (length_token.type == TOKEN_IDENTIFIER && is_string_var(length_token.text)) {
+                        int length_idx = find_variable(length_token.text);
+                        int length_array_idx = parse_array_index(input, length_idx);
+                        BasicString *length_value = length_array_idx >= 0 && vars[length_idx].s_array
+                            ? vars[length_idx].s_array[length_array_idx] : vars[length_idx].s_value;
+                        get_next_token(input);
+                        return length_value ? (double)length_value->length : 0.0;
+                    }
+                    *input = length_saved;
+                }
                 char buf[BASIC_STRING_MAX] = "";
                 parse_string_expression(input, buf, sizeof(buf));
                 get_next_token(input); // consume ')'
@@ -4669,9 +4806,17 @@ void run_program() {
                     ts.pos++;
                     if (is_string_var(t.text)) {
                         const char *temp_ptr = ts.tokens[ts.pos].start_ptr;
-                        char value[BASIC_STRING_MAX] = "";
-                        parse_string_expression(&temp_ptr, value, sizeof(value));
-                        set_string_variable(idx, array_idx, value);
+                        BasicString value = {0};
+                        if (parse_dynamic_string_expression(&temp_ptr, &value)) {
+                            BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
+                            basic_string_assign(target, value.data, value.length);
+                        } else {
+                            char fallback[BASIC_STRING_MAX] = "";
+                            temp_ptr = ts.tokens[ts.pos].start_ptr;
+                            parse_string_expression(&temp_ptr, fallback, sizeof(fallback));
+                            set_string_variable(idx, array_idx, fallback);
+                        }
+                        basic_string_release(&value);
                         // Sync ts.pos
                         while (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].start_ptr < temp_ptr) ts.pos++;
                     } else {

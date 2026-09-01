@@ -2,7 +2,7 @@
 #define COMMON_H
 
 #define BASIKA_VERSION "0.99.2"
-#define BASIC_STRING_MAX (1024 * 1024) // 1 MB initial capacity
+#define BASIC_STRING_MAX (64 * 1024) // Legacy temporary-buffer limit; runtime strings grow dynamically.
 #define BASIC_TOKEN_TEXT_MAX 4096
 
 typedef enum {
