@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdlib.h>
 #include "lexer.h"
 
@@ -159,6 +160,49 @@ static const KeywordMap keyword_table[] = {
     {"_INFLATE$", TOKEN_INFLATE},
 };
 
+#define KEYWORD_COUNT (sizeof(keyword_table) / sizeof(keyword_table[0]))
+#define KEYWORD_HASH_CAPACITY 512
+#define KEYWORD_HASH_MASK (KEYWORD_HASH_CAPACITY - 1)
+
+static int keyword_hash_table[KEYWORD_HASH_CAPACITY];
+static int keyword_hash_initialized = 0;
+
+static unsigned int hash_keyword(const char *word) {
+    unsigned int hash = 5381;
+    unsigned char c;
+    while ((c = (unsigned char)*word++) != '\0') {
+        hash = ((hash << 5) + hash) + (unsigned int)toupper(c);
+    }
+    return hash & KEYWORD_HASH_MASK;
+}
+
+static void initialize_keyword_hash(void) {
+    if (keyword_hash_initialized) return;
+
+    for (size_t i = 0; i < KEYWORD_HASH_CAPACITY; i++) keyword_hash_table[i] = -1;
+    for (size_t keyword_idx = 0; keyword_idx < KEYWORD_COUNT; keyword_idx++) {
+        unsigned int slot = hash_keyword(keyword_table[keyword_idx].keyword);
+        while (keyword_hash_table[slot] != -1) {
+            slot = (slot + 1) & KEYWORD_HASH_MASK;
+        }
+        keyword_hash_table[slot] = (int)keyword_idx;
+    }
+    keyword_hash_initialized = 1;
+}
+
+static const KeywordMap *find_keyword(const char *word) {
+    initialize_keyword_hash();
+    unsigned int slot = hash_keyword(word);
+    for (size_t probe = 0; probe < KEYWORD_HASH_CAPACITY; probe++) {
+        int keyword_idx = keyword_hash_table[slot];
+        if (keyword_idx == -1) return NULL;
+        if (strcasecmp(word, keyword_table[keyword_idx].keyword) == 0) {
+            return &keyword_table[keyword_idx];
+        }
+        slot = (slot + 1) & KEYWORD_HASH_MASK;
+    }
+    return NULL;
+}
 
 Token get_next_token(const char **input) {
     Token token;
@@ -166,6 +210,8 @@ Token get_next_token(const char **input) {
     token.is_double = 0;
     token.int_val = 0;
     token.double_val = 0.0;
+    token.var_idx = -1;
+    token.type_generation = 0;
     
     while (isspace(**input)) (*input)++;
 
@@ -257,13 +303,7 @@ Token get_next_token(const char **input) {
     while ((isalnum(**input) || **input == '$' || **input == '%' || **input == '!' || **input == '#' || **input == '_') && i < BASIC_TOKEN_TEXT_MAX - 1) buffer[i++] = *(*input)++;
     buffer[i] = '\0';
 
-    KeywordMap *res = NULL;
-    for (size_t keyword_idx = 0; keyword_idx < sizeof(keyword_table) / sizeof(keyword_table[0]); keyword_idx++) {
-        if (strcasecmp(buffer, keyword_table[keyword_idx].keyword) == 0) {
-            res = (KeywordMap *)&keyword_table[keyword_idx];
-            break;
-        }
-    }
+    const KeywordMap *res = find_keyword(buffer);
 
     if (res) {
         token.type = res->type;
@@ -285,6 +325,9 @@ Token get_next_token(const char **input) {
 }
 
 void tokenize_line(Statement *stmt) {
+    static const unsigned char POSTFIX_MASK[UCHAR_MAX + 1] = {
+        ['$'] = 1, ['%'] = 1, ['!'] = 1, ['#'] = 1
+    };
     const char *ptr = stmt->raw_command;
     int capacity = 16;
     stmt->tokens = malloc(capacity * sizeof(Token));
@@ -292,23 +335,29 @@ void tokenize_line(Statement *stmt) {
     while (1) {
         const char *token_start = ptr;
         Token t = get_next_token(&ptr);
+        if (t.type == TOKEN_EOF) break;
         t.start_ptr = token_start;
-        if (stmt->token_count >= capacity) {
+        /* Keep one slot for an internal EOF sentinel used by token-stream lookahead. */
+        if (stmt->token_count + 1 >= capacity) {
             capacity *= 2;
             stmt->tokens = realloc(stmt->tokens, capacity * sizeof(Token));
         }
         stmt->tokens[stmt->token_count++] = t;
-        
-        // Pre-resolve variable indices if possible
+        stmt->tokens[stmt->token_count - 1].var_idx = -1; // Default to -1 (not found)
+
+        // Pre-computed bitmask table for fast character classification
         if (t.type == TOKEN_IDENTIFIER) {
             int len = strlen(t.text);
-            char last = (len > 0) ? t.text[len - 1] : '\0';
-            if (last == '$' || last == '%' || last == '!' || last == '#') {
+            if (len > 0 && POSTFIX_MASK[(unsigned char)t.text[len - 1]]) {
                 stmt->tokens[stmt->token_count - 1].var_idx = find_variable(t.text);
-            } else {
-                stmt->tokens[stmt->token_count - 1].var_idx = -1;
             }
         }
-        if (t.type == TOKEN_EOF) break;
     }
+
+    stmt->tokens[stmt->token_count] = (Token){
+        .type = TOKEN_EOF,
+        .start_ptr = ptr,
+        .var_idx = -1,
+        .type_generation = 0
+    };
 }

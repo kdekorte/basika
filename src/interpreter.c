@@ -6,6 +6,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/time.h>
+#include <stddef.h>
 #include <glob.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -30,7 +31,11 @@ volatile sig_atomic_t stop_running = 0;
 
 static Variable vars[1024]; 
 static int var_count = 0;
-static int var_hash_table[2048]; // Hash table for O(1) variable lookup
+#define VAR_HASH_CAPACITY 2048
+#define VAR_HASH_MASK (VAR_HASH_CAPACITY - 1)
+/* Open-addressed table; load stays at or below 50% (1024 variables). */
+static int var_hash_table[VAR_HASH_CAPACITY];
+static int var_hash_initialized = 0;
 
 typedef struct {
     Token *tokens;
@@ -51,6 +56,7 @@ static char default_type_map[26] = {
     '!', '!', '!', '!', '!', '!', '!', '!', '!', '!', '!', '!', '!',
     '!', '!', '!', '!', '!', '!', '!', '!', '!', '!', '!', '!', '!'
 };
+static unsigned int default_type_generation = 1;
 
 static FILE *file_handles[16] = {NULL};
 typedef struct {
@@ -91,9 +97,14 @@ typedef struct {
 static UserFunction user_functions[64];
 static int user_function_count = 0;
 
+static void reset_variable_hash_table(void) {
+    for (int i = 0; i < VAR_HASH_CAPACITY; i++) var_hash_table[i] = -1;
+    var_hash_initialized = 1;
+}
+
 void set_args(int argc, char **argv) {
     // Initialize hash table
-    for (int i = 0; i < 2048; i++) var_hash_table[i] = -1;
+    reset_variable_hash_table();
     internal_argc = argc;
     internal_argv = argv;
     internal_command_line[0] = '\0';
@@ -109,10 +120,14 @@ static int parse_array_index(const char **input, int var_idx);
 static int parse_array_index_tok(TokenStream *ts, int var_idx);
 static void set_string_variable(int idx, int array_idx, const char *value);
 static void set_numeric_variable(int idx, int array_idx, double val);
+static int resolve_token_variable(Token *token);
 static double relational_expression_tok(TokenStream *ts);
 static double logical_not_tok(TokenStream *ts);
 static double bitwise_and_tok(TokenStream *ts);
 static double bitwise_or_tok(TokenStream *ts);
+static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out);
+static const char *skip_whitespace_fast(const char *p);
+static int match_identifier_fast(const char *p, const char *word);
 double evaluate_expression(const char **input);
 double evaluate_expression_tok(TokenStream *ts);
 
@@ -167,7 +182,7 @@ static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int fo
                 nest_depth++;
             } else if (t.type == TOKEN_NEXT) {
                 if (current_ts_pos < current_stmt->token_count && current_stmt->tokens[current_ts_pos].type == TOKEN_IDENTIFIER) {
-                    int next_var_idx = find_variable(current_stmt->tokens[current_ts_pos].text);
+                    int next_var_idx = resolve_token_variable(&current_stmt->tokens[current_ts_pos]);
                     if (next_var_idx == for_var_idx) {
                         nest_depth--;
                         current_ts_pos++; // Consume the variable name
@@ -446,6 +461,7 @@ static void randomize_seed(const char **input) {
 }
 
 static void parse_def_range(const char **ptr, char type_char) {
+    int changed = 0;
     while (1) {
         Token t = get_next_token(ptr);
         if (t.type != TOKEN_IDENTIFIER) break;
@@ -467,7 +483,10 @@ static void parse_def_range(const char **ptr, char type_char) {
         }
         
         for (char c = start; c <= end; c++) {
-            if (c >= 'A' && c <= 'Z') default_type_map[c - 'A'] = type_char;
+            if (c >= 'A' && c <= 'Z' && default_type_map[c - 'A'] != type_char) {
+                default_type_map[c - 'A'] = type_char;
+                changed = 1;
+            }
         }
         
         saved = *ptr;
@@ -475,6 +494,10 @@ static void parse_def_range(const char **ptr, char type_char) {
             *ptr = saved;
             break;
         }
+    }
+    if (changed) {
+        default_type_generation++;
+        if (default_type_generation == 0) default_type_generation = 1;
     }
 }
 
@@ -511,6 +534,7 @@ static int parse_randomize(const char **input) {
 }
 
 static unsigned int hash_name(const char *name);
+static int find_variable_index(const char *normalized);
 
 static int is_string_var(const char *name) {
     int len = (int)strlen(name);
@@ -520,9 +544,8 @@ static int is_string_var(const char *name) {
     if (fixed_string_declarations_present && last != '%' && last != '!' && last != '#') {
         char normalized[64];
         snprintf(normalized, sizeof(normalized), "%s!", name);
-        unsigned int hash = hash_name(normalized);
-        int idx = var_hash_table[hash];
-        if (idx >= 0 && idx < var_count && vars[idx].string_declared && strcmp(vars[idx].name, normalized) == 0) {
+        int idx = find_variable_index(normalized);
+        if (idx >= 0 && vars[idx].string_declared) {
             return 1;
         }
     }
@@ -537,13 +560,64 @@ static int is_string_var(const char *name) {
 // Forward declaration for is_string_token (used in parse_string_expression_tok)
 static int is_string_token(Token t);
 
+typedef struct BasicStringPoolSlot {
+    BasicString value;
+    struct BasicStringPoolSlot *next;
+} BasicStringPoolSlot;
+
+#define BASIC_STRING_POOL_SIZE 2048
+static BasicStringPoolSlot *basic_string_pool_slots = NULL;
+static BasicStringPoolSlot *basic_string_pool_free_list = NULL;
+
+static void basic_string_pool_init(void) {
+    if (basic_string_pool_slots) return;
+
+    basic_string_pool_slots = calloc(BASIC_STRING_POOL_SIZE, sizeof(*basic_string_pool_slots));
+    if (!basic_string_pool_slots) return;
+
+    for (int i = 0; i < BASIC_STRING_POOL_SIZE; i++) {
+        basic_string_pool_slots[i].next = (i + 1 < BASIC_STRING_POOL_SIZE)
+            ? &basic_string_pool_slots[i + 1]
+            : NULL;
+    }
+    basic_string_pool_free_list = &basic_string_pool_slots[0];
+}
+
+static BasicString *basic_string_pool_alloc(void) {
+    if (!basic_string_pool_slots) basic_string_pool_init();
+    if (!basic_string_pool_free_list) return NULL;
+
+    BasicStringPoolSlot *slot = basic_string_pool_free_list;
+    basic_string_pool_free_list = slot->next;
+    memset(&slot->value, 0, sizeof(slot->value));
+    return &slot->value;
+}
+
+static void basic_string_pool_release(BasicString *value) {
+    if (!value) return;
+    if (!basic_string_pool_slots) {
+        free(value);
+        return;
+    }
+
+    BasicStringPoolSlot *slot = (BasicStringPoolSlot *)((char *)value - offsetof(BasicStringPoolSlot, value));
+    if (slot < basic_string_pool_slots || slot >= basic_string_pool_slots + BASIC_STRING_POOL_SIZE) {
+        free(value);
+        return;
+    }
+
+    memset(&slot->value, 0, sizeof(slot->value));
+    slot->next = basic_string_pool_free_list;
+    basic_string_pool_free_list = slot;
+}
+
 static BasicString *basic_string_create(const void *data, size_t length) {
-    BasicString *value = malloc(sizeof(*value));
+    BasicString *value = basic_string_pool_alloc();
     if (!value) return NULL;
     value->capacity = length + 1;
     value->data = malloc(value->capacity);
     if (!value->data) {
-        free(value);
+        basic_string_pool_release(value);
         return NULL;
     }
     if (data && length) memcpy(value->data, data, length);
@@ -688,8 +762,11 @@ static int parse_dynamic_string_expression(const char **input, BasicString *out)
 
 static void basic_string_destroy(BasicString *value) {
     if (!value) return;
-    free(value->data);
-    free(value);
+    if (value->data) {
+        free(value->data);
+        value->data = NULL;
+    }
+    basic_string_pool_release(value);
 }
 
 static void basic_string_release(BasicString *value) {
@@ -767,7 +844,47 @@ static unsigned int hash_name(const char *name) {
     unsigned int hash = 5381;
     int c;
     while ((c = *name++)) hash = ((hash << 5) + hash) + (unsigned int)c;
-    return hash % 2048;
+    return hash & VAR_HASH_MASK;
+}
+
+/* Returns -1 at the first empty slot, since variable entries are never deleted. */
+static int find_variable_index(const char *normalized) {
+    if (!var_hash_initialized) reset_variable_hash_table();
+    unsigned int slot = hash_name(normalized);
+    for (int probe = 0; probe < VAR_HASH_CAPACITY; probe++) {
+        int idx = var_hash_table[slot];
+        if (idx == -1) return -1;
+        if (strcmp(vars[idx].name, normalized) == 0) return idx;
+        slot = (slot + 1) & VAR_HASH_MASK;
+    }
+    return -1;
+}
+
+static int resolve_token_variable(Token *token) {
+    if (!token || token->type != TOKEN_IDENTIFIER) return -1;
+
+    size_t len = strlen(token->text);
+    char last = len ? token->text[len - 1] : '\0';
+    int explicit_type = last == '$' || last == '%' || last == '!' || last == '#';
+    if (token->var_idx != -1 && (explicit_type || token->type_generation == default_type_generation)) {
+        return token->var_idx;
+    }
+
+    token->var_idx = find_variable(token->text);
+    token->type_generation = default_type_generation;
+    return token->var_idx;
+}
+
+static void insert_variable_index(const char *normalized, int idx) {
+    if (!var_hash_initialized) reset_variable_hash_table();
+    unsigned int slot = hash_name(normalized);
+    for (int probe = 0; probe < VAR_HASH_CAPACITY; probe++) {
+        if (var_hash_table[slot] == -1) {
+            var_hash_table[slot] = idx;
+            return;
+        }
+        slot = (slot + 1) & VAR_HASH_MASK;
+    }
 }
 
 int find_variable(const char *name) {
@@ -790,24 +907,16 @@ int find_variable(const char *name) {
         }
     }
 
-    unsigned int h = hash_name(normalized);
-    int cached_idx = var_hash_table[h];
-    if (cached_idx != -1 && strcmp(vars[cached_idx].name, normalized) == 0) {
-        return cached_idx;
-    }
+    int idx = find_variable_index(normalized);
+    if (idx != -1) return idx;
 
-    for (int i = 0; i < var_count; i++) {
-        if (strcmp(vars[i].name, normalized) == 0) {
-            var_hash_table[h] = i;
-            return i;
-        }
-    }
     if (var_count < 1024) {
-        var_hash_table[h] = var_count;
-        memset(&vars[var_count], 0, sizeof(Variable));
-        strncpy(vars[var_count].name, normalized, 31);
-        vars[var_count].name[31] = '\0';
-        return var_count++;
+        idx = var_count++;
+        memset(&vars[idx], 0, sizeof(Variable));
+        strncpy(vars[idx].name, normalized, 31);
+        vars[idx].name[31] = '\0';
+        insert_variable_index(normalized, idx);
+        return idx;
     }
     return -1;
 }
@@ -1020,7 +1129,7 @@ typedef struct {
     double end_val;
     double step_val;
     Statement *start_stmt;
-    const char *start_ptr;
+    int start_ts_pos;
 } ForLoop;
 
 static ForLoop for_stack[16];
@@ -1460,8 +1569,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             basic_string_append(&term, t.text, strlen(t.text));
             ts->pos++;
         } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
-            int idx = t.var_idx;
-            if (idx == -1) idx = find_variable(t.text);
+            int idx = resolve_token_variable(&ts->tokens[ts->pos]);
             ts->pos++;
             int array_idx = parse_array_index_tok(ts, idx);
             append_string_variable_value(&term, idx, array_idx);
@@ -1867,7 +1975,8 @@ static void apply_basika_using_str(const char *fmt, const char *val, char *out, 
 }
 
 static void execute_assignment(const char **input, Token var_token) {
-    int idx = find_variable(var_token.text);
+    int idx = var_token.var_idx;
+    if (idx == -1) idx = find_variable(var_token.text);
     int array_idx = parse_array_index(input, idx);
     const char *saved = *input;
     Token eq = get_next_token(input);
@@ -1927,7 +2036,7 @@ static void clear_variables(int keep_registry) {
     }
     if (!keep_registry) {
         var_count = 0;
-        for (int i = 0; i < 2048; i++) var_hash_table[i] = -1;
+        reset_variable_hash_table();
     }
 
     user_function_count = 0;
@@ -1935,6 +2044,8 @@ static void clear_variables(int keep_registry) {
     option_base_set = 0;
     arrays_dimensioned = 0;
     for (int i = 0; i < 26; i++) default_type_map[i] = '!';
+    default_type_generation++;
+    if (default_type_generation == 0) default_type_generation = 1;
 }
 
 void basic_output(const char *text) { // Made non-static
@@ -1971,7 +2082,8 @@ static int is_string_token(Token t) {
 }
 
 static double primary_tok(TokenStream *ts) {
-    Token t = ts->tokens[ts->pos++];
+    Token *token = &ts->tokens[ts->pos++];
+    Token t = *token;
     if (t.type == TOKEN_NUMBER) {
         if (t.is_double) last_expression_is_double = 1;
         return t.double_val;
@@ -2001,8 +2113,7 @@ static double primary_tok(TokenStream *ts) {
             }
         }
 
-        int idx = t.var_idx;
-        if (idx == -1) idx = find_variable(t.text);
+        int idx = resolve_token_variable(token);
         
         if (idx != -1) {
             const char *v_name = vars[idx].name;
@@ -2064,12 +2175,12 @@ static double primary_tok(TokenStream *ts) {
             ts->pos++;
             has_arg = 1;
             if (ft == TOKEN_VARPTR) {
-                Token var_tok = ts->tokens[ts->pos++];
+                Token *var_token = &ts->tokens[ts->pos++];
+                Token var_tok = *var_token;
                 int var_idx = -1;
                 int array_idx = -1;
                 if (var_tok.type == TOKEN_IDENTIFIER) {
-                    var_idx = var_tok.var_idx;
-                    if (var_idx == -1) var_idx = find_variable(var_tok.text);
+                    var_idx = resolve_token_variable(var_token);
                     array_idx = parse_array_index_tok(ts, var_idx);
                 }
                 if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
@@ -2080,10 +2191,10 @@ static double primary_tok(TokenStream *ts) {
             if (ft == TOKEN_CVI || ft == TOKEN_CVS || ft == TOKEN_CVD) {
                 char buf[BASIC_STRING_MAX] = "";
                 int len = 0;
-                Token arg_tok = ts->tokens[ts->pos];
+                Token *arg_token = &ts->tokens[ts->pos];
+                Token arg_tok = *arg_token;
                 if (arg_tok.type == TOKEN_IDENTIFIER && is_string_var(arg_tok.text)) {
-                    int idx = arg_tok.var_idx;
-                    if (idx == -1) idx = find_variable(arg_tok.text);
+                    int idx = resolve_token_variable(arg_token);
                     ts->pos++;
                     int array_idx = parse_array_index_tok(ts, idx);
                     len = get_string_variable_raw(idx, array_idx, buf, sizeof(buf));
@@ -2113,9 +2224,8 @@ static double primary_tok(TokenStream *ts) {
             if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
                 if (ft == TOKEN_LEN && ts->tokens[ts->pos].type == TOKEN_IDENTIFIER &&
                     is_string_var(ts->tokens[ts->pos].text)) {
-                    Token length_token = ts->tokens[ts->pos++];
-                    int length_idx = length_token.var_idx;
-                    if (length_idx == -1) length_idx = find_variable(length_token.text);
+                    Token *length_token = &ts->tokens[ts->pos++];
+                    int length_idx = resolve_token_variable(length_token);
                     int length_array_idx = parse_array_index_tok(ts, length_idx);
                     BasicString *length_value = length_array_idx >= 0 && vars[length_idx].s_array
                         ? vars[length_idx].s_array[length_array_idx] : vars[length_idx].s_value;
@@ -2328,13 +2438,46 @@ static double bitwise_or_tok(TokenStream *ts) {
 
 double evaluate_expression_tok(TokenStream *ts) {
     if (ts->tokens[ts->pos].type != TOKEN_EOF && is_string_token(ts->tokens[ts->pos])) {
-        const char *p = ts->tokens[ts->pos].start_ptr;
-        double val = evaluate_expression(&p);
-        // Advance token position to match string pointer
-        while (ts->tokens[ts->pos].type != TOKEN_EOF && ts->tokens[ts->pos].start_ptr < p) {
-            ts->pos++;
+        BasicString left = {0};
+        BasicString right = {0};
+        if (!parse_string_expression_tok_heap(ts, &left)) {
+            basic_string_release(&left);
+            return 0;
         }
-        return val;
+
+        TokenType op = ts->tokens[ts->pos].type;
+        if (op != TOKEN_EQUALS && op != TOKEN_LESS && op != TOKEN_GREATER) {
+            basic_string_release(&left);
+            return 0;
+        }
+        ts->pos++;
+
+        TokenType modifier = ts->tokens[ts->pos].type;
+        if ((op == TOKEN_LESS && (modifier == TOKEN_GREATER || modifier == TOKEN_EQUALS)) ||
+            (op == TOKEN_GREATER && modifier == TOKEN_EQUALS)) {
+            ts->pos++;
+        } else {
+            modifier = TOKEN_EOF;
+        }
+
+        if (!parse_string_expression_tok_heap(ts, &right)) {
+            basic_string_release(&right);
+            basic_string_release(&left);
+            return 0;
+        }
+
+        int comparison = strcmp((const char *)left.data, (const char *)right.data);
+        basic_string_release(&right);
+        basic_string_release(&left);
+        if (op == TOKEN_EQUALS) return comparison == 0 ? -1.0 : 0.0;
+        if (op == TOKEN_LESS) {
+            if (modifier == TOKEN_GREATER) return comparison != 0 ? -1.0 : 0.0;
+            if (modifier == TOKEN_EQUALS) return comparison <= 0 ? -1.0 : 0.0;
+            return comparison < 0 ? -1.0 : 0.0;
+        }
+        return modifier == TOKEN_EQUALS
+            ? (comparison >= 0 ? -1.0 : 0.0)
+            : (comparison > 0 ? -1.0 : 0.0);
     }
 
     double val = bitwise_or_tok(ts);
@@ -2381,9 +2524,8 @@ static double primary(const char **input) {
             const char *v_name = vars[idx].name;
             if (v_name[strlen(v_name)-1] == '#') last_expression_is_double = 1;
         }
-        const char *look_ptr = *input; // Peek to see if it's an array access
-        Token next = get_next_token(&look_ptr);
-        if (next.type == TOKEN_LPAREN) {
+        const char *after_name = skip_whitespace_fast(*input);
+        if (*after_name == '(') {
             int array_idx = parse_array_index(input, idx);
             if (vars[idx].s_array && array_idx >= 0 && array_idx < vars[idx].array_size) {
                 // This is a string array, evaluate_expression currently only handles doubles.
@@ -2613,6 +2755,18 @@ static double primary(const char **input) {
     return 0;
 }
 
+static const char *skip_whitespace_fast(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    return p;
+}
+
+static int match_identifier_fast(const char *p, const char *word) {
+    size_t len = strlen(word);
+    if (strncasecmp(p, word, len) != 0) return 0;
+    p += len;
+    return (*p == '\0' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ')' || *p == ',' || *p == ';' || *p == ':' || *p == '+' || *p == '-' || *p == '*' || *p == '/' || *p == '^' || *p == '%' || *p == '\\');
+}
+
 static double power_op(const char **input) {
     double val = primary(input);
     const char *saved = *input;
@@ -2634,13 +2788,47 @@ static double unary(const char **input) {
 static double term(const char **input) {
     double val = unary(input);
     while (1) {
+        const char *p = skip_whitespace_fast(*input);
+        if (*p == '*') {
+            *input = p + 1;
+            val *= unary(input);
+            continue;
+        }
+        if (*p == '/') {
+            *input = p + 1;
+            double d = unary(input);
+            if (d != 0.0) val /= d;
+            continue;
+        }
+        if (match_identifier_fast(p, "MOD")) {
+            *input = p + 3;
+            double d = unary(input);
+            if (d != 0.0) val = (long)val % (long)d;
+            continue;
+        }
+        if (match_identifier_fast(p, "DIV")) {
+            *input = p + 3;
+            double d = unary(input);
+            if (d != 0.0) val = (long)(val / d);
+            continue;
+        }
         const char *saved = *input;
         Token t = get_next_token(input);
-        if (t.type == TOKEN_STAR) val *= unary(input);
-        else if (t.type == TOKEN_SLASH) { double d = unary(input); if (d != 0) val /= d; }
-        else if (t.type == TOKEN_MOD) { double d = unary(input); if (d != 0) val = (long)val % (long)d; }
-        else if (t.type == TOKEN_IDIV) { double d = unary(input); if (d != 0) val = (long)(val / d); }
-        else { *input = saved; break; }
+        if (t.type == TOKEN_STAR) {
+            val *= unary(input);
+        } else if (t.type == TOKEN_SLASH) {
+            double d = unary(input);
+            if (d != 0.0) val /= d;
+        } else if (t.type == TOKEN_MOD) {
+            double d = unary(input);
+            if (d != 0.0) val = (long)val % (long)d;
+        } else if (t.type == TOKEN_IDIV) {
+            double d = unary(input);
+            if (d != 0.0) val = (long)(val / d);
+        } else {
+            *input = saved;
+            break;
+        }
     }
     return val;
 }
@@ -2648,11 +2836,27 @@ static double term(const char **input) {
 static double arithmetic_expression(const char **input) {
     double val = term(input);
     while (1) {
+        const char *p = skip_whitespace_fast(*input);
+        if (*p == '+') {
+            *input = p + 1;
+            val += term(input);
+            continue;
+        }
+        if (*p == '-') {
+            *input = p + 1;
+            val -= term(input);
+            continue;
+        }
         const char *saved = *input;
         Token t = get_next_token(input);
-        if (t.type == TOKEN_PLUS) val += term(input);
-        else if (t.type == TOKEN_MINUS) val -= term(input);
-        else { *input = saved; break; }
+        if (t.type == TOKEN_PLUS) {
+            val += term(input);
+        } else if (t.type == TOKEN_MINUS) {
+            val -= term(input);
+        } else {
+            *input = saved;
+            break;
+        }
     }
     return val;
 }
@@ -4441,6 +4645,7 @@ void run_program() {
     clear_data_pointer();
     Statement *curr = get_head();
     const char *resume_ptr = NULL;
+    int resume_ts_pos = -1;
     error_stmt = NULL;
     error_ptr = NULL;
     error_next_ptr = NULL;
@@ -4472,17 +4677,23 @@ void run_program() {
         current_executing_line = exec_stmt->line_number;
         
         int start_pos = 0;
-        if (resume_ptr) {
-            while (start_pos < exec_stmt->token_count && exec_stmt->tokens[start_pos].start_ptr < resume_ptr) {
-                start_pos++;
+        if (resume_ptr || resume_ts_pos >= 0) {
+            if (resume_ts_pos >= 0 && resume_ts_pos <= exec_stmt->token_count) {
+                start_pos = resume_ts_pos;
+            } else {
+                while (start_pos < exec_stmt->token_count && exec_stmt->tokens[start_pos].start_ptr < resume_ptr) {
+                    start_pos++;
+                }
             }
         }
         TokenStream ts = {exec_stmt->tokens, start_pos};
         resume_ptr = NULL;
+        resume_ts_pos = -1;
         
         int jumped = 0;
         while (ts.pos < exec_stmt->token_count && !stop_running && !jumped) {
-            Token t = ts.tokens[ts.pos++];
+            Token *current_token = &ts.tokens[ts.pos++];
+            Token t = *current_token;
 
             switch (t.type) {
             case TOKEN_EOF:
@@ -4514,7 +4725,7 @@ void run_program() {
             
             // Handle FOR loop
             case TOKEN_FOR: {
-                Token var = ts.tokens[ts.pos++];
+                Token *var_token = &ts.tokens[ts.pos++];
                 Token eq = ts.tokens[ts.pos++];
                 if (eq.type != TOKEN_EQUALS) {
                     report_runtime_error(ERR_SYNTAX_ERROR);
@@ -4529,8 +4740,7 @@ void run_program() {
                     step = evaluate_expression_tok(&ts);
                 }
                 
-                int idx = var.var_idx;
-                if (idx == -1) idx = find_variable(var.text);
+                int idx = resolve_token_variable(var_token);
                 vars[idx].value = start;
 
                 // BASIKA check: If the loop should not execute at all
@@ -4561,10 +4771,7 @@ void run_program() {
                     for_stack[for_ptr].end_val = end;
                     for_stack[for_ptr].step_val = step;
                     for_stack[for_ptr].start_stmt = exec_stmt;
-                    // Sync ptr for the stack
-                    const char *temp_ptr = exec_stmt->raw_command;
-                    for(int k=0; k < ts.pos; k++) get_next_token(&temp_ptr);
-                    for_stack[for_ptr].start_ptr = temp_ptr;
+                    for_stack[for_ptr].start_ts_pos = ts.pos;
                     for_ptr++;
                 } else {
                     report_runtime_error(ERR_OUT_OF_MEMORY);
@@ -4701,9 +4908,9 @@ void run_program() {
                             gosub_call_stack[gosub_ptr].stmt = exec_stmt;
                             // For return ptr, skip the rest of this command
                             while(ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type != TOKEN_COLON) ts.pos++;
-                            const char *temp_ptr = exec_stmt->raw_command;
-                            for(int k=0; k < ts.pos; k++) get_next_token(&temp_ptr);
-                            gosub_call_stack[gosub_ptr].ptr = temp_ptr;
+                            gosub_call_stack[gosub_ptr].ptr = ts.pos < exec_stmt->token_count
+                                ? exec_stmt->tokens[ts.pos].start_ptr
+                                : exec_stmt->raw_command + strlen(exec_stmt->raw_command);
                             gosub_call_stack[gosub_ptr].event_type = EVENT_NONE;
                             gosub_call_stack[gosub_ptr].event_index = 0;
                             gosub_ptr++;
@@ -4730,9 +4937,9 @@ void run_program() {
                 int target_line = resolve_target_line(target);
                 if (gosub_ptr < 32) {
                     gosub_call_stack[gosub_ptr].stmt = exec_stmt;
-                    const char *temp_ptr = exec_stmt->raw_command;
-                    for(int k=0; k < ts.pos; k++) get_next_token(&temp_ptr);
-                    gosub_call_stack[gosub_ptr].ptr = temp_ptr;
+                    gosub_call_stack[gosub_ptr].ptr = ts.pos < exec_stmt->token_count
+                        ? exec_stmt->tokens[ts.pos].start_ptr
+                        : exec_stmt->raw_command + strlen(exec_stmt->raw_command);
                     gosub_call_stack[gosub_ptr].event_type = EVENT_NONE;
                     gosub_call_stack[gosub_ptr].event_index = 0;
                     gosub_ptr++;
@@ -4777,12 +4984,12 @@ void run_program() {
 
             // Handle NEXT
             case TOKEN_NEXT: {
-                Token next_var = (ts.pos < exec_stmt->token_count) ? ts.tokens[ts.pos] : (Token){TOKEN_EOF, "", 0, 0, 0, NULL, 0};
+                Token next_var = (ts.pos < exec_stmt->token_count)
+                    ? ts.tokens[ts.pos]
+                    : (Token){.type = TOKEN_EOF};
                 int f = -1;
                 if (next_var.type == TOKEN_IDENTIFIER) {
-                    ts.pos++;
-                    int target_idx = next_var.var_idx;
-                    if (target_idx == -1) target_idx = find_variable(next_var.text);
+                    int target_idx = resolve_token_variable(&ts.tokens[ts.pos++]);
                     for (int i = for_ptr - 1; i >= 0; i--) {
                         if (for_stack[i].var_idx == target_idx) {
                             f = i;
@@ -4797,7 +5004,8 @@ void run_program() {
                     double v = vars[for_stack[f].var_idx].value;
                     if ((for_stack[f].step_val > 0 && v <= for_stack[f].end_val) || (for_stack[f].step_val < 0 && v >= for_stack[f].end_val)) {
                         curr = for_stack[f].start_stmt;
-                        resume_ptr = for_stack[f].start_ptr;
+                        resume_ptr = NULL;
+                        resume_ts_pos = for_stack[f].start_ts_pos;
                         jumped = 1;
                         break;
                     } else {
@@ -4834,7 +5042,9 @@ void run_program() {
                 continue;
 
             case TOKEN_RESUME: {
-                Token rt = (ts.pos < exec_stmt->token_count) ? ts.tokens[ts.pos++] : (Token){TOKEN_EOF, "", 0, 0, 0, NULL, 0};
+                Token rt = (ts.pos < exec_stmt->token_count)
+                    ? ts.tokens[ts.pos++]
+                    : (Token){.type = TOKEN_EOF};
                 if (rt.type == TOKEN_NEXT) {
                     curr = error_stmt;
                     resume_ptr = error_next_ptr;
@@ -4854,7 +5064,8 @@ void run_program() {
             }
 
             case TOKEN_LET:
-                t = ts.tokens[ts.pos++]; // Skip LET to get variable identifier
+                current_token = &ts.tokens[ts.pos++]; // Skip LET to get variable identifier
+                t = *current_token;
                 /* fall through */
             case TOKEN_IDENTIFIER: {
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COLON) {
@@ -4862,25 +5073,16 @@ void run_program() {
                     continue;
                 }
                 // Direct handling of assignments
-                int idx = t.var_idx;
-                if (idx == -1) idx = find_variable(t.text);
+                int idx = resolve_token_variable(current_token);
                 int array_idx = parse_array_index_tok(&ts, idx);
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
                     ts.pos++;
                     if (is_string_var(t.text)) {
-                        const char *temp_ptr = ts.tokens[ts.pos].start_ptr;
                         BasicString value = {0};
-                        if (parse_dynamic_string_expression(&temp_ptr, &value)) {
-                            assign_string_variable_value(idx, array_idx, value.data, value.length);
-                        } else {
-                            basic_string_release(&value);
-                            temp_ptr = ts.tokens[ts.pos].start_ptr;
-                            parse_string_expression_heap(&temp_ptr, &value);
+                        if (parse_string_expression_tok_heap(&ts, &value)) {
                             assign_string_variable_value(idx, array_idx, value.data, value.length);
                         }
                         basic_string_release(&value);
-                        // Sync ts.pos
-                        while (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].start_ptr < temp_ptr) ts.pos++;
                     } else {
                         set_numeric_variable(idx, array_idx, evaluate_expression_tok(&ts));
                     }

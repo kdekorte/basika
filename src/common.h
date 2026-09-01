@@ -52,6 +52,7 @@ typedef struct {
     int is_double;
     const char *start_ptr;
     int var_idx;
+    unsigned int type_generation;
 } Token;
 
 typedef struct Statement {

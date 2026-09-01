@@ -17,6 +17,9 @@
 - Add support for `CONT`, `STOP`, and better direct-mode behavior.
 - Implement `WAIT` for port monitoring (or a simulated equivalent).
 
+## Lexer and interpreter performance
+
+
 ## Graphics
 
 - ~~Implement `WINDOW` and `VIEW` for custom coordinate mapping and viewports.~~ ✅ Done
