@@ -2,7 +2,7 @@
 #define COMMON_H
 
 #define BASIKA_VERSION "0.99.2"
-#define BASIC_STRING_MAX 512
+#define BASIC_STRING_MAX (1024 * 1024) // 1 MB initial capacity
 #define BASIC_TOKEN_TEXT_MAX 4096
 
 typedef enum {
@@ -68,6 +68,7 @@ typedef struct {
     unsigned char *data;
     size_t length;
     size_t capacity;
+    int is_fixed; // Flag to enforce fixed size behavior (0 = dynamic, 1 = fixed)
 } BasicString;
 
 int basic_string_assign(BasicString **target, const void *data, size_t length);
