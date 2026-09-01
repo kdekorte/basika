@@ -579,6 +579,14 @@ int basic_string_append(BasicString *target, const void *data, size_t length) {
     return 1;
 }
 
+static int basic_string_append_repeat(BasicString *target, int character, size_t count) {
+    if (!target || !basic_string_reserve(target, target->length + count + 1)) return 0;
+    if (count) memset(target->data + target->length, character & 0xFF, count);
+    target->length += count;
+    target->data[target->length] = '\0';
+    return 1;
+}
+
 static int append_string_variable_value(BasicString *target, int idx, int array_idx) {
     if (idx < 0 || idx >= var_count) return 0;
     int fnum = 0;
@@ -635,14 +643,7 @@ static int parse_dynamic_string_expression(const char **input, BasicString *out)
             else if (value_token.type == TOKEN_STRING && value_token.text[0]) character = (unsigned char)value_token.text[0];
             else { *input = saved; break; }
             if (get_next_token(input).type != TOKEN_RPAREN || count < 0) { *input = saved; break; }
-            unsigned char block[256];
-            memset(block, character & 0xFF, sizeof(block));
-            while (count > 0) {
-                size_t chunk = count < (int)sizeof(block) ? (size_t)count : sizeof(block);
-                if (!basic_string_append(out, block, chunk)) return 0;
-                count -= (int)chunk;
-            }
-            term_parsed = 1;
+            term_parsed = basic_string_append_repeat(out, character, (size_t)count);
         }
         if (!term_parsed) {
             *input = saved;
@@ -1148,12 +1149,6 @@ static int get_string_variable_raw(int idx, int array_idx, char *dest, int dest_
     return len;
 }
 
-static void append_string_value(char *dest, const char *src, int dest_size) {
-    size_t used = strlen(dest);
-    if (used + 1 >= (size_t)dest_size) return;
-    strncat(dest, src, dest_size - 1 - used);
-}
-
 static void basic_string_to_buffer(const BasicString *src, char *out, int out_size) {
     if (!out || out_size <= 0) return;
     size_t len = src ? src->length : 0;
@@ -1241,11 +1236,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (n < 0) n = 0;
-            char *block = malloc((size_t)(n > 0 ? n : 1));
-            if (!block) return 0;
-            memset(block, c, (size_t)n);
-            basic_string_append(&term, block, (size_t)n);
-            free(block);
+            if (!basic_string_append_repeat(&term, c, (size_t)n)) return 0;
             basic_string_release(&arg_buf);
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             ts->pos++;
@@ -1554,11 +1545,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
                 get_next_token(input);
             }
             if (n < 0) n = 0;
-            char *block = malloc((size_t)(n > 0 ? n : 1));
-            if (!block) return 0;
-            memset(block, c, (size_t)n);
-            basic_string_append(&term, block, (size_t)n);
-            free(block);
+            if (!basic_string_append_repeat(&term, c, (size_t)n)) return 0;
             basic_string_release(&arg_buf);
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             get_next_token(input);
@@ -2233,14 +2220,6 @@ static double arithmetic_expression_tok(TokenStream *ts) {
 }
 
 static double relational_expression_tok(TokenStream *ts) {
-    if (ts->tokens[ts->pos].type != TOKEN_EOF && is_string_token(ts->tokens[ts->pos])) {
-        const char *input = ts->tokens[ts->pos].start_ptr;
-        double value = evaluate_expression(&input);
-        while (ts->tokens[ts->pos].type != TOKEN_EOF && ts->tokens[ts->pos].start_ptr < input) {
-            ts->pos++;
-        }
-        return value;
-    }
     double val = arithmetic_expression_tok(ts);
     while (1) {
         Token t = ts->tokens[ts->pos];
@@ -2286,7 +2265,9 @@ static double bitwise_and_tok(TokenStream *ts) {
     double val = logical_not_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_AND) {
         ts->pos++;
-        val = (double)((short)val & (short)logical_not_tok(ts));
+        double right = is_string_token(ts->tokens[ts->pos])
+            ? evaluate_expression_tok(ts) : logical_not_tok(ts);
+        val = (double)((short)val & (short)right);
     }
     return val;
 }

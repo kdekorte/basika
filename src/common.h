@@ -3,7 +3,7 @@
 
 #define BASIKA_VERSION "0.99.2"
 #define BASIC_STRING_MAX (64 * 1024) // Legacy temporary-buffer limit; runtime strings grow dynamically.
-#define BASIC_TOKEN_TEXT_MAX 4096
+#define BASIC_TOKEN_TEXT_MAX 256
 
 typedef enum {
     TOKEN_NUMBER, TOKEN_STRING, TOKEN_IDENTIFIER,
