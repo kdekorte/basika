@@ -73,6 +73,7 @@ TESTS=(
   "tests/long_string_test"
   "tests/dynamic_string_growth"
   "tests/dynamic_string_functions"
+  "tests/fixed_string_declarations"
   "tests/basic_string_storage_test"
   "tests/mki_mks_mkd"
   "tests/input_multi"

@@ -41,6 +41,7 @@ static int print_col = 0;
 static int internal_argc = 0;
 static char **internal_argv = NULL;
 static char internal_command_line[1024] = "";
+static int fixed_string_declarations_present = 0;
 
 static unsigned char basika_memory[65536];
 
@@ -509,11 +510,22 @@ static int parse_randomize(const char **input) {
     return 1;
 }
 
+static unsigned int hash_name(const char *name);
+
 static int is_string_var(const char *name) {
     int len = (int)strlen(name);
     if (len == 0) return 0;
     char last = name[len - 1];
     if (last == '$') return 1;
+    if (fixed_string_declarations_present && last != '%' && last != '!' && last != '#') {
+        char normalized[64];
+        snprintf(normalized, sizeof(normalized), "%s!", name);
+        unsigned int hash = hash_name(normalized);
+        int idx = var_hash_table[hash];
+        if (idx >= 0 && idx < var_count && vars[idx].string_declared && strcmp(vars[idx].name, normalized) == 0) {
+            return 1;
+        }
+    }
     if (last == '%' || last == '!' || last == '#') return 0;
     int first = toupper((unsigned char)name[0]);
     if (first >= 'A' && first <= 'Z') {
@@ -565,11 +577,25 @@ int basic_string_assign(BasicString **target, const void *data, size_t length) {
         if (!*target) return 0;
     }
     BasicString *value = *target;
-    if (!basic_string_reserve(value, length + 1)) return 0;
-    if (data && length) memcpy(value->data, data, length);
-    value->data[length] = '\0';
-    value->length = length;
+    size_t assigned_length = value->is_fixed ? value->fixed_length : length;
+    if (!basic_string_reserve(value, assigned_length + 1)) return 0;
+    size_t copy_length = data && length < assigned_length ? length : assigned_length;
+    if (data && copy_length) memcpy(value->data, data, copy_length);
+    if (assigned_length > copy_length) memset(value->data + copy_length, ' ', assigned_length - copy_length);
+    value->data[assigned_length] = '\0';
+    value->length = assigned_length;
     return 1;
+}
+
+static int assign_string_variable_value(int idx, int array_idx, const void *data, size_t length) {
+    BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
+    if (vars[idx].string_declared) {
+        if (!*target) *target = basic_string_create(NULL, 0);
+        if (!*target) return 0;
+        (*target)->is_fixed = 1;
+        (*target)->fixed_length = vars[idx].string_fixed_length;
+    }
+    return basic_string_assign(target, data, length);
 }
 
 int basic_string_append(BasicString *target, const void *data, size_t length) {
@@ -1781,9 +1807,9 @@ static void set_string_variable_with_align(int idx, int array_idx, const char *v
 
     if (array_idx >= 0) {
         if (!vars[idx].s_array || array_idx < 0 || array_idx >= vars[idx].array_size) return;
-        basic_string_assign(&vars[idx].s_array[array_idx], value, strlen(value));
+        assign_string_variable_value(idx, array_idx, value, strlen(value));
     } else {
-        basic_string_assign(&vars[idx].s_value, value, strlen(value));
+        assign_string_variable_value(idx, array_idx, value, strlen(value));
     }
 }
 
@@ -1802,9 +1828,9 @@ static void trim_string(char *s) {
 static void assign_input_value(int idx, int array_idx, int is_string, const char *value) {
     if (is_string) {
         if (array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size) {
-            basic_string_assign(&vars[idx].s_array[array_idx], value, strlen(value));
+            assign_string_variable_value(idx, array_idx, value, strlen(value));
         } else {
-            basic_string_assign(&vars[idx].s_value, value, strlen(value));
+            assign_string_variable_value(idx, array_idx, value, strlen(value));
         }
     } else {
         set_numeric_variable(idx, array_idx, atof(value));
@@ -1855,8 +1881,7 @@ static void execute_assignment(const char **input, Token var_token) {
         BasicString dynamic_value = {0};
         const char *dynamic_saved = *input;
         if (parse_dynamic_string_expression(input, &dynamic_value)) {
-            BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
-            basic_string_assign(target, dynamic_value.data, dynamic_value.length);
+            assign_string_variable_value(idx, array_idx, dynamic_value.data, dynamic_value.length);
             free(dynamic_value.data);
             return;
         }
@@ -3671,6 +3696,24 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (var.type != TOKEN_IDENTIFIER) break;
                 
                 Token lparen = get_next_token(&ptr);
+                if (lparen.type == TOKEN_AS) {
+                    Token type = get_next_token(&ptr);
+                    Token star = get_next_token(&ptr);
+                    Token length_token = get_next_token(&ptr);
+                    if (strcasecmp(type.text, "STRING") != 0 || star.type != TOKEN_STAR ||
+                        length_token.type != TOKEN_NUMBER || length_token.int_val < 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    int idx = find_variable(var.text);
+                    vars[idx].string_declared = 1;
+                    vars[idx].string_fixed_length = (size_t)length_token.int_val;
+                    fixed_string_declarations_present = 1;
+                    assign_string_variable_value(idx, -1, NULL, 0);
+                    const char *comma_saved = ptr;
+                    if (get_next_token(&ptr).type != TOKEN_COMMA) ptr = comma_saved;
+                    continue;
+                }
                 if (lparen.type != TOKEN_LPAREN) break;
                 
                 // Parse dimensions (can be multiple, separated by commas)
@@ -3693,6 +3736,25 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (rparen.type != TOKEN_RPAREN) break;
                 
                 int idx = find_variable(var.text);
+                const char *type_saved = ptr;
+                Token type_as = get_next_token(&ptr);
+                int fixed_length = 0;
+                if (type_as.type == TOKEN_AS) {
+                    Token type = get_next_token(&ptr);
+                    Token star = get_next_token(&ptr);
+                    Token length_token = get_next_token(&ptr);
+                    if (strcasecmp(type.text, "STRING") != 0 || star.type != TOKEN_STAR ||
+                        length_token.type != TOKEN_NUMBER || length_token.int_val < 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    fixed_length = length_token.int_val;
+                    vars[idx].string_declared = 1;
+                    vars[idx].string_fixed_length = (size_t)fixed_length;
+                    fixed_string_declarations_present = 1;
+                } else {
+                    ptr = type_saved;
+                }
                 
                 // Calculate total size and check if any dim is invalid
                 int total_size = 1;
@@ -4809,14 +4871,12 @@ void run_program() {
                         const char *temp_ptr = ts.tokens[ts.pos].start_ptr;
                         BasicString value = {0};
                         if (parse_dynamic_string_expression(&temp_ptr, &value)) {
-                            BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
-                            basic_string_assign(target, value.data, value.length);
+                            assign_string_variable_value(idx, array_idx, value.data, value.length);
                         } else {
                             basic_string_release(&value);
                             temp_ptr = ts.tokens[ts.pos].start_ptr;
                             parse_string_expression_heap(&temp_ptr, &value);
-                            BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
-                            basic_string_assign(target, value.data, value.length);
+                            assign_string_variable_value(idx, array_idx, value.data, value.length);
                         }
                         basic_string_release(&value);
                         // Sync ts.pos

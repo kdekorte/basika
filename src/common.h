@@ -69,6 +69,7 @@ typedef struct {
     size_t length;
     size_t capacity;
     int is_fixed; // Flag to enforce fixed size behavior (0 = dynamic, 1 = fixed)
+    size_t fixed_length;
 } BasicString;
 
 int basic_string_assign(BasicString **target, const void *data, size_t length);
@@ -83,6 +84,8 @@ typedef struct {
     int array_size;
     int num_dims;
     int dims[3];  // Support up to 3D arrays
+    int string_declared;
+    size_t string_fixed_length;
 } Variable;
 
 typedef enum {

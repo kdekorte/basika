@@ -5,6 +5,7 @@ All notable changes to this project are recorded in this file.
 ## 2026-09-01
 
 - **Dynamic Strings**: Added length-aware heap-backed string storage with automatic growth for scalar strings, string arrays, assignments, concatenation, and string functions.
+- **Fixed-Length Strings**: Added `DIM name AS STRING * n` declarations for fixed-width scalar and string-array values with BASIC-compatible padding and truncation.
 - **Large-String Compression**: Updated `_DEFLATE$` and `_INFLATE$` to use dynamic buffers and support multi-megabyte round trips.
 - **Parser Compatibility**: Preserved FIELD, DATA/READ, command-line strings, numeric `STRING$` arguments, and string comparisons while removing fixed temporary-buffer limits from dynamic paths.
 - **Performance**: Kept token storage compact to avoid slowing numeric programs.

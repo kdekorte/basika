@@ -5,8 +5,8 @@
 The following is the complete keyword set recognized by the lexer:
 
 String values use length-aware heap-backed storage and grow dynamically as
-needed. Dynamic strings are the default; fixed-length `STRING * n` declarations
-are not currently implemented.
+needed. Dynamic strings are the default; fixed-length declarations are available
+with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
@@ -59,6 +59,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DEFSNG letter_range`: Defines variables starting with these letters as single-precision.
 - `DEFDBL letter_range`: Defines variables starting with these letters as double-precision.
 - `DIM var(dim1[, dim2, dim3])`: Array dimensioning (up to 3D).
+- `DIM name AS STRING * n`: Declares a fixed-width scalar string padded with spaces.
+- `DIM name(size) AS STRING * n`: Declares a fixed-width string array; assignments are padded or truncated to `n` characters.
 - `ERASE var`: Reinitializes variables or arrays.
 - `LET var = expression`: Assignment (keyword is optional).
 - `OPTION BASE {0 | 1}`: Sets minimum array subscript.

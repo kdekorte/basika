@@ -99,23 +99,22 @@ Run the repository test suite:
 make test
 ```
 
-## Dynamic Strings
-
-String variables use heap-backed storage and grow automatically as values are
-assigned, concatenated, or returned from string functions. Multi-megabyte
-values are supported by default; fixed-length `STRING * n` declarations are
-not currently implemented.
-
-`_DEFLATE$` and `_INFLATE$` support lossless compression and decompression of
-dynamic strings, including multi-megabyte round trips. Coverage for dynamic
-growth, string functions, and compression is included in `make test`.
-
 ## Supported features
 
 Basika supports a wide range of IBM BASICA-compatible commands, including file I/O,
 graphics, sound, labels, optional line numbers, loaded fonts, and image handles.
 Graphics image handles are managed with `_LOADIMAGE`, `_PUTIMAGE`, and
 `_FREEIMAGE`; loaded fonts use `_LOADFONT`, `_FONT`, and `_FREEFONT`.
+
+String variables use heap-backed storage and grow automatically as values are
+assigned, concatenated, or returned from string functions. Multi-megabyte
+values are supported by default. Fixed-length declarations are also supported
+with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
+
+`_DEFLATE$` and `_INFLATE$` support lossless compression and decompression of
+dynamic strings, including multi-megabyte round trips. Coverage for dynamic
+growth, string functions, fixed-length declarations, and compression is
+included in `make test`.
 
 For a full list of supported commands and their exact syntax, please refer to KEYWORDS.md.
 
