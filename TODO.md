@@ -19,6 +19,19 @@
 
 ## Lexer and interpreter performance
 
+### Memory and strings
+
+- Profile large string assignments and concatenations, then avoid unnecessary copies through direct append or safe ownership transfer where BASICA value semantics permit it.
+
+### File and graphics I/O
+
+- Profile file-heavy workloads; if `LOF`/`LOC` or frequent random-record access is hot, cache file-position/size metadata where it can be kept correct.
+- Profile graphics-heavy workloads for redundant state changes or presents; retain canvas batching and only add command batching when measurements show a benefit.
+
+### Parsing and evaluation
+
+- Profile repeated complex expressions in loops; consider compiling stable expressions to an AST or bytecode only if parsing remains a demonstrated bottleneck.
+- Profile raw-parser lookahead/backtracking paths and remove repeated token reads in measured hot paths without weakening syntax recovery.
 
 ## Graphics
 
