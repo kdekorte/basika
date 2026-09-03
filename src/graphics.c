@@ -10,6 +10,7 @@
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 void update_graphics(); // Forward declaration
+static void render_canvas_to_window(void); // Forward declaration
 static SDL_Texture **get_active_glyph_cache(void); // Forward declaration
 static SDL_Texture *glyph_cache[128] = {NULL};
 static SDL_Texture *canvas = NULL;
@@ -197,27 +198,35 @@ static void reload_font(int target_height) {
         return;
     }
 
-    // Update dimensions based on the new font size
-    int glyph_w = 0, glyph_h = 0;
-    if (TTF_GetStringSize(font, "W", 0, &glyph_w, &glyph_h)) {
-        current_col_width = canvas_width / text_columns;
-        current_row_height = canvas_height / text_rows;
-        
-        int line_skip = TTF_GetFontLineSkip(font);
-        if (line_skip > current_row_height) current_row_height = line_skip;
-        if (glyph_h + 2 > current_row_height) current_row_height = glyph_h + 2;
-    }
+    // Update dimensions based on text layout
+    current_col_width = canvas_width / text_columns;
+    current_row_height = canvas_height / text_rows;
 
     // Re-populate Glyph Cache for ASCII
     SDL_Color white = {255, 255, 255, 255};
+    int cell_w = current_col_width;
+    int cell_h = current_row_height;
     for (int i = 32; i < 127; i++) {
         char s[2] = {(char)i, 0};
-        SDL_Surface* surf = TTF_RenderText_Solid(font, s, 0, white);
+        SDL_Surface* surf = TTF_RenderText_Blended(font, s, 0, white);
         if (surf) {
-            glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, surf);
+            SDL_Surface* cell_surf = SDL_CreateSurface(cell_w, cell_h, SDL_PIXELFORMAT_RGBA8888);
+            if (cell_surf) {
+                SDL_ClearSurface(cell_surf, 0, 0, 0, 0);
+                int ox = (cell_w - surf->w) / 2;
+                if (ox < 0) ox = 0;
+                int oy = (cell_h - surf->h) / 2;
+                if (oy < 0) oy = 0;
+                SDL_Rect dst_rect = {ox, oy, surf->w, surf->h};
+                SDL_BlitSurface(surf, NULL, cell_surf, &dst_rect);
+                glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, cell_surf);
+                SDL_DestroySurface(cell_surf);
+            } else {
+                glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, surf);
+            }
             if (glyph_cache[i]) {
                 SDL_SetTextureBlendMode(glyph_cache[i], SDL_BLENDMODE_BLEND);
-                SDL_SetTextureScaleMode(glyph_cache[i], SDL_SCALEMODE_NEAREST);
+                SDL_SetTextureScaleMode(glyph_cache[i], SDL_SCALEMODE_LINEAR);
             }
             SDL_DestroySurface(surf);
         }
@@ -253,14 +262,6 @@ void set_screen_mode(int mode) {
     // Re-scale font and glyph cache for the new resolution
     if (font_path[0] != '\0') {
         reload_font(current_row_height);
-    } else if (font) {
-        // Fallback for when we don't have font_path yet
-        int glyph_w = 0, glyph_h = 0;
-        if (TTF_GetStringSize(font, "W", 0, &glyph_w, &glyph_h)) {
-            int line_skip = TTF_GetFontLineSkip(font);
-            if (line_skip > 0 && line_skip < current_row_height) current_row_height = line_skip;
-            if (glyph_h > 0 && glyph_h < current_row_height) current_row_height = glyph_h;
-        }
     }
     
     if (current_row_height < 1) current_row_height = 1;
@@ -277,25 +278,7 @@ void set_screen_mode(int mode) {
         SDL_SetRenderTarget(renderer, canvas);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        SDL_SetRenderTarget(renderer, NULL);
-        // Render to window using centered 4:3 destination rect
-        if (window) {
-            int win_w, win_h;
-            SDL_GetWindowSize(window, &win_w, &win_h);
-            double target_aspect = 4.0 / 3.0;
-            int dest_w = win_w;
-            int dest_h = (int)(dest_w / target_aspect + 0.5);
-            if (dest_h > win_h) {
-                dest_h = win_h;
-                dest_w = (int)(dest_h * target_aspect + 0.5);
-            }
-            SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-            SDL_SetRenderTarget(renderer, NULL);
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
-            SDL_RenderTexture(renderer, canvas, NULL, &dst);
-            SDL_RenderPresent(renderer);
-        }
+        if (window) render_canvas_to_window();
     }
 }
 
@@ -319,13 +302,6 @@ void set_screen_newimage(int width, int height, int colors) {
 
     if (font_path[0] != '\0') {
         reload_font(current_row_height);
-    } else if (font) {
-        int glyph_w = 0, glyph_h = 0;
-        if (TTF_GetStringSize(font, "W", 0, &glyph_w, &glyph_h)) {
-            int line_skip = TTF_GetFontLineSkip(font);
-            if (line_skip > 0 && line_skip < current_row_height) current_row_height = line_skip;
-            if (glyph_h > 0 && glyph_h < current_row_height) current_row_height = glyph_h;
-        }
     }
 
     if (current_row_height < 1) current_row_height = 1;
@@ -349,24 +325,7 @@ void set_screen_newimage(int width, int height, int colors) {
         SDL_SetRenderTarget(renderer, canvas);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        SDL_SetRenderTarget(renderer, NULL);
-        if (window) {
-            int win_w, win_h;
-            SDL_GetWindowSize(window, &win_w, &win_h);
-            double target_aspect = (double)width / (double)height;
-            int dest_w = win_w;
-            int dest_h = (int)(dest_w / target_aspect + 0.5);
-            if (dest_h > win_h) {
-                dest_h = win_h;
-                dest_w = (int)(dest_h * target_aspect + 0.5);
-            }
-            SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-            SDL_SetRenderTarget(renderer, NULL);
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
-            SDL_RenderTexture(renderer, canvas, NULL, &dst);
-            SDL_RenderPresent(renderer);
-        }
+        if (window) render_canvas_to_window();
     }
 }
 
@@ -524,59 +483,30 @@ void graphics_printstring(int px, int py, const char *text) {
     if (!font || !canvas || !text) return;
     SDL_SetRenderTarget(renderer, canvas);
 
-    int draw_x = px;
-    int draw_y = py;
-
-    while (*text) {
-        if (*text == '\n' || *text == '\r') {
-            text++;
-            continue;
+    SDL_Surface* surf = TTF_RenderText_Blended(font, text, 0, current_text_color);
+    if (surf) {
+        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+        if (tex) {
+            SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+            SDL_FRect dest = {(float)px, (float)py, (float)surf->w, (float)surf->h};
+            SDL_RenderTexture(renderer, tex, NULL, &dest);
+            SDL_DestroyTexture(tex);
         }
-        if (*text == ' ') {
-            draw_x += current_col_width;
-            text++;
-        } else {
-            unsigned char c = (unsigned char)*text;
-            SDL_Texture **cache = get_active_glyph_cache();
-            if (c < 128 && cache[c]) {
-                SDL_SetTextureColorMod(cache[c], current_text_color.r, current_text_color.g, current_text_color.b);
-                SDL_FRect dest = {(float)draw_x, (float)draw_y, (float)current_col_width, (float)current_row_height};
-                SDL_RenderTexture(renderer, cache[c], NULL, &dest);
-                text++;
-            } else {
-                int len = utf8_char_len(c);
-                char s[5] = {0};
-                for (int i = 0; i < len && text[i]; i++) s[i] = text[i];
-                SDL_Surface* surf = TTF_RenderText_Blended(font, s, 0, current_text_color);
-                if (surf) {
-                    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
-                    SDL_FRect dest = {(float)draw_x, (float)draw_y, (float)current_col_width, (float)current_row_height};
-                    SDL_RenderTexture(renderer, tex, NULL, &dest);
-                    SDL_DestroySurface(surf);
-                    SDL_DestroyTexture(tex);
-                }
-                text += len;
-            }
-            draw_x += current_col_width;
-        }
+        SDL_DestroySurface(surf);
     }
     update_graphics();
 }
 
 int graphics_printwidth(const char *text) {
     if (!text) return 0;
-    int width = 0;
-    while (*text) {
-        if (*text == '\n' || *text == '\r') {
-            text++;
-            continue;
+    if (font) {
+        int w = 0, h = 0;
+        if (TTF_GetStringSize(font, text, 0, &w, &h)) {
+            return w;
         }
-        unsigned char c = (unsigned char)*text;
-        int len = utf8_char_len(c);
-        width += current_col_width;
-        text += len;
     }
-    return width;
+    return (int)strlen(text) * current_col_width;
 }
 
 int graphics_loadimage(const char *filename, int mode) {
@@ -677,6 +607,8 @@ static SDL_Texture **get_active_glyph_cache(void) {
 static void build_slot_glyph_cache(FontSlot *slot) {
     if (!slot->font || !renderer) return;
     SDL_Color white = {255, 255, 255, 255};
+    int cell_w = slot->col_width > 0 ? slot->col_width : 16;
+    int cell_h = slot->row_height > 0 ? slot->row_height : 32;
     for (int i = 32; i < 127; i++) {
         if (slot->glyph_cache[i]) {
             SDL_DestroyTexture(slot->glyph_cache[i]);
@@ -685,10 +617,23 @@ static void build_slot_glyph_cache(FontSlot *slot) {
         char s[2] = {(char)i, 0};
         SDL_Surface* surf = TTF_RenderText_Blended(slot->font, s, 0, white);
         if (surf) {
-            slot->glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, surf);
+            SDL_Surface* cell_surf = SDL_CreateSurface(cell_w, cell_h, SDL_PIXELFORMAT_RGBA8888);
+            if (cell_surf) {
+                SDL_ClearSurface(cell_surf, 0, 0, 0, 0);
+                int ox = (cell_w - surf->w) / 2;
+                if (ox < 0) ox = 0;
+                int oy = (cell_h - surf->h) / 2;
+                if (oy < 0) oy = 0;
+                SDL_Rect dst_rect = {ox, oy, surf->w, surf->h};
+                SDL_BlitSurface(surf, NULL, cell_surf, &dst_rect);
+                slot->glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, cell_surf);
+                SDL_DestroySurface(cell_surf);
+            } else {
+                slot->glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, surf);
+            }
             if (slot->glyph_cache[i]) {
                 SDL_SetTextureBlendMode(slot->glyph_cache[i], SDL_BLENDMODE_BLEND);
-                SDL_SetTextureScaleMode(slot->glyph_cache[i], SDL_SCALEMODE_NEAREST);
+                SDL_SetTextureScaleMode(slot->glyph_cache[i], SDL_SCALEMODE_LINEAR);
             }
             SDL_DestroySurface(surf);
         }
@@ -913,35 +858,45 @@ int init_graphics() {
     // Now reload the font at the size matching the current mode
     reload_font(current_row_height);
 
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_SetRenderTarget(renderer, canvas);
-    SDL_RenderClear(renderer);
-    SDL_SetRenderTarget(renderer, NULL);
-    // Present initial cleared canvas using centered 4:3 rendering
-    if (window) {
-        int win_w, win_h;
-        SDL_GetWindowSize(window, &win_w, &win_h);
-        double target_aspect = 4.0 / 3.0;
-        int dest_w = win_w;
-        int dest_h = (int)(dest_w / target_aspect + 0.5);
-        if (dest_h > win_h) {
-            dest_h = win_h;
-            dest_w = (int)(dest_h * target_aspect + 0.5);
-        }
-        SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-        SDL_SetRenderTarget(renderer, NULL);
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderTexture(renderer, canvas, NULL, &dst);
-        SDL_RenderPresent(renderer);
-    }
     current_text_color = (SDL_Color){255, 255, 255, 255};
+    if (window) render_canvas_to_window();
     return 1;
 }
 
 // Presentation throttling: present to the window at most once per interval (ms)
 static Uint64 last_present = 0;
 static int present_interval_ms = 16; // default ~60 FPS
+
+static double get_target_aspect_ratio(void) {
+    if (mode_res_h == 200 || mode_res_h == 350) {
+        return 4.0 / 3.0; // CRT aspect ratio for legacy 200/350 line modes
+    }
+    if (canvas_width > 0 && canvas_height > 0) {
+        return (double)canvas_width / (double)canvas_height;
+    }
+    return 4.0 / 3.0;
+}
+
+static void render_canvas_to_window(void) {
+    if (!renderer || !canvas || !window) return;
+    int win_w, win_h;
+    SDL_GetWindowSize(window, &win_w, &win_h);
+    double target_aspect = get_target_aspect_ratio();
+    int dest_w = win_w;
+    int dest_h = (int)(dest_w / target_aspect + 0.5);
+    if (dest_h > win_h) {
+        dest_h = win_h;
+        dest_w = (int)(dest_h * target_aspect + 0.5);
+    }
+    SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
+    SDL_SetRenderTarget(renderer, NULL);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    SDL_RenderTexture(renderer, canvas, NULL, &dst);
+    SDL_RenderPresent(renderer);
+    last_present = SDL_GetTicks();
+    SDL_SetRenderTarget(renderer, canvas);
+}
 
 void set_present_interval(int ms) {
     if (ms < 0) ms = 0;
@@ -951,23 +906,7 @@ void set_present_interval(int ms) {
 void graphics_present_now() {
     if (!renderer || !canvas) return;
     if (window) {
-        int win_w, win_h;
-        SDL_GetWindowSize(window, &win_w, &win_h);
-        double target_aspect = 4.0 / 3.0;
-        int dest_w = win_w;
-        int dest_h = (int)(dest_w / target_aspect + 0.5);
-        if (dest_h > win_h) {
-            dest_h = win_h;
-            dest_w = (int)(dest_h * target_aspect + 0.5);
-        }
-        SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-        SDL_SetRenderTarget(renderer, NULL);
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderTexture(renderer, canvas, NULL, &dst);
-        SDL_RenderPresent(renderer);
-        last_present = SDL_GetTicks();
-        SDL_SetRenderTarget(renderer, canvas);
+        render_canvas_to_window();
     }
 }
 
@@ -995,28 +934,56 @@ void set_text_color(int color_value) {
     }
 }
 
-static SDL_Color get_graphics_color(int color_value) {
-    if (color_value < 0) color_value = 0;
-    if (color_value > 15) color_value = 15;
-    switch (color_value) {
-        case 0: return (SDL_Color){0, 0, 0, 255};
-        case 1: return (SDL_Color){0, 0, 170, 255};
-        case 2: return (SDL_Color){0, 170, 0, 255};
-        case 3: return (SDL_Color){0, 170, 170, 255};
-        case 4: return (SDL_Color){170, 0, 0, 255};
-        case 5: return (SDL_Color){170, 0, 170, 255};
-        case 6: return (SDL_Color){170, 85, 0, 255};
-        case 7: return (SDL_Color){170, 170, 170, 255};
-        case 8: return (SDL_Color){85, 85, 85, 255};
-        case 9: return (SDL_Color){85, 85, 255, 255};
-        case 10: return (SDL_Color){85, 255, 85, 255};
-        case 11: return (SDL_Color){85, 255, 255, 255};
-        case 12: return (SDL_Color){255, 85, 85, 255};
-        case 13: return (SDL_Color){255, 85, 255, 255};
-        case 14: return (SDL_Color){255, 255, 85, 255};
-        case 15: return (SDL_Color){255, 255, 255, 255};
-        default: return (SDL_Color){255, 255, 255, 255};
+static SDL_Color palette256[256];
+static int palette_initialized = 0;
+
+static void init_palette256(void) {
+    if (palette_initialized) return;
+    palette256[0]  = (SDL_Color){0, 0, 0, 255};
+    palette256[1]  = (SDL_Color){0, 0, 170, 255};
+    palette256[2]  = (SDL_Color){0, 170, 0, 255};
+    palette256[3]  = (SDL_Color){0, 170, 170, 255};
+    palette256[4]  = (SDL_Color){170, 0, 0, 255};
+    palette256[5]  = (SDL_Color){170, 0, 170, 255};
+    palette256[6]  = (SDL_Color){170, 85, 0, 255};
+    palette256[7]  = (SDL_Color){170, 170, 170, 255};
+    palette256[8]  = (SDL_Color){85, 85, 85, 255};
+    palette256[9]  = (SDL_Color){85, 85, 255, 255};
+    palette256[10] = (SDL_Color){85, 255, 85, 255};
+    palette256[11] = (SDL_Color){85, 255, 255, 255};
+    palette256[12] = (SDL_Color){255, 85, 85, 255};
+    palette256[13] = (SDL_Color){255, 85, 255, 255};
+    palette256[14] = (SDL_Color){255, 255, 85, 255};
+    palette256[15] = (SDL_Color){255, 255, 255, 255};
+
+    for (int i = 16; i < 256; i++) {
+        double t = (double)(i - 16) / 240.0;
+        double r = 0, g = 0, b = 0;
+        if (t < 0.2) {
+            double f = t / 0.2;
+            r = 0; g = 255 * f; b = 255;
+        } else if (t < 0.4) {
+            double f = (t - 0.2) / 0.2;
+            r = 0; g = 255; b = 255 * (1.0 - f);
+        } else if (t < 0.6) {
+            double f = (t - 0.4) / 0.2;
+            r = 255 * f; g = 255; b = 0;
+        } else if (t < 0.8) {
+            double f = (t - 0.6) / 0.2;
+            r = 255; g = 255 * (1.0 - f); b = 0;
+        } else {
+            double f = (t - 0.8) / 0.2;
+            r = 255; g = 0; b = 255 * f;
+        }
+        palette256[i] = (SDL_Color){(Uint8)r, (Uint8)g, (Uint8)b, 255};
     }
+    palette_initialized = 1;
+}
+
+static SDL_Color get_graphics_color(int color_value) {
+    if (!palette_initialized) init_palette256();
+    color_value = (color_value % 256 + 256) % 256;
+    return palette256[color_value];
 }
 
 void set_pixel(double user_x, double user_y, int color) {
@@ -1059,8 +1026,8 @@ int get_pixel(double user_x, double user_y) {
     SDL_ReadSurfacePixel(surf, 0, 0, &r, &g, &b, &a);
     SDL_DestroySurface(surf);
 
-    // Find closest match in the standard 16-color palette
-    for (int i = 0; i < 16; i++) {
+    // Find closest match in the 256-color palette
+    for (int i = 0; i < 256; i++) {
         SDL_Color c = get_graphics_color(i);
         if (c.r == r && c.g == g && c.b == b) return i;
     }
@@ -1299,40 +1266,21 @@ void draw_paint(double ux, double uy, int paint_color, int border_color) {
 void set_window_title(const char *title) {
     if (!window || !title) return;
     SDL_SetWindowTitle(window, title);
+    graphics_present_now();
 }
 
 void update_graphics() {
     if (!renderer || !canvas) return;
 
-    // Throttle presents to avoid flickering and heavy CPU usage in tight loops.
     Uint64 now = SDL_GetTicks();
-    if (present_interval_ms > 0 && (now - last_present < (Uint64)present_interval_ms)) { // Throttle check
+    if (present_interval_ms > 0 && (now - last_present < (Uint64)present_interval_ms)) {
         return;
     }
     handle_events(); // Process events only when a frame is presented
 
-    SDL_SetRenderTarget(renderer, NULL);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_RenderClear(renderer);
     if (window) {
-        int win_w, win_h;
-        SDL_GetWindowSize(window, &win_w, &win_h);
-        double target_aspect = 4.0 / 3.0;
-        int dest_w = win_w;
-        int dest_h = (int)(dest_w / target_aspect + 0.5);
-        if (dest_h > win_h) {
-            dest_h = win_h;
-            dest_w = (int)(dest_h * target_aspect + 0.5);
-        }
-        SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-        SDL_RenderTexture(renderer, canvas, NULL, &dst);
-    } else {
-        SDL_RenderTexture(renderer, canvas, NULL, NULL);
+        render_canvas_to_window();
     }
-
-    SDL_RenderPresent(renderer);
-    last_present = SDL_GetTicks();
-    SDL_SetRenderTarget(renderer, canvas);
 }
 
 void graphics_readline(char *buffer, int size) {
@@ -1449,6 +1397,12 @@ void wait_for_keypress() {
     while (SDL_WaitEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT) exit(0);
         if (e.type == SDL_EVENT_KEY_DOWN) break;
+        if (e.type == SDL_EVENT_WINDOW_EXPOSED ||
+            e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+            e.type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
+            e.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+            graphics_present_now();
+        }
     }
 }
 
