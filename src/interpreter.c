@@ -97,6 +97,140 @@ typedef struct {
 static UserFunction user_functions[64];
 static int user_function_count = 0;
 
+#define MAX_PROCEDURES 128
+#define MAX_PROC_PARAMS 16
+
+typedef struct {
+    char name[32];
+    int is_string;
+    int is_array;
+} ProcParamDef;
+
+typedef struct {
+    char name[32];
+    int is_function; // 0 for SUB, 1 for FUNCTION
+    int is_static;
+    int param_count;
+    ProcParamDef params[MAX_PROC_PARAMS];
+    Statement *header_stmt;
+    Statement *start_stmt;
+    Statement *end_stmt;
+} ProcedureDef;
+
+static ProcedureDef registered_procs[MAX_PROCEDURES];
+static int proc_count = 0;
+
+#define MAX_CALL_FRAMES 64
+
+typedef struct {
+    ProcedureDef *proc;
+    Statement *return_stmt;
+    int return_token_idx;
+    
+    Variable local_vars[128];
+    int local_var_count;
+    
+    int byref_caller_var_idx[MAX_PROC_PARAMS];
+    int byref_caller_frame[MAX_PROC_PARAMS];
+    
+    char shared_var_names[32][32];
+    int shared_count;
+
+    double func_return_numeric;
+    BasicString *func_return_string;
+} CallFrame;
+
+static CallFrame call_stack[MAX_CALL_FRAMES];
+static int call_stack_depth = 0;
+
+static ProcedureDef *find_procedure(const char *name) {
+    if (!name || !name[0]) return NULL;
+    char norm[64];
+    size_t i;
+    for (i = 0; i < 63 && name[i]; i++) norm[i] = (char)toupper((unsigned char)name[i]);
+    norm[i] = '\0';
+    for (int p = 0; p < proc_count; p++) {
+        if (strcasecmp(registered_procs[p].name, norm) == 0) return &registered_procs[p];
+    }
+    return NULL;
+}
+
+static ProcedureDef *find_procedure_by_header(Statement *header_stmt) {
+    if (!header_stmt) return NULL;
+    for (int p = 0; p < proc_count; p++) {
+        if (registered_procs[p].header_stmt == header_stmt) return &registered_procs[p];
+    }
+    return NULL;
+}
+
+static int proc_name_match(const char *name1, const char *name2) {
+    if (!name1 || !name2) return 0;
+    size_t len1 = strlen(name1);
+    size_t len2 = strlen(name2);
+    if (len1 > 0 && (name1[len1-1] == '!' || name1[len1-1] == '%' || name1[len1-1] == '#')) len1--;
+    if (len2 > 0 && (name2[len2-1] == '!' || name2[len2-1] == '%' || name2[len2-1] == '#')) len2--;
+    if (len1 != len2) return 0;
+    return strncasecmp(name1, name2, len1) == 0;
+}
+
+static Variable *get_variable_ptr(int idx) {
+    if (idx < 0 || idx >= 1024) return &vars[0];
+    if (call_stack_depth > 0) {
+        CallFrame *frame = &call_stack[call_stack_depth - 1];
+        const char *name = vars[idx].name;
+        
+        // 1. Check if parameter
+        for (int p = 0; p < frame->proc->param_count; p++) {
+            if (proc_name_match(frame->proc->params[p].name, name)) {
+                if (frame->byref_caller_var_idx[p] != -1) {
+                    int cframe = frame->byref_caller_frame[p];
+                    int cidx = frame->byref_caller_var_idx[p];
+                    if (cframe < 0) {
+                        return &vars[cidx];
+                    } else if (cframe < call_stack_depth - 1) {
+                        return &call_stack[cframe].local_vars[cidx];
+                    }
+                }
+                for (int l = 0; l < frame->local_var_count; l++) {
+                    if (proc_name_match(frame->local_vars[l].name, name)) return &frame->local_vars[l];
+                }
+                int lidx = frame->local_var_count++;
+                memset(&frame->local_vars[lidx], 0, sizeof(Variable));
+                strncpy(frame->local_vars[lidx].name, name, 31);
+                return &frame->local_vars[lidx];
+            }
+        }
+
+        // 2. Check if SHARED
+        for (int s = 0; s < frame->shared_count; s++) {
+            if (proc_name_match(frame->shared_var_names[s], name)) {
+                return &vars[idx];
+            }
+        }
+
+        // 3. Check if Function Name return target
+        if (frame->proc->is_function && proc_name_match(frame->proc->name, name)) {
+            for (int l = 0; l < frame->local_var_count; l++) {
+                if (proc_name_match(frame->local_vars[l].name, name)) return &frame->local_vars[l];
+            }
+            int lidx = frame->local_var_count++;
+            memset(&frame->local_vars[lidx], 0, sizeof(Variable));
+            strncpy(frame->local_vars[lidx].name, name, 31);
+            return &frame->local_vars[lidx];
+        }
+
+        // 4. Local procedure variable
+        for (int l = 0; l < frame->local_var_count; l++) {
+            if (strcasecmp(frame->local_vars[l].name, name) == 0) return &frame->local_vars[l];
+        }
+        int lidx = frame->local_var_count++;
+        memset(&frame->local_vars[lidx], 0, sizeof(Variable));
+        strncpy(frame->local_vars[lidx].name, name, 31);
+        return &frame->local_vars[lidx];
+    }
+    return &vars[idx];
+}
+
 static void reset_variable_hash_table(void) {
     for (int i = 0; i < VAR_HASH_CAPACITY; i++) var_hash_table[i] = -1;
     var_hash_initialized = 1;
@@ -128,8 +262,12 @@ static double bitwise_or_tok(TokenStream *ts);
 static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out);
 static const char *skip_whitespace_fast(const char *p);
 static int match_identifier_fast(const char *p, const char *word);
+void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num);
 double evaluate_expression(const char **input);
 double evaluate_expression_tok(TokenStream *ts);
+static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, BasicString *out);
+static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char **input);
+static int evaluate_function_call_string_text(ProcedureDef *proc, const char **input, BasicString *out);
 
 // Helper to skip tokens until a matching end token is found
 // Returns the statement *after* the end token, and the token position within that statement.
@@ -421,7 +559,8 @@ static int read_next_data_into_variable(const char **input) {
 }
 
 static void set_numeric_variable(int idx, int array_idx, double val) {
-    const char *name = vars[idx].name;
+    Variable *v = get_variable_ptr(idx);
+    const char *name = v->name;
     size_t len = strlen(name);
     char suffix = (len > 0) ? name[len - 1] : '!';
 
@@ -435,10 +574,10 @@ static void set_numeric_variable(int idx, int array_idx, double val) {
         val = (double)((float)val);
     }
 
-    if (array_idx >= 0 && vars[idx].array && array_idx < vars[idx].array_size) {
-        vars[idx].array[array_idx] = val;
+    if (array_idx >= 0 && v->array && array_idx < v->array_size) {
+        v->array[array_idx] = val;
     } else {
-        vars[idx].value = val;
+        v->value = val;
     }
 }
 
@@ -662,12 +801,13 @@ int basic_string_assign(BasicString **target, const void *data, size_t length) {
 }
 
 static int assign_string_variable_value(int idx, int array_idx, const void *data, size_t length) {
-    BasicString **target = array_idx >= 0 ? &vars[idx].s_array[array_idx] : &vars[idx].s_value;
-    if (vars[idx].string_declared) {
+    Variable *v = get_variable_ptr(idx);
+    BasicString **target = array_idx >= 0 ? &v->s_array[array_idx] : &v->s_value;
+    if (v->string_declared) {
         if (!*target) *target = basic_string_create(NULL, 0);
         if (!*target) return 0;
         (*target)->is_fixed = 1;
-        (*target)->fixed_length = vars[idx].string_fixed_length;
+        (*target)->fixed_length = v->string_fixed_length;
     }
     return basic_string_assign(target, data, length);
 }
@@ -703,8 +843,9 @@ static int append_string_variable_value(BasicString *target, int idx, int array_
         }
         return 1;
     }
-    BasicString *value = array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size
-        ? vars[idx].s_array[array_idx] : vars[idx].s_value;
+    Variable *v = get_variable_ptr(idx);
+    BasicString *value = array_idx >= 0 && v->s_array && array_idx < v->array_size
+        ? v->s_array[array_idx] : v->s_value;
     if (!value) return 1;
     return basic_string_append(target, value->data, value->length);
 }
@@ -1263,12 +1404,13 @@ static void get_string_variable_value(int idx, int array_idx, char *dest, int de
         }
     }
 
+    Variable *v = get_variable_ptr(idx);
     if (array_idx >= 0) {
-        if (vars[idx].s_array && array_idx >= 0 && array_idx < vars[idx].array_size && vars[idx].s_array[array_idx]) {
-            src = (const char *)vars[idx].s_array[array_idx]->data;
+        if (v->s_array && array_idx >= 0 && array_idx < v->array_size && v->s_array[array_idx]) {
+            src = (const char *)v->s_array[array_idx]->data;
         }
     } else {
-        if (vars[idx].s_value) src = (const char *)vars[idx].s_value->data;
+        if (v->s_value) src = (const char *)v->s_value->data;
     }
     strncpy(dest, src, dest_size - 1);
     dest[dest_size - 1] = '\0';
@@ -1291,12 +1433,13 @@ static int get_string_variable_raw(int idx, int array_idx, char *dest, int dest_
     }
 
     const char *src = "";
+    Variable *v = get_variable_ptr(idx);
     if (array_idx >= 0) {
-        if (vars[idx].s_array && array_idx >= 0 && array_idx < vars[idx].array_size && vars[idx].s_array[array_idx]) {
-            src = (const char *)vars[idx].s_array[array_idx]->data;
+        if (v->s_array && array_idx >= 0 && array_idx < v->array_size && v->s_array[array_idx]) {
+            src = (const char *)v->s_array[array_idx]->data;
         }
     } else {
-        if (vars[idx].s_value) src = (const char *)vars[idx].s_value->data;
+        if (v->s_value) src = (const char *)v->s_value->data;
     }
     int len = (int)strlen(src);
     if (len >= dest_size) len = dest_size - 1;
@@ -1569,10 +1712,16 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             basic_string_append(&term, t.text, strlen(t.text));
             ts->pos++;
         } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
-            int idx = resolve_token_variable(&ts->tokens[ts->pos]);
-            ts->pos++;
-            int array_idx = parse_array_index_tok(ts, idx);
-            append_string_variable_value(&term, idx, array_idx);
+            ProcedureDef *pfunc = find_procedure(t.text);
+            if (pfunc && pfunc->is_function) {
+                ts->pos++;
+                evaluate_function_call_string(pfunc, ts, &term);
+            } else {
+                int idx = resolve_token_variable(&ts->tokens[ts->pos]);
+                ts->pos++;
+                int array_idx = parse_array_index_tok(ts, idx);
+                append_string_variable_value(&term, idx, array_idx);
+            }
         } else {
             if (parsed) break;
             double val = evaluate_expression_tok(ts);
@@ -1867,9 +2016,14 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
         } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
-            int idx = find_variable(t.text);
-            int array_idx = parse_array_index(input, idx);
-            append_string_variable_value(&term, idx, array_idx);
+            ProcedureDef *pfunc = find_procedure(t.text);
+            if (pfunc && pfunc->is_function) {
+                evaluate_function_call_string_text(pfunc, input, &term);
+            } else {
+                int idx = find_variable(t.text);
+                int array_idx = parse_array_index(input, idx);
+                append_string_variable_value(&term, idx, array_idx);
+            }
         } else {
             if (parsed) break;
             *input = saved;
@@ -2081,6 +2235,623 @@ static int is_string_token(Token t) {
             t.type == TOKEN_ARGVS || t.type == TOKEN_COMMANDS);
 }
 
+static void scan_procedures(void) {
+    proc_count = 0;
+    Statement *stmt = get_head();
+    while (stmt) {
+        if (stmt->token_count > 0) {
+            Token t0 = stmt->tokens[0];
+            if (t0.type == TOKEN_SUB || t0.type == TOKEN_FUNCTION) {
+                if (proc_count >= MAX_PROCEDURES) break;
+                ProcedureDef *p = &registered_procs[proc_count];
+                memset(p, 0, sizeof(ProcedureDef));
+                p->is_function = (t0.type == TOKEN_FUNCTION);
+                p->header_stmt = stmt;
+
+                int pos = 1;
+                if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_IDENTIFIER) {
+                    strncpy(p->name, stmt->tokens[pos].text, 31);
+                    for (int c = 0; p->name[c]; c++) p->name[c] = (char)toupper((unsigned char)p->name[c]);
+                    pos++;
+
+                    if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_LPAREN) {
+                        pos++;
+                        while (pos < stmt->token_count && stmt->tokens[pos].type != TOKEN_RPAREN) {
+                            if (stmt->tokens[pos].type == TOKEN_IDENTIFIER) {
+                                if (p->param_count < MAX_PROC_PARAMS) {
+                                    ProcParamDef *param = &p->params[p->param_count++];
+                                    strncpy(param->name, stmt->tokens[pos].text, 31);
+                                    for (int c = 0; param->name[c]; c++) param->name[c] = (char)toupper((unsigned char)param->name[c]);
+                                    
+                                    size_t len = strlen(param->name);
+                                    if (len > 0 && param->name[len-1] != '$' && param->name[len-1] != '%' && param->name[len-1] != '!' && param->name[len-1] != '#') {
+                                        char suffix = default_type_map[param->name[0] - 'A'];
+                                        if (suffix != '\0') {
+                                            param->name[len] = suffix;
+                                            param->name[len+1] = '\0';
+                                        }
+                                    }
+                                    
+                                    if (pos + 1 < stmt->token_count && stmt->tokens[pos+1].type == TOKEN_LPAREN) {
+                                        param->is_array = 1;
+                                        pos++;
+                                        if (pos + 1 < stmt->token_count && stmt->tokens[pos+1].type == TOKEN_RPAREN) pos++;
+                                    }
+                                    if (param->name[strlen(param->name)-1] == '$') param->is_string = 1;
+                                }
+                            }
+                            pos++;
+                            if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_COMMA) pos++;
+                        }
+                        if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_RPAREN) pos++;
+                    }
+
+                    if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_STATIC) {
+                        p->is_static = 1;
+                    }
+                }
+
+                p->start_stmt = stmt->next;
+
+                Statement *curr = stmt->next;
+                while (curr) {
+                    if (curr->token_count > 0 && curr->tokens[0].type == TOKEN_END) {
+                        if (curr->token_count > 1 && curr->tokens[1].type == (p->is_function ? TOKEN_FUNCTION : TOKEN_SUB)) {
+                            p->end_stmt = curr;
+                            break;
+                        }
+                    }
+                    curr = curr->next;
+                }
+                if (!p->end_stmt) p->end_stmt = stmt;
+                proc_count++;
+            }
+        }
+        stmt = stmt->next;
+    }
+}
+
+static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statement *exec_stmt) {
+    if (call_stack_depth >= MAX_CALL_FRAMES) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return NULL;
+    }
+
+    CallFrame *frame = &call_stack[call_stack_depth];
+    memset(frame, 0, sizeof(CallFrame));
+    frame->proc = proc;
+    frame->return_stmt = exec_stmt;
+
+    for (int p = 0; p < proc->param_count; p++) {
+        frame->byref_caller_var_idx[p] = -1;
+        frame->byref_caller_frame[p] = -1;
+    }
+
+    int has_parens = 0;
+    if (ts->pos < exec_stmt->token_count && ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+        has_parens = 1;
+        ts->pos++;
+    }
+
+    int arg_idx = 0;
+    while (ts->pos < exec_stmt->token_count && ts->tokens[ts->pos].type != TOKEN_COLON && ts->tokens[ts->pos].type != TOKEN_EOF) {
+        if (has_parens && ts->tokens[ts->pos].type == TOKEN_RPAREN) break;
+        if (arg_idx >= proc->param_count) break;
+
+        ProcParamDef *pdef = &proc->params[arg_idx];
+        Token t_arg = ts->tokens[ts->pos];
+
+        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER);
+        int next_is_sep = (ts->pos + 1 >= exec_stmt->token_count || 
+                           ts->tokens[ts->pos + 1].type == TOKEN_COMMA || 
+                           ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || 
+                           ts->tokens[ts->pos + 1].type == TOKEN_COLON);
+
+        if (is_var_id && next_is_sep) {
+            int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+        } else {
+            frame->byref_caller_var_idx[arg_idx] = -1;
+            frame->byref_caller_frame[arg_idx] = -1;
+
+            if (pdef->is_string) {
+                BasicString val = {0};
+                parse_string_expression_tok_heap(ts, &val);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                basic_string_assign(&lv->s_value, val.data, val.length);
+                basic_string_release(&val);
+            } else {
+                double val = evaluate_expression_tok(ts);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                lv->value = val;
+            }
+        }
+
+        arg_idx++;
+        if (ts->pos < exec_stmt->token_count && ts->tokens[ts->pos].type == TOKEN_COMMA) {
+            ts->pos++;
+        }
+    }
+
+    if (has_parens && ts->pos < exec_stmt->token_count && ts->tokens[ts->pos].type == TOKEN_RPAREN) {
+        ts->pos++;
+    }
+
+    frame->return_token_idx = ts->pos;
+    call_stack_depth++;
+    return proc->start_stmt;
+}
+
+static void execute_procedure_statements(ProcedureDef *proc) {
+    int saved_line = current_executing_line;
+    Statement *curr_proc_stmt = proc->start_stmt;
+    int target_depth = call_stack_depth - 1;
+
+    while (curr_proc_stmt && curr_proc_stmt != proc->end_stmt && call_stack_depth > target_depth && !stop_running) {
+        Statement *exec_stmt = curr_proc_stmt;
+        current_executing_line = exec_stmt->line_number;
+
+        TokenStream ts = {exec_stmt->tokens, 0};
+        int jumped = 0;
+
+        while (ts.pos < exec_stmt->token_count && !stop_running && !jumped) {
+            Token *current_token = &ts.tokens[ts.pos++];
+            Token t = *current_token;
+
+            switch (t.type) {
+            case TOKEN_EOF:
+            case TOKEN_COLON:
+                continue;
+
+            case TOKEN_IF: {
+                double cond = evaluate_expression_tok(&ts);
+                if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_THEN || ts.tokens[ts.pos].type == TOKEN_GOTO)) {
+                    ts.pos++;
+                }
+                if (cond != 0) continue;
+                int depth = 0;
+                while (ts.pos < exec_stmt->token_count) {
+                    if (ts.tokens[ts.pos].type == TOKEN_EOF) break;
+                    Token skip = ts.tokens[ts.pos++];
+                    if (skip.type == TOKEN_IF) depth++;
+                    else if (skip.type == TOKEN_ELSE) {
+                        if (depth == 0) break;
+                        depth--;
+                    }
+                }
+                continue;
+            }
+
+            case TOKEN_EXIT:
+            case TOKEN_END:
+                if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
+                    call_stack_depth--;
+                    jumped = 1;
+                    break;
+                }
+                if (t.type == TOKEN_END) stop_running = 1;
+                break;
+
+            case TOKEN_LET:
+                current_token = &ts.tokens[ts.pos++];
+                t = *current_token;
+                /* fall through */
+            case TOKEN_IDENTIFIER: {
+                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COLON) {
+                    ts.pos++;
+                    continue;
+                }
+                int idx = resolve_token_variable(current_token);
+                int array_idx = parse_array_index_tok(&ts, idx);
+                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
+                    ts.pos++;
+                    if (is_string_var(t.text)) {
+                        BasicString value = {0};
+                        if (parse_string_expression_tok_heap(&ts, &value)) {
+                            assign_string_variable_value(idx, array_idx, value.data, value.length);
+                        }
+                        basic_string_release(&value);
+                    } else {
+                        set_numeric_variable(idx, array_idx, evaluate_expression_tok(&ts));
+                    }
+                    continue;
+                }
+                ProcedureDef *sub = find_procedure(t.text);
+                if (sub && !sub->is_function) {
+                    ts.pos = 1;
+                    curr_proc_stmt = execute_sub_call(sub, &ts, exec_stmt);
+                    jumped = 1;
+                    break;
+                }
+                ts.pos--;
+                /* fall through */
+            }
+
+            default: {
+                const char *command_start_ptr = t.start_ptr;
+                const char *temp_ptr = command_start_ptr;
+                interpret_line_at_ptr(&temp_ptr, 0, NULL);
+                while (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].start_ptr < temp_ptr) ts.pos++;
+                break;
+            }
+            }
+        }
+
+        if (!jumped) {
+            curr_proc_stmt = curr_proc_stmt->next;
+        }
+    }
+    current_executing_line = saved_line;
+}
+
+
+
+static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char **input) {
+    if (call_stack_depth >= MAX_CALL_FRAMES) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 0.0;
+    }
+
+    CallFrame *frame = &call_stack[call_stack_depth];
+    memset(frame, 0, sizeof(CallFrame));
+    frame->proc = proc;
+
+    for (int p = 0; p < proc->param_count; p++) {
+        frame->byref_caller_var_idx[p] = -1;
+        frame->byref_caller_frame[p] = -1;
+    }
+
+    const char *p = skip_whitespace_fast(*input);
+    int has_parens = 0;
+    if (*p == '(') {
+        has_parens = 1;
+        p++;
+        *input = p;
+    }
+
+    int arg_idx = 0;
+    while (*input && **input != ')' && **input != ':' && **input != '\0') {
+        if (arg_idx >= proc->param_count) break;
+
+        ProcParamDef *pdef = &proc->params[arg_idx];
+
+        const char *temp = skip_whitespace_fast(*input);
+        int starts_with_letter = (isalpha((unsigned char)*temp) || *temp == '_');
+        char var_buf[64] = {0};
+        int vlen = 0;
+        while (isalnum((unsigned char)*temp) || *temp == '_' || *temp == '$' || *temp == '%' || *temp == '!' || *temp == '#') {
+            if (vlen < 63) var_buf[vlen++] = *temp;
+            temp++;
+        }
+        var_buf[vlen] = '\0';
+        const char *after_var = skip_whitespace_fast(temp);
+        int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':'));
+
+        if (is_simple_var) {
+            int c_var_idx = find_variable(var_buf);
+            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            *input = after_var;
+        } else {
+            frame->byref_caller_var_idx[arg_idx] = -1;
+            frame->byref_caller_frame[arg_idx] = -1;
+
+            if (pdef->is_string) {
+                BasicString sval = {0};
+                parse_string_expression_heap(input, &sval);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                basic_string_assign(&lv->s_value, sval.data, sval.length);
+                basic_string_release(&sval);
+            } else {
+                double val = evaluate_expression(input);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                lv->value = val;
+            }
+        }
+
+        arg_idx++;
+        p = skip_whitespace_fast(*input);
+        if (*p == ',') {
+            p++;
+            *input = p;
+        }
+    }
+
+    p = skip_whitespace_fast(*input);
+    if (has_parens && *p == ')') {
+        p++;
+        *input = p;
+    }
+
+    call_stack_depth++;
+
+    execute_procedure_statements(proc);
+
+    double result = 0.0;
+    for (int l = 0; l < frame->local_var_count; l++) {
+        if (proc_name_match(frame->local_vars[l].name, proc->name)) {
+            result = frame->local_vars[l].value;
+            break;
+        }
+    }
+
+    if (call_stack_depth > 0) {
+        call_stack_depth--;
+    }
+
+    return result;
+}
+
+static int evaluate_function_call_string_text(ProcedureDef *proc, const char **input, BasicString *out) {
+    if (call_stack_depth >= MAX_CALL_FRAMES) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 0;
+    }
+
+    CallFrame *frame = &call_stack[call_stack_depth];
+    memset(frame, 0, sizeof(CallFrame));
+    frame->proc = proc;
+
+    for (int p = 0; p < proc->param_count; p++) {
+        frame->byref_caller_var_idx[p] = -1;
+        frame->byref_caller_frame[p] = -1;
+    }
+
+    const char *p = skip_whitespace_fast(*input);
+    int has_parens = 0;
+    if (*p == '(') {
+        has_parens = 1;
+        p++;
+        *input = p;
+    }
+
+    int arg_idx = 0;
+    while (*input && **input != ')' && **input != ':' && **input != '\0') {
+        if (arg_idx >= proc->param_count) break;
+
+        ProcParamDef *pdef = &proc->params[arg_idx];
+
+        const char *temp = skip_whitespace_fast(*input);
+        int starts_with_letter = (isalpha((unsigned char)*temp) || *temp == '_');
+        char var_buf[64] = {0};
+        int vlen = 0;
+        while (isalnum((unsigned char)*temp) || *temp == '_' || *temp == '$' || *temp == '%' || *temp == '!' || *temp == '#') {
+            if (vlen < 63) var_buf[vlen++] = *temp;
+            temp++;
+        }
+        var_buf[vlen] = '\0';
+        const char *after_var = skip_whitespace_fast(temp);
+        int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':'));
+
+        if (is_simple_var) {
+            int c_var_idx = find_variable(var_buf);
+            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            *input = after_var;
+        } else {
+            frame->byref_caller_var_idx[arg_idx] = -1;
+            frame->byref_caller_frame[arg_idx] = -1;
+
+            if (pdef->is_string) {
+                BasicString sval = {0};
+                parse_string_expression_heap(input, &sval);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                basic_string_assign(&lv->s_value, sval.data, sval.length);
+                basic_string_release(&sval);
+            } else {
+                double val = evaluate_expression(input);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                lv->value = val;
+            }
+        }
+
+        arg_idx++;
+        p = skip_whitespace_fast(*input);
+        if (*p == ',') {
+            p++;
+            *input = p;
+        }
+    }
+
+    p = skip_whitespace_fast(*input);
+    if (has_parens && *p == ')') {
+        p++;
+        *input = p;
+    }
+
+    call_stack_depth++;
+
+    execute_procedure_statements(proc);
+
+    for (int l = 0; l < frame->local_var_count; l++) {
+        if (proc_name_match(frame->local_vars[l].name, proc->name) && frame->local_vars[l].s_value) {
+            basic_string_append(out, frame->local_vars[l].s_value->data, frame->local_vars[l].s_value->length);
+            break;
+        }
+    }
+
+    if (call_stack_depth > 0) {
+        call_stack_depth--;
+    }
+
+    return 1;
+}
+
+static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts) {
+
+    if (call_stack_depth >= MAX_CALL_FRAMES) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 0.0;
+    }
+
+    CallFrame *frame = &call_stack[call_stack_depth];
+    memset(frame, 0, sizeof(CallFrame));
+    frame->proc = proc;
+
+    for (int p = 0; p < proc->param_count; p++) {
+        frame->byref_caller_var_idx[p] = -1;
+        frame->byref_caller_frame[p] = -1;
+    }
+
+    int has_parens = 0;
+    if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+        has_parens = 1;
+        ts->pos++;
+    }
+
+    int arg_idx = 0;
+    while (ts->tokens[ts->pos].type != TOKEN_RPAREN && ts->tokens[ts->pos].type != TOKEN_COLON && ts->tokens[ts->pos].type != TOKEN_EOF) {
+        if (arg_idx >= proc->param_count) break;
+
+        ProcParamDef *pdef = &proc->params[arg_idx];
+        Token t_arg = ts->tokens[ts->pos];
+
+        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER);
+        int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
+
+        if (is_var_id && next_is_sep) {
+            int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+        } else {
+            frame->byref_caller_var_idx[arg_idx] = -1;
+            frame->byref_caller_frame[arg_idx] = -1;
+
+            if (pdef->is_string) {
+                BasicString val = {0};
+                parse_string_expression_tok_heap(ts, &val);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                basic_string_assign(&lv->s_value, val.data, val.length);
+                basic_string_release(&val);
+            } else {
+                double val = evaluate_expression_tok(ts);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                lv->value = val;
+            }
+        }
+
+        arg_idx++;
+        if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
+    }
+
+    if (has_parens && ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+
+    call_stack_depth++;
+
+    execute_procedure_statements(proc);
+
+    double result = 0.0;
+    for (int l = 0; l < frame->local_var_count; l++) {
+        if (proc_name_match(frame->local_vars[l].name, proc->name)) {
+            result = frame->local_vars[l].value;
+            break;
+        }
+    }
+
+    if (call_stack_depth > 0) {
+        call_stack_depth--;
+    }
+
+    return result;
+}
+
+static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, BasicString *out) {
+    if (call_stack_depth >= MAX_CALL_FRAMES) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 0;
+    }
+
+    CallFrame *frame = &call_stack[call_stack_depth];
+    memset(frame, 0, sizeof(CallFrame));
+    frame->proc = proc;
+
+    for (int p = 0; p < proc->param_count; p++) {
+        frame->byref_caller_var_idx[p] = -1;
+        frame->byref_caller_frame[p] = -1;
+    }
+
+    int has_parens = 0;
+    if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+        has_parens = 1;
+        ts->pos++;
+    }
+
+    int arg_idx = 0;
+    while (ts->tokens[ts->pos].type != TOKEN_RPAREN && ts->tokens[ts->pos].type != TOKEN_COLON && ts->tokens[ts->pos].type != TOKEN_EOF) {
+        if (arg_idx >= proc->param_count) break;
+
+        ProcParamDef *pdef = &proc->params[arg_idx];
+        Token t_arg = ts->tokens[ts->pos];
+
+        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER);
+        int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
+
+        if (is_var_id && next_is_sep) {
+            int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+        } else {
+            frame->byref_caller_var_idx[arg_idx] = -1;
+            frame->byref_caller_frame[arg_idx] = -1;
+
+            if (pdef->is_string) {
+                BasicString val = {0};
+                parse_string_expression_tok_heap(ts, &val);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                basic_string_assign(&lv->s_value, val.data, val.length);
+                basic_string_release(&val);
+            } else {
+                double val = evaluate_expression_tok(ts);
+                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                memset(lv, 0, sizeof(Variable));
+                strncpy(lv->name, pdef->name, 31);
+                lv->value = val;
+            }
+        }
+
+        arg_idx++;
+        if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
+    }
+
+    if (has_parens && ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+
+    call_stack_depth++;
+
+    execute_procedure_statements(proc);
+
+    for (int l = 0; l < frame->local_var_count; l++) {
+        if (proc_name_match(frame->local_vars[l].name, proc->name) && frame->local_vars[l].s_value) {
+            basic_string_append(out, frame->local_vars[l].s_value->data, frame->local_vars[l].s_value->length);
+            break;
+        }
+    }
+
+    if (call_stack_depth > 0) {
+        call_stack_depth--;
+    }
+
+    return 1;
+}
+
 static double primary_tok(TokenStream *ts) {
     Token *token = &ts->tokens[ts->pos++];
     Token t = *token;
@@ -2113,18 +2884,24 @@ static double primary_tok(TokenStream *ts) {
             }
         }
 
+        ProcedureDef *pfunc = find_procedure(t.text);
+        if (pfunc && pfunc->is_function) {
+            return evaluate_function_call_numeric(pfunc, ts);
+        }
+
         int idx = resolve_token_variable(token);
+        Variable *v = (idx != -1) ? get_variable_ptr(idx) : NULL;
         
-        if (idx != -1) {
-            const char *v_name = vars[idx].name;
+        if (v) {
+            const char *v_name = v->name;
             if (v_name[strlen(v_name)-1] == '#') last_expression_is_double = 1;
         }
 
         int array_idx = parse_array_index_tok(ts, idx);
         if (array_idx >= 0) {
-             return (vars[idx].array && array_idx < vars[idx].array_size) ? vars[idx].array[array_idx] : 0;
+             return (v && v->array && array_idx < v->array_size) ? v->array[array_idx] : 0;
         }
-        return (idx != -1) ? vars[idx].value : 0;
+        return v ? v->value : 0;
     }
     if (t.type == TOKEN_LPAREN) {
         double val = evaluate_expression_tok(ts);
@@ -2519,7 +3296,12 @@ static double primary(const char **input) {
                 }
             }
         }
+        ProcedureDef *pfunc = find_procedure(t.text);
+        if (pfunc && pfunc->is_function) {
+            return evaluate_function_call_numeric_text(pfunc, input);
+        }
         int idx = find_variable(t.text);
+
         if (idx != -1) {
             const char *v_name = vars[idx].name;
             if (v_name[strlen(v_name)-1] == '#') last_expression_is_double = 1;
@@ -4641,6 +5423,8 @@ void run_program() {
     gosub_ptr = 0;
     while_ptr = 0;
     for_ptr = 0;
+    call_stack_depth = 0;
+    scan_procedures();
     print_col = 0;
     clear_data_pointer();
     Statement *curr = get_head();
@@ -4667,6 +5451,18 @@ void run_program() {
     int poll_counter = 0;
     while (curr && !stop_running) {
         
+        if (call_stack_depth == 0 && curr->token_count > 0) {
+            if (curr->tokens[0].type == TOKEN_SUB || curr->tokens[0].type == TOKEN_FUNCTION) {
+                ProcedureDef *p = find_procedure_by_header(curr);
+                if (p && p->end_stmt) {
+                    curr = p->end_stmt->next;
+                    resume_ptr = NULL;
+                    resume_ts_pos = -1;
+                    continue;
+                }
+            }
+        }
+
         if (++poll_counter >= 1000) {
             handle_events();
             if (!graphics_is_active()) fflush(stdout);
@@ -5031,7 +5827,100 @@ void run_program() {
                 break;
             }
 
+            case TOKEN_CALL: {
+                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_IDENTIFIER) {
+                    Token sub_tok = ts.tokens[ts.pos++];
+                    ProcedureDef *proc = find_procedure(sub_tok.text);
+                    if (proc && !proc->is_function) {
+                        curr = execute_sub_call(proc, &ts, exec_stmt);
+                        jumped = 1;
+                        break;
+                    } else {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                } else {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+            }
+
+            case TOKEN_DECLARE:
+                ts.pos = exec_stmt->token_count;
+                continue;
+
+            case TOKEN_SHARED: {
+                if (call_stack_depth > 0) {
+                    CallFrame *frame = &call_stack[call_stack_depth - 1];
+                    while (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type != TOKEN_COLON && ts.tokens[ts.pos].type != TOKEN_EOF) {
+                        if (ts.tokens[ts.pos].type == TOKEN_IDENTIFIER) {
+                            if (frame->shared_count < 32) {
+                                char norm[32];
+                                strncpy(norm, ts.tokens[ts.pos].text, 31);
+                                norm[31] = '\0';
+                                for (int c = 0; norm[c]; c++) norm[c] = (char)toupper((unsigned char)norm[c]);
+                                size_t len = strlen(norm);
+                                if (len > 0 && norm[len-1] != '$' && norm[len-1] != '%' && norm[len-1] != '!' && norm[len-1] != '#') {
+                                    char suffix = default_type_map[norm[0] - 'A'];
+                                    if (suffix != '\0') {
+                                        norm[len] = suffix;
+                                        norm[len+1] = '\0';
+                                    }
+                                }
+                                strncpy(frame->shared_var_names[frame->shared_count++], norm, 31);
+                            }
+                        }
+                        ts.pos++;
+                        if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COMMA) ts.pos++;
+                    }
+                } else {
+                    ts.pos = exec_stmt->token_count;
+                }
+                continue;
+            }
+
+            case TOKEN_EXIT: {
+                if (ts.pos < exec_stmt->token_count) {
+                    Token exit_type = ts.tokens[ts.pos++];
+                    if (exit_type.type == TOKEN_SUB || exit_type.type == TOKEN_FUNCTION) {
+                        if (call_stack_depth > 0) {
+                            CallFrame *frame = &call_stack[call_stack_depth - 1];
+                            call_stack_depth--;
+                            if (frame->return_stmt && frame->return_token_idx < frame->return_stmt->token_count) {
+                                curr = frame->return_stmt;
+                                resume_ts_pos = frame->return_token_idx;
+                            } else if (frame->return_stmt) {
+                                curr = frame->return_stmt->next;
+                                resume_ts_pos = -1;
+                            }
+                            resume_ptr = NULL;
+                            jumped = 1;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+
             case TOKEN_END:
+                if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
+                    if (call_stack_depth > 0) {
+                        CallFrame *frame = &call_stack[call_stack_depth - 1];
+                        call_stack_depth--;
+                        if (frame->return_stmt && frame->return_token_idx < frame->return_stmt->token_count) {
+                            curr = frame->return_stmt;
+                            resume_ts_pos = frame->return_token_idx;
+                        } else if (frame->return_stmt) {
+                            curr = frame->return_stmt->next;
+                            resume_ts_pos = -1;
+                        }
+                        resume_ptr = NULL;
+                        jumped = 1;
+                        break;
+                    }
+                    ts.pos = exec_stmt->token_count;
+                    continue;
+                }
                 stop_running = 1;
                 break;
 
@@ -5088,7 +5977,15 @@ void run_program() {
                     }
                     continue;
                 }
-                // If not an assignment, fallback to interpret_line_at_ptr
+                // Check if it's an implicit SUB call!
+                ProcedureDef *proc = find_procedure(t.text);
+                if (proc && !proc->is_function) {
+                    ts.pos = start_pos + 1; // position right after SubName token
+                    curr = execute_sub_call(proc, &ts, exec_stmt);
+                    jumped = 1;
+                    break;
+                }
+                // If not an assignment or SUB call, fallback to interpret_line_at_ptr
                 ts.pos--; // Put identifier back
                 /* fall through */
             }
