@@ -4,6 +4,8 @@
 
 - Add `TRON` and `TROFF` for program tracing and debugging.
 - Expand `PLAY` MML coverage beyond the initial `T`, `O`, `L`, notes, rests, dotted notes, and octave changes.
+- implement qbasic subroutines and functions
+- Fix the charcter width problem on 40 column displays
 
 ## Audio
 

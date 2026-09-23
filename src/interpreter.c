@@ -290,14 +290,14 @@ static Statement* skip_to_matching_token(Statement *start_stmt, int start_ts_pos
                     return current_stmt;
                 } else {
                     // End token was the last on this line, move to next statement
-                    current_stmt = find_next_statement(current_stmt->line_number);
+                    current_stmt = current_stmt->next;
                     *out_ts_pos = 0; // Start from beginning of next statement
                     return current_stmt;
                 }
             }
         }
         // Reached end of current statement, move to next
-        current_stmt = find_next_statement(current_stmt->line_number);
+        current_stmt = current_stmt->next;
         if (current_stmt) {
             current_ts_pos = 0; // Start from beginning of next statement
         }
@@ -334,13 +334,13 @@ static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int fo
                     *out_ts_pos = current_ts_pos;
                     return current_stmt;
                 } else {
-                    current_stmt = find_next_statement(current_stmt->line_number);
+                    current_stmt = current_stmt->next;
                     *out_ts_pos = 0;
                     return current_stmt;
                 }
             }
         }
-        current_stmt = find_next_statement(current_stmt->line_number);
+        current_stmt = current_stmt->next;
         if (current_stmt) {
             current_ts_pos = 0;
         }
@@ -2414,28 +2414,215 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     ts.pos++;
                 }
                 if (cond != 0) continue;
-                int depth = 0;
-                while (ts.pos < exec_stmt->token_count) {
-                    if (ts.tokens[ts.pos].type == TOKEN_EOF) break;
-                    Token skip = ts.tokens[ts.pos++];
-                    if (skip.type == TOKEN_IF) depth++;
-                    else if (skip.type == TOKEN_ELSE) {
-                        if (depth == 0) break;
-                        depth--;
+
+                int has_remaining_tokens = 0;
+                for (int check_i = ts.pos; check_i < exec_stmt->token_count; check_i++) {
+                    if (exec_stmt->tokens[check_i].type != TOKEN_EOF && exec_stmt->tokens[check_i].type != TOKEN_COLON) {
+                        has_remaining_tokens = 1;
+                        break;
                     }
                 }
+
+                if (has_remaining_tokens) {
+                    int depth = 0;
+                    while (ts.pos < exec_stmt->token_count) {
+                        if (ts.tokens[ts.pos].type == TOKEN_EOF) break;
+                        Token skip = ts.tokens[ts.pos++];
+                        if (skip.type == TOKEN_IF) depth++;
+                        else if (skip.type == TOKEN_ELSE) {
+                            if (depth == 0) break;
+                            depth--;
+                        }
+                    }
+                    continue;
+                } else {
+                    int depth = 1;
+                    Statement *s = exec_stmt->next;
+                    while (s && s != proc->end_stmt && depth > 0) {
+                        if (s->token_count > 0) {
+                            TokenType first_t = s->tokens[0].type;
+                            fprintf(stderr, "DEBUG_SKIP_IF: line=%d depth=%d count=%d t0=%d t1=%d\n", s->line_number, depth, s->token_count, s->tokens[0].type, s->token_count > 1 ? s->tokens[1].type : -1);
+                            if (first_t == TOKEN_IF && s->tokens[s->token_count - 1].type == TOKEN_THEN) {
+                                depth++;
+                            } else if (first_t == TOKEN_ELSE) {
+                                if (depth == 1) {
+                                    curr_proc_stmt = s;
+                                    jumped = 1;
+                                    break;
+                                }
+                            } else if (first_t == TOKEN_END && s->token_count > 1 && s->tokens[1].type == TOKEN_IF) {
+                                depth--;
+                                if (depth == 0) {
+                                    curr_proc_stmt = s->next;
+                                    jumped = 1;
+                                    break;
+                                }
+                            }
+                        }
+                        s = s->next;
+                    }
+                    if (jumped) break;
+                }
+                continue;
+            }
+
+            case TOKEN_ELSE: {
+                int depth = 1;
+                Statement *s = exec_stmt->next;
+                while (s && s != proc->end_stmt && depth > 0) {
+                    if (s->token_count > 0) {
+                        TokenType first_t = s->tokens[0].type;
+                        if (first_t == TOKEN_IF && s->tokens[s->token_count - 1].type == TOKEN_THEN) {
+                            depth++;
+                        } else if (first_t == TOKEN_END && s->token_count > 1 && s->tokens[1].type == TOKEN_IF) {
+                            depth--;
+                            if (depth == 0) {
+                                curr_proc_stmt = s->next;
+                                jumped = 1;
+                                break;
+                            }
+                        }
+                    }
+                    s = s->next;
+                }
+                if (jumped) break;
                 continue;
             }
 
             case TOKEN_EXIT:
             case TOKEN_END:
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
-                    call_stack_depth--;
-                    jumped = 1;
-                    break;
+                    current_executing_line = saved_line;
+                    return;
                 }
                 if (t.type == TOKEN_END) stop_running = 1;
                 break;
+
+            case TOKEN_WHILE: {
+                const char *command_start_ptr = t.start_ptr;
+                double val = evaluate_expression_tok(&ts);
+                const char *cond_start = command_start_ptr;
+                if (val != 0) {
+                    if (while_ptr == 0 || while_stack[while_ptr-1].stmt != exec_stmt || while_stack[while_ptr-1].ptr != cond_start) {
+                        if (while_ptr < 16) {
+                            while_stack[while_ptr].stmt = exec_stmt;
+                            while_stack[while_ptr].ptr = cond_start;
+                            while_ptr++;
+                        } else {
+                            report_runtime_error(ERR_OUT_OF_MEMORY);
+                        }
+                    }
+                } else {
+                    if (while_ptr > 0 && while_stack[while_ptr-1].stmt == exec_stmt && while_stack[while_ptr-1].ptr == cond_start) {
+                        while_ptr--;
+                    }
+                    int end_ts_pos = ts.pos;
+                    Statement *target_stmt = skip_to_matching_token(exec_stmt, end_ts_pos, TOKEN_WHILE, TOKEN_WEND, &end_ts_pos);
+                    if (target_stmt) {
+                        curr_proc_stmt = target_stmt;
+                        jumped = 1;
+                        break;
+                    } else {
+                        report_runtime_error(ERR_WEND_WITHOUT_WHILE);
+                    }
+                }
+                continue;
+            }
+
+            case TOKEN_WEND:
+                if (while_ptr > 0) {
+                    curr_proc_stmt = while_stack[while_ptr-1].stmt;
+                    jumped = 1;
+                    break;
+                } else {
+                    report_runtime_error(ERR_WEND_WITHOUT_WHILE);
+                    break;
+                }
+
+            case TOKEN_FOR: {
+                Token *var_token = &ts.tokens[ts.pos++];
+                Token eq = ts.tokens[ts.pos++];
+                if (eq.type != TOKEN_EQUALS) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                double start = evaluate_expression_tok(&ts);
+                ts.pos++; // skip TO
+                double end = evaluate_expression_tok(&ts);
+                double step = 1.0;
+                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_STEP) {
+                    ts.pos++;
+                    step = evaluate_expression_tok(&ts);
+                }
+                
+                int idx = resolve_token_variable(var_token);
+                set_numeric_variable(idx, -1, start);
+
+                int should_skip = 0;
+                if (step > 0 && start > end) should_skip = 1;
+                else if (step < 0 && start < end) should_skip = 1;
+
+                if (should_skip) {
+                    int end_ts_pos = ts.pos;
+                    Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, idx, &end_ts_pos);
+                    if (target_stmt) {
+                        curr_proc_stmt = target_stmt;
+                        jumped = 1;
+                        break;
+                    }
+                } else {
+                    if (for_ptr == 0 || for_stack[for_ptr-1].var_idx != idx) {
+                        if (for_ptr < 16) {
+                            for_stack[for_ptr].var_idx = idx;
+                            for_stack[for_ptr].end_val = end;
+                            for_stack[for_ptr].step_val = step;
+                            for_stack[for_ptr].start_stmt = exec_stmt;
+                            for_stack[for_ptr].start_ts_pos = ts.pos;
+                            for_ptr++;
+                        } else {
+                            report_runtime_error(ERR_OUT_OF_MEMORY);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            case TOKEN_NEXT: {
+                if (for_ptr > 0) {
+                    int for_idx = for_ptr - 1;
+                    if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_IDENTIFIER) {
+                        int next_var_idx = resolve_token_variable(&ts.tokens[ts.pos]);
+                        for (int i = for_ptr - 1; i >= 0; i--) {
+                            if (for_stack[i].var_idx == next_var_idx) {
+                                for_idx = i;
+                                break;
+                            }
+                        }
+                        ts.pos++;
+                    }
+                    int var_idx = for_stack[for_idx].var_idx;
+                    Variable *v = get_variable_ptr(var_idx);
+                    double current_val = v ? v->value : 0.0;
+                    current_val += for_stack[for_idx].step_val;
+                    set_numeric_variable(var_idx, -1, current_val);
+
+                    int loop_done = 0;
+                    if (for_stack[for_idx].step_val > 0 && current_val > for_stack[for_idx].end_val) loop_done = 1;
+                    else if (for_stack[for_idx].step_val < 0 && current_val < for_stack[for_idx].end_val) loop_done = 1;
+
+                    if (loop_done) {
+                        for_ptr = for_idx;
+                    } else {
+                        for_ptr = for_idx + 1;
+                        curr_proc_stmt = for_stack[for_idx].start_stmt;
+                        jumped = 1;
+                        break;
+                    }
+                } else {
+                    report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+                }
+                continue;
+            }
 
             case TOKEN_LET:
                 current_token = &ts.tokens[ts.pos++];
@@ -3301,25 +3488,26 @@ static double primary(const char **input) {
             return evaluate_function_call_numeric_text(pfunc, input);
         }
         int idx = find_variable(t.text);
+        Variable *v = (idx != -1) ? get_variable_ptr(idx) : NULL;
 
-        if (idx != -1) {
-            const char *v_name = vars[idx].name;
+        if (v) {
+            const char *v_name = v->name;
             if (v_name[strlen(v_name)-1] == '#') last_expression_is_double = 1;
         }
         const char *after_name = skip_whitespace_fast(*input);
         if (*after_name == '(') {
             int array_idx = parse_array_index(input, idx);
-            if (vars[idx].s_array && array_idx >= 0 && array_idx < vars[idx].array_size) {
+            if (v && v->s_array && array_idx >= 0 && array_idx < v->array_size) {
                 // This is a string array, evaluate_expression currently only handles doubles.
                 // We return 0 here as fallback. String expressions are handled in statements.
                 return 0;
             }
-            if (vars[idx].array && array_idx >= 0 && array_idx < vars[idx].array_size) {
-                return vars[idx].array[array_idx];
+            if (v && v->array && array_idx >= 0 && array_idx < v->array_size) {
+                return v->array[array_idx];
             }
             return 0;
         }
-        return (idx != -1) ? vars[idx].value : 0;
+        return v ? v->value : 0;
     }
     if (t.type == TOKEN_LPAREN) {
         double val = evaluate_expression(input);

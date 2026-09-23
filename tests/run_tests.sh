@@ -120,6 +120,9 @@ TESTS=(
   "tests/auto_screenshot"
   "tests/graphics_primitives"
   "tests/labels_no_lines"
+  "tests/qbasic_sub"
+  "tests/qbasic_function"
+  "tests/qbasic_scope"
 )
 
 for t in "${TESTS[@]}"; do
