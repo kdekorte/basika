@@ -213,12 +213,10 @@ static void reload_font(int target_height) {
             SDL_Surface* cell_surf = SDL_CreateSurface(cell_w, cell_h, SDL_PIXELFORMAT_RGBA8888);
             if (cell_surf) {
                 SDL_ClearSurface(cell_surf, 0, 0, 0, 0);
-                int ox = (cell_w - surf->w) / 2;
-                if (ox < 0) ox = 0;
                 int oy = (cell_h - surf->h) / 2;
                 if (oy < 0) oy = 0;
-                SDL_Rect dst_rect = {ox, oy, surf->w, surf->h};
-                SDL_BlitSurface(surf, NULL, cell_surf, &dst_rect);
+                SDL_Rect dst_rect = {0, oy, cell_w, surf->h};
+                SDL_BlitSurfaceScaled(surf, NULL, cell_surf, &dst_rect, SDL_SCALEMODE_NEAREST);
                 glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, cell_surf);
                 SDL_DestroySurface(cell_surf);
             } else {
@@ -226,7 +224,7 @@ static void reload_font(int target_height) {
             }
             if (glyph_cache[i]) {
                 SDL_SetTextureBlendMode(glyph_cache[i], SDL_BLENDMODE_BLEND);
-                SDL_SetTextureScaleMode(glyph_cache[i], SDL_SCALEMODE_LINEAR);
+                SDL_SetTextureScaleMode(glyph_cache[i], SDL_SCALEMODE_NEAREST);
             }
             SDL_DestroySurface(surf);
         }
@@ -620,12 +618,10 @@ static void build_slot_glyph_cache(FontSlot *slot) {
             SDL_Surface* cell_surf = SDL_CreateSurface(cell_w, cell_h, SDL_PIXELFORMAT_RGBA8888);
             if (cell_surf) {
                 SDL_ClearSurface(cell_surf, 0, 0, 0, 0);
-                int ox = (cell_w - surf->w) / 2;
-                if (ox < 0) ox = 0;
                 int oy = (cell_h - surf->h) / 2;
                 if (oy < 0) oy = 0;
-                SDL_Rect dst_rect = {ox, oy, surf->w, surf->h};
-                SDL_BlitSurface(surf, NULL, cell_surf, &dst_rect);
+                SDL_Rect dst_rect = {0, oy, cell_w, surf->h};
+                SDL_BlitSurfaceScaled(surf, NULL, cell_surf, &dst_rect, SDL_SCALEMODE_NEAREST);
                 slot->glyph_cache[i] = SDL_CreateTextureFromSurface(renderer, cell_surf);
                 SDL_DestroySurface(cell_surf);
             } else {
@@ -633,7 +629,7 @@ static void build_slot_glyph_cache(FontSlot *slot) {
             }
             if (slot->glyph_cache[i]) {
                 SDL_SetTextureBlendMode(slot->glyph_cache[i], SDL_BLENDMODE_BLEND);
-                SDL_SetTextureScaleMode(slot->glyph_cache[i], SDL_SCALEMODE_LINEAR);
+                SDL_SetTextureScaleMode(slot->glyph_cache[i], SDL_SCALEMODE_NEAREST);
             }
             SDL_DestroySurface(surf);
         }

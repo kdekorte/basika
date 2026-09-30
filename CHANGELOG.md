@@ -2,6 +2,13 @@
 
 All notable changes to this project are recorded in this file.
 
+## 2026-09-23
+
+- **QBasic Procedures (`SUB` & `FUNCTION`)**: Implemented QBasic-style `SUB` subroutines and `FUNCTION` procedures with full parameter passing, local variable scope isolation, and recursive procedure support.
+- **Pass-by-Reference & Pass-by-Value**: Simple variable arguments pass by reference into procedure local storage, while parenthesized expression arguments pass by value.
+- **Procedure Control & Scoping**: Added `CALL`, `DECLARE`, `SHARED`, `STATIC`, `EXIT SUB`, and `EXIT FUNCTION`. Control flow loops (`WHILE`/`WEND`, `FOR`/`NEXT`, block `IF`/`THEN`/`ELSE`/`END IF`) execute seamlessly within procedures.
+- **Demo & Testing**: Added comprehensive procedure demo (`demo/qbasic_procedures.bas`) and test cases (`qbasic_sub.bas`, `qbasic_function.bas`, `qbasic_scope.bas`) to `make test`.
+
 ## 2026-09-01
 
 - **Dynamic Strings**: Added length-aware heap-backed string storage with automatic growth for scalar strings, string arrays, assignments, concatenation, and string functions.

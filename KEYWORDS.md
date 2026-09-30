@@ -8,19 +8,19 @@ String values use length-aware heap-backed storage and grow dynamically as
 needed. Dynamic strings are the default; fixed-length declarations are available
 with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 
-`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CHDIR`,
+`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
-`CVS`, `DATA`, `DATE$`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
+`CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DRAW`, `ELSE`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
-`ERROR`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `GET`, `GET$`, `GOSUB`, `GOTO`,
+`ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
 `HEX$`, `IF`, `INKEY$`, `INPUT`, `INSTR`, `INT`, `KEY`, `KILL`, `LCASE$`,
 `LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LSET`,
 `LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
 `NOT`, `OCT$`, `OFF`, `ON`, `OPEN`, `OPTION`, `OR`, `PAINT`, `PEEK`, `PLAY`,
 `POKE`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
-`SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
-`SPC`, `SQR`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
+`SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
+`SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_FONT`, `_FREEFONT`, `_FREEIMAGE`,
 `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
@@ -36,6 +36,15 @@ Labels are identifiers followed by a colon (`my_label:`). They may appear at the
 of a line, optionally sharing the line with a statement (`loop: PRINT X`). Labels can
 be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 `IF...THEN`, and `ON ERROR GOTO`.
+
+## Subroutines and Functions (QBasic Procedures)
+- `SUB subname[(param1[, param2...])] [STATIC] ... END SUB`: Defines a QBasic-style subroutine procedure with isolated local variable scope.
+- `FUNCTION funcname[(param1[, param2...])] [STATIC] ... END FUNCTION`: Defines a QBasic-style function procedure that returns a value by assigning `funcname = expression`. Supports recursion.
+- `CALL subname[(arg1[, arg2...])]` or `subname arg1[, arg2...]`: Invokes a subroutine procedure. Simple variable arguments are passed by reference; parenthesized expressions `((x))` are passed by value.
+- `DECLARE {SUB | FUNCTION} name[(params)]`: Declare procedure signatures (procedures are also pre-scanned automatically).
+- `SHARED var1[, var2...]`: Grants access to main program global variables from within a procedure block.
+- `STATIC var1[, var2...]`: Declares static local variables preserved across procedure calls.
+- `EXIT {SUB | FUNCTION}`: Exits the active procedure prematurely.
 
 ## Control Flow and Program Structure
 - `END`: Terminates program execution.
@@ -53,7 +62,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 
 ## Variables and Data
 - `DATA constant1[, constant2...]`: Internal data storage.
-- `DEF FNname(param) = expression`: User-defined function.
+- `DEF FNname(param) = expression`: Single-line user-defined function.
 - `DEFINT letter_range`: Defines variables starting with these letters as integers.
 - `DEFSTR letter_range`: Defines variables starting with these letters as strings.
 - `DEFSNG letter_range`: Defines variables starting with these letters as single-precision.
