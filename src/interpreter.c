@@ -3745,25 +3745,30 @@ static const char *skip_whitespace_fast(const char *p) {
 static int match_identifier_fast(const char *p, const char *word) {
     size_t len = strlen(word);
     if (strncasecmp(p, word, len) != 0) return 0;
-    p += len;
-    return (*p == '\0' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ')' || *p == ',' || *p == ';' || *p == ':' || *p == '+' || *p == '-' || *p == '*' || *p == '/' || *p == '^' || *p == '%' || *p == '\\');
+    unsigned char next = (unsigned char)p[len];
+    return !(isalnum(next) || next == '$' || next == '%' || next == '!' || next == '#' || next == '_');
 }
 
 static double power_op(const char **input) {
     double val = primary(input);
-    const char *saved = *input;
-    Token t = get_next_token(input);
-    if (t.type == TOKEN_POWER) return pow(val, power_op(input));
-    *input = saved;
+    const char *p = skip_whitespace_fast(*input);
+    if (*p == '^') {
+        *input = p + 1;
+        return pow(val, power_op(input));
+    }
     return val;
 }
 
 static double unary(const char **input) {
-    const char *saved = *input;
-    Token t = get_next_token(input);
-    if (t.type == TOKEN_PLUS) return unary(input);
-    if (t.type == TOKEN_MINUS) return -unary(input);
-    *input = saved;
+    const char *p = skip_whitespace_fast(*input);
+    if (*p == '+') {
+        *input = p + 1;
+        return unary(input);
+    }
+    if (*p == '-') {
+        *input = p + 1;
+        return -unary(input);
+    }
     return power_op(input);
 }
 
@@ -3794,23 +3799,13 @@ static double term(const char **input) {
             if (d != 0.0) val = (long)(val / d);
             continue;
         }
-        const char *saved = *input;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_STAR) {
-            val *= unary(input);
-        } else if (t.type == TOKEN_SLASH) {
-            double d = unary(input);
-            if (d != 0.0) val /= d;
-        } else if (t.type == TOKEN_MOD) {
-            double d = unary(input);
-            if (d != 0.0) val = (long)val % (long)d;
-        } else if (t.type == TOKEN_IDIV) {
+        if (*p == '\\') {
+            *input = p + 1;
             double d = unary(input);
             if (d != 0.0) val = (long)(val / d);
-        } else {
-            *input = saved;
-            break;
+            continue;
         }
+        break;
     }
     return val;
 }
@@ -3829,16 +3824,7 @@ static double arithmetic_expression(const char **input) {
             val -= term(input);
             continue;
         }
-        const char *saved = *input;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_PLUS) {
-            val += term(input);
-        } else if (t.type == TOKEN_MINUS) {
-            val -= term(input);
-        } else {
-            *input = saved;
-            break;
-        }
+        break;
     }
     return val;
 }
@@ -3846,7 +3832,9 @@ static double arithmetic_expression(const char **input) {
 static double relational_expression(const char **input) {
     double val = arithmetic_expression(input);
     while (1) {
-        const char *saved = *input;
+        const char *p = skip_whitespace_fast(*input);
+        if (*p != '=' && *p != '<' && *p != '>') break;
+        *input = p;
         Token t = get_next_token(input);
         if (t.type == TOKEN_EQUALS) val = (val == arithmetic_expression(input)) ? -1.0 : 0.0;
         else if (t.type == TOKEN_LESS) {
@@ -3862,28 +3850,27 @@ static double relational_expression(const char **input) {
             if (t2.type == TOKEN_EQUALS) val = (val >= arithmetic_expression(input)) ? -1.0 : 0.0;
             else { *input = s2; val = (val > arithmetic_expression(input)) ? -1.0 : 0.0; }
         }
-        else { *input = saved; break; }
+        else break;
     }
     return val;
 }
 
 static double logical_not_expression(const char **input) {
-    const char *saved = *input;
-    Token t = get_next_token(input);
-    if (t.type == TOKEN_NOT) {
+    const char *p = skip_whitespace_fast(*input);
+    if ((p[0] == 'N' || p[0] == 'n') && match_identifier_fast(p, "NOT")) {
+        *input = p + 3;
         return (double)(~(short)logical_not_expression(input));
     }
-    *input = saved;
     return relational_expression(input);
 }
 
 static double bitwise_and_expression(const char **input) {
     double val = logical_not_expression(input);
     while (1) {
-        const char *saved = *input;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_AND) val = (double)((short)val & (short)logical_not_expression(input));
-        else { *input = saved; break; }
+        const char *p = skip_whitespace_fast(*input);
+        if ((*p != 'A' && *p != 'a') || !match_identifier_fast(p, "AND")) break;
+        *input = p + 3;
+        val = (double)((short)val & (short)logical_not_expression(input));
     }
     return val;
 }
@@ -3891,10 +3878,10 @@ static double bitwise_and_expression(const char **input) {
 static double bitwise_or_expression(const char **input) {
     double val = bitwise_and_expression(input);
     while (1) {
-        const char *saved = *input;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_OR) val = (double)((short)val | (short)bitwise_and_expression(input));
-        else { *input = saved; break; }
+        const char *p = skip_whitespace_fast(*input);
+        if ((*p != 'O' && *p != 'o') || !match_identifier_fast(p, "OR")) break;
+        *input = p + 2;
+        val = (double)((short)val | (short)bitwise_and_expression(input));
     }
     return val;
 }
@@ -3934,10 +3921,10 @@ double evaluate_expression(const char **input) {
 
     double val = bitwise_or_expression(input);
     while (1) {
-        const char *saved = *input;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_XOR) val = (double)((short)val ^ (short)bitwise_or_expression(input));
-        else { *input = saved; break; }
+        const char *p = skip_whitespace_fast(*input);
+        if ((*p != 'X' && *p != 'x') || !match_identifier_fast(p, "XOR")) break;
+        *input = p + 3;
+        val = (double)((short)val ^ (short)bitwise_or_expression(input));
     }
     return val;
 }
