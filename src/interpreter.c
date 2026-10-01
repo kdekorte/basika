@@ -3059,10 +3059,11 @@ static double primary_tok(TokenStream *ts) {
     }
     if (t.type == TOKEN_ARGC) return (double)internal_argc;
     if (t.type == TOKEN_IDENTIFIER) {
-        if (strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
-        if (strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
+        if ((t.text[0] == 'E' || t.text[0] == 'e') && strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
+        if ((t.text[0] == 'E' || t.text[0] == 'e') && strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
 
-        if (strncasecmp(t.text, "FN", 2) == 0) {
+        if ((t.text[0] == 'F' || t.text[0] == 'f') &&
+            (t.text[1] == 'N' || t.text[1] == 'n')) {
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
                 ts->pos++; // (
                 for (int i = 0; i < user_function_count; i++) {
@@ -3082,7 +3083,7 @@ static double primary_tok(TokenStream *ts) {
             }
         }
 
-        ProcedureDef *pfunc = find_procedure(t.text);
+        ProcedureDef *pfunc = proc_count > 0 ? find_procedure(t.text) : NULL;
         if (pfunc && pfunc->is_function) {
             return evaluate_function_call_numeric(pfunc, ts);
         }
