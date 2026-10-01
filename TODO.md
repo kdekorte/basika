@@ -31,8 +31,7 @@
 
 ### Parsing and evaluation
 
-- Profile repeated complex expressions in loops; consider compiling stable expressions to an AST or bytecode only if parsing remains a demonstrated bottleneck.
-- Profile raw-parser lookahead/backtracking paths and remove repeated token reads in measured hot paths without weakening syntax recovery.
+- Consider compiling stable expressions to an AST or bytecode only if follow-up profiles demonstrate worthwhile additional gains.
 
 ## Graphics
 
