@@ -4,8 +4,7 @@
 
 - Add `TRON` and `TROFF` for program tracing and debugging.
 - Expand `PLAY` MML coverage beyond the initial `T`, `O`, `L`, notes, rests, dotted notes, and octave changes.
-- ~~Implement QBasic subroutines and functions (`SUB` and `FUNCTION`)~~ ✅ Done
-- ~~Fix character width scaling on 40 column displays~~ ✅ Done
+
 
 ## Audio
 
@@ -37,8 +36,6 @@
 
 ## Graphics
 
-- ~~Implement `WINDOW` and `VIEW` for custom coordinate mapping and viewports.~~ ✅ Done
-- ~~Implement `_LOADIMAGE`, `_PUTIMAGE`, and `_FREEIMAGE` with SDL image handles.~~ ✅ Done
 
 ## Testing and project hygiene
 
