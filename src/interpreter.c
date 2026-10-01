@@ -1375,6 +1375,38 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
     if (ts->tokens[ts->pos].type != TOKEN_LPAREN) return -1;
     ts->pos++;
 
+    Token *index_token = &ts->tokens[ts->pos];
+    if (ts->tokens[ts->pos + 1].type == TOKEN_RPAREN) {
+        int index_value = 0;
+        int simple_index = 0;
+        if (index_token->type == TOKEN_NUMBER) {
+            index_value = (int)index_token->double_val;
+            if (index_token->is_double) last_expression_is_double = 1;
+            simple_index = 1;
+        } else if (index_token->type == TOKEN_IDENTIFIER && proc_count == 0 &&
+                   user_function_count == 0 && !is_string_var(index_token->text) &&
+                   strcasecmp(index_token->text, "ERR") != 0 &&
+                   strcasecmp(index_token->text, "ERL") != 0) {
+            int index_var_idx = resolve_token_variable(index_token);
+            Variable *index_var = index_var_idx >= 0 ? get_variable_ptr(index_var_idx) : NULL;
+            if (index_var) {
+                size_t name_length = strlen(index_var->name);
+                if (name_length > 0 && index_var->name[name_length - 1] == '#') {
+                    last_expression_is_double = 1;
+                }
+                index_value = (int)index_var->value;
+                simple_index = 1;
+            }
+        }
+
+        if (simple_index) {
+            ts->pos += 2;
+            ensure_array_dimensioned(var_idx, 1);
+            int indices[1] = {index_value};
+            return calc_linear_index(&vars[var_idx], indices, 1);
+        }
+    }
+
     int indices[3] = {0};
     int num_indices = 0;
     indices[0] = (int)evaluate_expression_tok(ts);
@@ -3052,22 +3084,21 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
 
 static double primary_tok(TokenStream *ts) {
     Token *token = &ts->tokens[ts->pos++];
-    Token t = *token;
-    if (t.type == TOKEN_NUMBER) {
-        if (t.is_double) last_expression_is_double = 1;
-        return t.double_val;
+    if (token->type == TOKEN_NUMBER) {
+        if (token->is_double) last_expression_is_double = 1;
+        return token->double_val;
     }
-    if (t.type == TOKEN_ARGC) return (double)internal_argc;
-    if (t.type == TOKEN_IDENTIFIER) {
-        if ((t.text[0] == 'E' || t.text[0] == 'e') && strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
-        if ((t.text[0] == 'E' || t.text[0] == 'e') && strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
+    if (token->type == TOKEN_ARGC) return (double)internal_argc;
+    if (token->type == TOKEN_IDENTIFIER) {
+        if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERR") == 0) return (double)last_runtime_error_code;
+        if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERL") == 0) return (double)last_runtime_error_line;
 
-        if ((t.text[0] == 'F' || t.text[0] == 'f') &&
-            (t.text[1] == 'N' || t.text[1] == 'n')) {
+        if ((token->text[0] == 'F' || token->text[0] == 'f') &&
+            (token->text[1] == 'N' || token->text[1] == 'n')) {
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
                 ts->pos++; // (
                 for (int i = 0; i < user_function_count; i++) {
-                    if (strcasecmp(user_functions[i].name, t.text) == 0) {
+                    if (strcasecmp(user_functions[i].name, token->text) == 0) {
                         double arg_val = evaluate_expression_tok(ts);
                         if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
                         
@@ -3083,7 +3114,7 @@ static double primary_tok(TokenStream *ts) {
             }
         }
 
-        ProcedureDef *pfunc = proc_count > 0 ? find_procedure(t.text) : NULL;
+        ProcedureDef *pfunc = proc_count > 0 ? find_procedure(token->text) : NULL;
         if (pfunc && pfunc->is_function) {
             return evaluate_function_call_numeric(pfunc, ts);
         }
@@ -3102,13 +3133,13 @@ static double primary_tok(TokenStream *ts) {
         }
         return v ? v->value : 0;
     }
-    if (t.type == TOKEN_LPAREN) {
+    if (token->type == TOKEN_LPAREN) {
         double val = evaluate_expression_tok(ts);
         if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
         return val;
     }
 
-    if (t.type == TOKEN_LOADFONT) {
+    if (token->type == TOKEN_LOADFONT) {
         /* _LOADFONT(filename$, size%) -> handle */
         if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
             ts->pos++;
@@ -3125,7 +3156,7 @@ static double primary_tok(TokenStream *ts) {
         }
         return 0;
     }
-    if (t.type == TOKEN_LOADIMAGE) {
+    if (token->type == TOKEN_LOADIMAGE) {
         /* _LOADIMAGE(filename$, mode&) -> handle */
         if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
             ts->pos++;
@@ -3142,8 +3173,8 @@ static double primary_tok(TokenStream *ts) {
         }
         return 0;
     }
-    if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
-        TokenType ft = t.type;
+    if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
+        TokenType ft = token->type;
         int has_arg = 0;
         double arg = 0;
 

@@ -49,6 +49,12 @@ Run a BASIC program:
 ./basika demo/hello.bas
 ```
 
+Run the random statistics demo, which sorts 100,000 values and reports the mean, median, modes, and compute time:
+
+```sh
+./basika -q demo/random_stats.bas
+```
+
 Enable graphics window mode:
 
 ```sh
