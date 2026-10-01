@@ -44,7 +44,7 @@ static void update_line_index() {
  * Lines are kept in ascending order by line number. If a line with the
  * same number already exists its text and tokens are replaced. Also
  * extracts a label (e.g. "myLabel:") from the first token if present */
-void add_line(int line_num, const char *text) {
+void add_line(int line_num, const char *text, int source_line_number, int has_explicit_line_number) {
     index_dirty = 1;
     Statement **curr = &head;
     while (*curr && (*curr)->line_number < line_num) {
@@ -54,12 +54,16 @@ void add_line(int line_num, const char *text) {
     Statement *stmt = NULL;
     if (*curr && (*curr)->line_number == line_num) {
         strncpy((*curr)->raw_command, text, 255);
+        (*curr)->source_line_number = source_line_number;
+        (*curr)->has_explicit_line_number = has_explicit_line_number;
         tokenize_line(*curr);
         stmt = *curr;
     } else {
         Statement *new_stmt = malloc(sizeof(Statement));
         if (!new_stmt) return;
         new_stmt->line_number = line_num;
+        new_stmt->source_line_number = source_line_number;
+        new_stmt->has_explicit_line_number = has_explicit_line_number;
         strncpy(new_stmt->raw_command, text, 255);
         new_stmt->next = *curr;
         *curr = new_stmt;

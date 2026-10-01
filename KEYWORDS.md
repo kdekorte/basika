@@ -29,8 +29,10 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 ## Line Numbers and Labels
 
 Line numbers are optional. Programs may use traditional line numbers (`10 PRINT "Hi"`),
-labels (`my_label: PRINT "Hi"`), or mix-free-form lines with no prefix at all. When
-line numbers are omitted, file line numbers are used internally (incrementing by 10).
+labels (`my_label: PRINT "Hi"`), or free-form lines with no prefix at all. When
+line numbers are omitted, statements receive internal line numbers in increments of 10.
+Console errors report the physical file line for unnumbered statements; `ERL` continues
+to return the internal line number.
 
 Labels are identifiers followed by a colon (`my_label:`). They may appear at the start
 of a line, optionally sharing the line with a statement (`loop: PRINT X`). Labels can

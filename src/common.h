@@ -58,6 +58,8 @@ typedef struct {
 
 typedef struct Statement {
     int line_number;
+    int source_line_number;
+    int has_explicit_line_number;
     char label[64];
     char raw_command[256];
     Token *tokens;

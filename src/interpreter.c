@@ -83,6 +83,8 @@ static int runtime_error_occurred = 0;
 static int last_runtime_error_code = 0;
 static int last_runtime_error_line = 0;
 static int current_executing_line = 0;
+static int current_source_line_number = 0;
+static int current_has_explicit_line_number = 0;
 static char last_runtime_error_msg[256] = "";
 static Statement *error_stmt = NULL;
 static const char *error_ptr = NULL;
@@ -405,7 +407,10 @@ static void report_runtime_error(RuntimeError code) {
     if (on_error_goto_line == 0) {
         char full_msg[300];
         if (msg) {
-            snprintf(full_msg, sizeof(full_msg), "%s in %d\n", msg, current_executing_line);
+            int display_line = current_has_explicit_line_number || current_source_line_number <= 0
+                ? current_executing_line
+                : current_source_line_number;
+            snprintf(full_msg, sizeof(full_msg), "%s in %d\n", msg, display_line);
             basic_output(full_msg);
         }
     }
@@ -2389,12 +2394,16 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
 
 static void execute_procedure_statements(ProcedureDef *proc) {
     int saved_line = current_executing_line;
+    int saved_source_line_number = current_source_line_number;
+    int saved_has_explicit_line_number = current_has_explicit_line_number;
     Statement *curr_proc_stmt = proc->start_stmt;
     int target_depth = call_stack_depth - 1;
 
     while (curr_proc_stmt && curr_proc_stmt != proc->end_stmt && call_stack_depth > target_depth && !stop_running) {
         Statement *exec_stmt = curr_proc_stmt;
         current_executing_line = exec_stmt->line_number;
+        current_source_line_number = exec_stmt->source_line_number;
+        current_has_explicit_line_number = exec_stmt->has_explicit_line_number;
 
         TokenStream ts = {exec_stmt->tokens, 0};
         int jumped = 0;
@@ -2674,6 +2683,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
         }
     }
     current_executing_line = saved_line;
+    current_source_line_number = saved_source_line_number;
+    current_has_explicit_line_number = saved_has_explicit_line_number;
 }
 
 
@@ -3942,11 +3953,11 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
     if (is_direct) {
         if (t.type == TOKEN_NUMBER) {
             if (last_line_num) *last_line_num = t.int_val;
-            add_line(t.int_val, ptr);
+            add_line(t.int_val, ptr, current_source_line_number, 1);
             return;
         } else if (last_line_num) {
             *last_line_num += 10;
-            add_line(*last_line_num, *ptr_addr);
+            add_line(*last_line_num, *ptr_addr, current_source_line_number, 0);
             return;
         }
     }
@@ -5599,7 +5610,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
     *ptr_addr = ptr;
 }
 
-void interpret_line(const char *input, int is_direct, int *last_line_num) {
+void interpret_line(const char *input, int is_direct, int *last_line_num, int source_line_number) {
+    current_source_line_number = source_line_number;
     const char *ptr = input;
     interpret_line_at_ptr(&ptr, is_direct, last_line_num);
 }
@@ -5659,6 +5671,8 @@ void run_program() {
 
         Statement *exec_stmt = curr;
         current_executing_line = exec_stmt->line_number;
+        current_source_line_number = exec_stmt->source_line_number;
+        current_has_explicit_line_number = exec_stmt->has_explicit_line_number;
         
         int start_pos = 0;
         if (resume_ptr || resume_ts_pos >= 0) {

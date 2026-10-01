@@ -105,6 +105,7 @@ TESTS=(
 
   # Error Recovery
   "tests/syntax_error"
+  "tests/unnumbered_syntax_error"
   "tests/return_error"
 
   # New Features

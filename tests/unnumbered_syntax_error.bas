@@ -1,0 +1,2 @@
+PRINT "Before error"
+INVALID_COMMAND

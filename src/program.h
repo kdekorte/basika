@@ -2,7 +2,7 @@
 #define PROGRAM_H
 #include "common.h"
 
-void add_line(int line_num, const char *text);
+void add_line(int line_num, const char *text, int source_line_number, int has_explicit_line_number);
 void list_program();
 Statement* find_label(const char *label);
 void clear_program();
