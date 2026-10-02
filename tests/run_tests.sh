@@ -85,6 +85,7 @@ TESTS=(
   # Math and Data handling
   "tests/math_funcs"
   "tests/def_fn"
+  "tests/def_fn_compiled"
   "tests/peek_poke"
   "tests/random"
   "tests/data_read_restore"

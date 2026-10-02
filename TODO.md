@@ -5,7 +5,6 @@
 - Add `TRON` and `TROFF` for program tracing and debugging.
 - Expand `PLAY` MML coverage beyond the initial `T`, `O`, `L`, notes, rests, dotted notes, and octave changes.
 
-
 ## Audio
 
 - Add more complete `PLAY` MML support: `MB`, `MF`, `MN`, `ML`, `MS`, `Nn`, and foreground/background behavior.
@@ -31,11 +30,8 @@
 
 ### Parsing and evaluation
 
-- ~~Profile repeated expression and array-index evaluation, then optimize measured hot paths~~ ✅ Added raw-parser lookahead and simple-subscript fast paths; validated with expression, array, and procedure regressions.
-- Consider compiling stable expressions to an AST or bytecode only if follow-up profiles demonstrate worthwhile additional gains.
 
 ## Graphics
-
 
 ## Testing and project hygiene
 

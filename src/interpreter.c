@@ -91,9 +91,45 @@ static const char *error_ptr = NULL;
 static const char *error_next_ptr = NULL;
 
 typedef struct {
+    unsigned char op;
+    int left;
+    int right;
+    Token token;
+} CompiledExpressionNode;
+
+enum {
+    EXPR_NUMBER,
+    EXPR_VARIABLE,
+    EXPR_NEGATE,
+    EXPR_NOT,
+    EXPR_ADD,
+    EXPR_SUBTRACT,
+    EXPR_MULTIPLY,
+    EXPR_DIVIDE,
+    EXPR_MOD,
+    EXPR_IDIV,
+    EXPR_POWER,
+    EXPR_EQUAL,
+    EXPR_NOT_EQUAL,
+    EXPR_LESS,
+    EXPR_LESS_EQUAL,
+    EXPR_GREATER,
+    EXPR_GREATER_EQUAL,
+    EXPR_AND,
+    EXPR_OR,
+    EXPR_XOR
+};
+
+#define MAX_COMPILED_EXPRESSION_NODES 128
+
+typedef struct {
     char name[32];
     char param_name[32];
     char expression[256];
+    CompiledExpressionNode compiled_nodes[MAX_COMPILED_EXPRESSION_NODES];
+    int compiled_node_count;
+    int compiled_root;
+    int has_compiled_expression;
 } UserFunction;
 
 static UserFunction user_functions[64];
@@ -1065,6 +1101,234 @@ int find_variable(const char *name) {
         return idx;
     }
     return -1;
+}
+
+/*
+ * DEF FN bodies are immutable after their definition.  Compile the numeric,
+ * side-effect-free subset once so hot functions do not repeatedly scan their
+ * source text.  More involved expressions deliberately retain the mature raw
+ * evaluator below; this keeps compatibility for strings, arrays, built-ins,
+ * and nested function calls.
+ */
+static int compile_expression_node(UserFunction *function, unsigned char op, int left, int right, Token token) {
+    if (function->compiled_node_count >= MAX_COMPILED_EXPRESSION_NODES) return -1;
+    int index = function->compiled_node_count++;
+    function->compiled_nodes[index] = (CompiledExpressionNode){op, left, right, token};
+    return index;
+}
+
+static int compile_primary(TokenStream *ts, UserFunction *function);
+
+static int compile_power(TokenStream *ts, UserFunction *function) {
+    int left = compile_primary(ts, function);
+    if (left < 0) return -1;
+    if (ts->tokens[ts->pos].type == TOKEN_POWER) {
+        ts->pos++;
+        int right = compile_power(ts, function);
+        if (right < 0) return -1;
+        return compile_expression_node(function, EXPR_POWER, left, right, (Token){0});
+    }
+    return left;
+}
+
+static int compile_unary(TokenStream *ts, UserFunction *function) {
+    TokenType type = ts->tokens[ts->pos].type;
+    if (type == TOKEN_PLUS || type == TOKEN_MINUS) {
+        ts->pos++;
+        int operand = compile_unary(ts, function);
+        if (operand < 0) return -1;
+        return type == TOKEN_PLUS ? operand : compile_expression_node(function, EXPR_NEGATE, operand, -1, (Token){0});
+    }
+    return compile_power(ts, function);
+}
+
+static int compile_term(TokenStream *ts, UserFunction *function) {
+    int left = compile_unary(ts, function);
+    if (left < 0) return -1;
+    while (1) {
+        TokenType type = ts->tokens[ts->pos].type;
+        unsigned char op;
+        if (type == TOKEN_STAR) op = EXPR_MULTIPLY;
+        else if (type == TOKEN_SLASH) op = EXPR_DIVIDE;
+        else if (type == TOKEN_MOD) op = EXPR_MOD;
+        else if (type == TOKEN_IDIV || (type == TOKEN_IDENTIFIER && strcasecmp(ts->tokens[ts->pos].text, "DIV") == 0)) op = EXPR_IDIV;
+        else break;
+        ts->pos++;
+        int right = compile_unary(ts, function);
+        if (right < 0) return -1;
+        left = compile_expression_node(function, op, left, right, (Token){0});
+        if (left < 0) return -1;
+    }
+    return left;
+}
+
+static int compile_arithmetic(TokenStream *ts, UserFunction *function) {
+    int left = compile_term(ts, function);
+    if (left < 0) return -1;
+    while (ts->tokens[ts->pos].type == TOKEN_PLUS || ts->tokens[ts->pos].type == TOKEN_MINUS) {
+        TokenType type = ts->tokens[ts->pos++].type;
+        int right = compile_term(ts, function);
+        if (right < 0) return -1;
+        left = compile_expression_node(function, type == TOKEN_PLUS ? EXPR_ADD : EXPR_SUBTRACT, left, right, (Token){0});
+        if (left < 0) return -1;
+    }
+    return left;
+}
+
+static int compile_relational(TokenStream *ts, UserFunction *function) {
+    int left = compile_arithmetic(ts, function);
+    if (left < 0) return -1;
+    while (1) {
+        TokenType type = ts->tokens[ts->pos].type;
+        unsigned char op;
+        if (type == TOKEN_EQUALS) op = EXPR_EQUAL;
+        else if (type == TOKEN_LESS) {
+            ts->pos++;
+            if (ts->tokens[ts->pos].type == TOKEN_GREATER) { ts->pos++; op = EXPR_NOT_EQUAL; }
+            else if (ts->tokens[ts->pos].type == TOKEN_EQUALS) { ts->pos++; op = EXPR_LESS_EQUAL; }
+            else op = EXPR_LESS;
+            int right = compile_arithmetic(ts, function);
+            if (right < 0) return -1;
+            left = compile_expression_node(function, op, left, right, (Token){0});
+            if (left < 0) return -1;
+            continue;
+        } else if (type == TOKEN_GREATER) {
+            ts->pos++;
+            if (ts->tokens[ts->pos].type == TOKEN_EQUALS) { ts->pos++; op = EXPR_GREATER_EQUAL; }
+            else op = EXPR_GREATER;
+            int right = compile_arithmetic(ts, function);
+            if (right < 0) return -1;
+            left = compile_expression_node(function, op, left, right, (Token){0});
+            if (left < 0) return -1;
+            continue;
+        } else break;
+        ts->pos++;
+        int right = compile_arithmetic(ts, function);
+        if (right < 0) return -1;
+        left = compile_expression_node(function, op, left, right, (Token){0});
+        if (left < 0) return -1;
+    }
+    return left;
+}
+
+static int compile_not(TokenStream *ts, UserFunction *function) {
+    if (ts->tokens[ts->pos].type == TOKEN_NOT) {
+        ts->pos++;
+        int operand = compile_not(ts, function);
+        return operand < 0 ? -1 : compile_expression_node(function, EXPR_NOT, operand, -1, (Token){0});
+    }
+    return compile_relational(ts, function);
+}
+
+static int compile_and(TokenStream *ts, UserFunction *function) {
+    int left = compile_not(ts, function);
+    while (left >= 0 && ts->tokens[ts->pos].type == TOKEN_AND) {
+        ts->pos++;
+        int right = compile_not(ts, function);
+        left = right < 0 ? -1 : compile_expression_node(function, EXPR_AND, left, right, (Token){0});
+    }
+    return left;
+}
+
+static int compile_or(TokenStream *ts, UserFunction *function) {
+    int left = compile_and(ts, function);
+    while (left >= 0 && ts->tokens[ts->pos].type == TOKEN_OR) {
+        ts->pos++;
+        int right = compile_and(ts, function);
+        left = right < 0 ? -1 : compile_expression_node(function, EXPR_OR, left, right, (Token){0});
+    }
+    return left;
+}
+
+static int compile_primary(TokenStream *ts, UserFunction *function) {
+    Token token = ts->tokens[ts->pos++];
+    if (token.type == TOKEN_NUMBER) return compile_expression_node(function, EXPR_NUMBER, -1, -1, token);
+    if (token.type == TOKEN_IDENTIFIER) {
+        size_t length = strlen(token.text);
+        if (length && token.text[length - 1] != '$') return compile_expression_node(function, EXPR_VARIABLE, -1, -1, token);
+        return -1;
+    }
+    if (token.type == TOKEN_LPAREN) {
+        int result = compile_or(ts, function);
+        if (result < 0 || ts->tokens[ts->pos].type != TOKEN_RPAREN) return -1;
+        ts->pos++;
+        return result;
+    }
+    return -1;
+}
+
+static void compile_user_function_expression(UserFunction *function) {
+    Token tokens[256];
+    const char *input = function->expression;
+    int count = 0;
+    while (count < 255) {
+        Token token = get_next_token(&input);
+        if (token.type == TOKEN_EOF || token.type == TOKEN_COLON) break;
+        tokens[count++] = token;
+    }
+    tokens[count] = (Token){.type = TOKEN_EOF, .var_idx = -1};
+    function->compiled_node_count = 0;
+    function->compiled_root = -1;
+    function->has_compiled_expression = 0;
+    TokenStream ts = {tokens, 0};
+    int root = compile_or(&ts, function);
+    if (root >= 0 && ts.tokens[ts.pos].type == TOKEN_EOF) {
+        function->compiled_root = root;
+        function->has_compiled_expression = 1;
+    }
+}
+
+static double evaluate_compiled_expression_node(const UserFunction *function, int index) {
+    const CompiledExpressionNode *node = &function->compiled_nodes[index];
+    if (node->op == EXPR_NUMBER) {
+        if (node->token.is_double) last_expression_is_double = 1;
+        return node->token.double_val;
+    }
+    if (node->op == EXPR_VARIABLE) {
+        int variable_index = find_variable(node->token.text);
+        Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
+        if (variable && variable->name[strlen(variable->name) - 1] == '#') last_expression_is_double = 1;
+        return variable ? variable->value : 0;
+    }
+
+    double left = evaluate_compiled_expression_node(function, node->left);
+    if (node->op == EXPR_NEGATE) return -left;
+    if (node->op == EXPR_NOT) return (double)~(short)left;
+    double right = evaluate_compiled_expression_node(function, node->right);
+    switch (node->op) {
+        case EXPR_ADD: return left + right;
+        case EXPR_SUBTRACT: return left - right;
+        case EXPR_MULTIPLY: return left * right;
+        case EXPR_DIVIDE: return right != 0.0 ? left / right : left;
+        case EXPR_MOD: return right != 0.0 ? (double)((long)left % (long)right) : left;
+        case EXPR_IDIV: return right != 0.0 ? (double)(long)(left / right) : left;
+        case EXPR_POWER: return pow(left, right);
+        case EXPR_EQUAL: return left == right ? -1.0 : 0.0;
+        case EXPR_NOT_EQUAL: return left != right ? -1.0 : 0.0;
+        case EXPR_LESS: return left < right ? -1.0 : 0.0;
+        case EXPR_LESS_EQUAL: return left <= right ? -1.0 : 0.0;
+        case EXPR_GREATER: return left > right ? -1.0 : 0.0;
+        case EXPR_GREATER_EQUAL: return left >= right ? -1.0 : 0.0;
+        case EXPR_AND: return (double)((short)left & (short)right);
+        case EXPR_OR: return (double)((short)left | (short)right);
+        case EXPR_XOR: return (double)((short)left ^ (short)right);
+        default: return 0;
+    }
+}
+
+static double evaluate_user_function(UserFunction *function, double argument) {
+    int parameter_index = find_variable(function->param_name);
+    double old_value = vars[parameter_index].value;
+    vars[parameter_index].value = argument;
+    double result;
+    if (function->has_compiled_expression) {
+        result = evaluate_compiled_expression_node(function, function->compiled_root);
+    } else {
+        const char *expression = function->expression;
+        result = evaluate_expression(&expression);
+    }
+    vars[parameter_index].value = old_value;
+    return result;
 }
 
 static void reset_file_field_state(int fnum) {
@@ -3102,13 +3366,7 @@ static double primary_tok(TokenStream *ts) {
                         double arg_val = evaluate_expression_tok(ts);
                         if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
                         
-                        int p_idx = find_variable(user_functions[i].param_name);
-                        double old_val = vars[p_idx].value;
-                        vars[p_idx].value = arg_val;
-                        const char *expr_ptr = user_functions[i].expression;
-                        double result = evaluate_expression(&expr_ptr);
-                        vars[p_idx].value = old_val;
-                        return result;
+                        return evaluate_user_function(&user_functions[i], arg_val);
                     }
                 }
             }
@@ -3515,13 +3773,7 @@ static double primary(const char **input) {
                         double arg_val = evaluate_expression(input);
                         get_next_token(input); // consume ')'
                         
-                        int p_idx = find_variable(user_functions[i].param_name);
-                        double old_val = vars[p_idx].value;
-                        vars[p_idx].value = arg_val;
-                        const char *expr_ptr = user_functions[i].expression;
-                        double result = evaluate_expression(&expr_ptr);
-                        vars[p_idx].value = old_val;
-                        return result;
+                        return evaluate_user_function(&user_functions[i], arg_val);
                     }
                 }
             }
@@ -4288,6 +4540,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     if (len > 255) len = 255;
                     strncpy(user_functions[f_idx].expression, ptr, len);
                     user_functions[f_idx].expression[len] = '\0';
+                    compile_user_function_expression(&user_functions[f_idx]);
                     ptr += len;
                 }
             }

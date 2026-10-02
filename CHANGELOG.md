@@ -6,6 +6,7 @@ All notable changes to this project are recorded in this file.
 
 - **Error Line Reporting**: Console diagnostics for programs without explicit BASIC line numbers now report the physical source-file line instead of the internal virtual line number. `ERL` continues to return the internal line number. Added syntax-error coverage for numbered and unnumbered programs.
 - **Raw Expression Parsing**: Replaced repeated operator lookahead tokenization with boundary-aware source checks in the raw expression evaluator. Expanded `DEF FN` coverage for keyword boundaries and precedence; the 2-million-call benchmark improved from 0.99 s to 0.64 s of CPU time.
+- **Compiled `DEF FN` Expressions**: Numeric, side-effect-free `DEF FN` bodies now compile once to a compact AST and avoid reparsing on every call. Expressions involving arrays, strings, built-ins, or nested function calls retain the raw evaluator for compatibility.
 - **Random Statistics Demo**: Added a console benchmark that sorts 100,000 integers in the range -10000 to 10000 and reports the mean, median, all modes, and compute time.
 - **Array Index Fast Path**: Simple literal and scalar-variable subscripts now bypass full expression evaluation. On the random statistics workload, compute time measured about 1.38-1.43 seconds versus 1.46 seconds before the change.
 
