@@ -2,7 +2,7 @@
 
 All notable changes to this project are recorded in this file.
 
-## 2026-10-01
+## 0.99.5 — 2026-10-02
 
 - **Error Line Reporting**: Console diagnostics for programs without explicit BASIC line numbers now report the physical source-file line instead of the internal virtual line number. `ERL` continues to return the internal line number. Added syntax-error coverage for numbered and unnumbered programs.
 - **Raw Expression Parsing**: Replaced repeated operator lookahead tokenization with boundary-aware source checks in the raw expression evaluator. Expanded `DEF FN` coverage for keyword boundaries and precedence; the 2-million-call benchmark improved from 0.99 s to 0.64 s of CPU time.
