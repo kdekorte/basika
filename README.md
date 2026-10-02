@@ -49,12 +49,6 @@ Run a BASIC program:
 ./basika demo/hello.bas
 ```
 
-Run the random statistics demo, which sorts 100,000 values and reports the mean, median, modes, and compute time:
-
-```sh
-./basika -q demo/random_stats.bas
-```
-
 Enable graphics window mode:
 
 ```sh
@@ -87,8 +81,8 @@ Graphics demos can be run with a visible window using `-w`:
 ./basika -w demo/randomtext.bas
 ```
 
-Image demos require `SDL3_image` and load the repository fixture from
-`tests/image_fixture.bmp`. Use `--headless` when a windowing environment is not
+Image demos require `SDL3_image` and load the repository fixture from  
+`tests/image_fixture.bmp`. Use `--headless` when a windowing environment is not  
 available.
 
 Show help:
@@ -107,20 +101,20 @@ make test
 
 ## Supported features
 
-Basika supports a wide range of IBM BASICA-compatible commands and modern QBasic-style modular programming.
+Basika supports a wide range of IBM BASICA-compatible commands and modern QBasic-style modular programming.  
 Full support is included for `SUB` and `FUNCTION` procedure blocks, `CALL`, `DECLARE`, `SHARED` global variables, `STATIC` declarations, and `EXIT SUB`/`EXIT FUNCTION`. Procedures feature isolated local variable scope, pass-by-reference for simple variable parameters, pass-by-value for parenthesized expressions, and recursive function evaluation.
 
-Graphics image handles are managed with `_LOADIMAGE`, `_PUTIMAGE`, and
+Graphics image handles are managed with `_LOADIMAGE`, `_PUTIMAGE`, and  
 `_FREEIMAGE`; loaded fonts use `_LOADFONT`, `_FONT`, and `_FREEFONT`.
 
-String variables use heap-backed storage and grow automatically as values are
-assigned, concatenated, or returned from string functions. Multi-megabyte
-values are supported by default. Fixed-length declarations are also supported
+String variables use heap-backed storage and grow automatically as values are  
+assigned, concatenated, or returned from string functions. Multi-megabyte  
+values are supported by default. Fixed-length declarations are also supported  
 with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 
-`_DEFLATE$` and `_INFLATE$` support lossless compression and decompression of
-dynamic strings, including multi-megabyte round trips. Coverage for procedures, dynamic
-growth, string functions, fixed-length declarations, and compression is
+`_DEFLATE$` and `_INFLATE$` support lossless compression and decompression of  
+dynamic strings, including multi-megabyte round trips. Coverage for procedures, dynamic  
+growth, string functions, fixed-length declarations, and compression is  
 included in `make test`.
 
 For a full list of supported commands and their exact syntax, please refer to KEYWORDS.md.
