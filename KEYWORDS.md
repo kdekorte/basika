@@ -29,6 +29,8 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
 Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
 
+`CIRCLE (x, y), radius, color, 2, alpha` draws a filled circle with alpha from 0 (transparent) to 255 (opaque).
+
 ## Line Numbers and Labels
 
 Line numbers are optional. Programs may use traditional line numbers (`10 PRINT "Hi"`),

@@ -168,6 +168,7 @@ typedef struct {
     Variable local_vars[128];
     int local_var_count;
     
+    Variable *byref_caller_variable[MAX_PROC_PARAMS];
     int byref_caller_var_idx[MAX_PROC_PARAMS];
     int byref_caller_frame[MAX_PROC_PARAMS];
     
@@ -220,6 +221,7 @@ static Variable *get_variable_ptr(int idx) {
         // 1. Check if parameter
         for (int p = 0; p < frame->proc->param_count; p++) {
             if (proc_name_match(frame->proc->params[p].name, name)) {
+                if (frame->byref_caller_variable[p]) return frame->byref_caller_variable[p];
                 if (frame->byref_caller_var_idx[p] != -1) {
                     int cframe = frame->byref_caller_frame[p];
                     int cidx = frame->byref_caller_var_idx[p];
@@ -2650,6 +2652,7 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
 
         if (is_var_id && next_is_sep) {
             int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
             frame->byref_caller_var_idx[arg_idx] = c_var_idx;
             frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
         } else {
@@ -3028,6 +3031,7 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
 
         if (is_simple_var) {
             int c_var_idx = find_variable(var_buf);
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
             frame->byref_caller_var_idx[arg_idx] = c_var_idx;
             frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
             *input = after_var;
@@ -3128,6 +3132,7 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
 
         if (is_simple_var) {
             int c_var_idx = find_variable(var_buf);
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
             frame->byref_caller_var_idx[arg_idx] = c_var_idx;
             frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
             *input = after_var;
@@ -3218,6 +3223,7 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
 
         if (is_var_id && next_is_sep) {
             int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
             frame->byref_caller_var_idx[arg_idx] = c_var_idx;
             frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
         } else {
@@ -3299,6 +3305,7 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
 
         if (is_var_id && next_is_sep) {
             int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
             frame->byref_caller_var_idx[arg_idx] = c_var_idx;
             frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
         } else {
@@ -5356,7 +5363,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 ptr = saved;
             }
             draw_line(x1, y1, x2, y2, col, fill);
-        } else if (t.type == TOKEN_CIRCLE) { // CIRCLE (cx,cy),radius[,color]
+        } else if (t.type == TOKEN_CIRCLE) { // CIRCLE (cx,cy),radius[,color[,fill[,alpha]]]
             double cx, cy, radius;
             const char *saved = ptr;
             if (get_next_token(&ptr).type == TOKEN_LPAREN) {
@@ -5387,7 +5394,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             } else {
                 ptr = saved;
             }
-            draw_circle(cx, cy, radius, col, fill);
+            int alpha = 255;
+            saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_COMMA) {
+                alpha = (int)evaluate_expression(&ptr);
+            } else {
+                ptr = saved;
+            }
+            if (alpha < 255) draw_circle_alpha(cx, cy, radius, col, fill, alpha);
+            else draw_circle(cx, cy, radius, col, fill);
         } else if (t.type == TOKEN_PAINT) { // PAINT (x,y)[,color[,border]]
             double x, y;
             const char *saved = ptr;
@@ -6022,7 +6037,7 @@ void run_program() {
                 }
                 
                 int idx = resolve_token_variable(var_token);
-                vars[idx].value = start;
+                set_numeric_variable(idx, -1, start);
 
                 // BASIKA check: If the loop should not execute at all
                 int should_skip = 0;
@@ -6281,8 +6296,12 @@ void run_program() {
                     if (for_ptr > 0) f = for_ptr - 1;
                 }
                 if (f != -1) {
-                    vars[for_stack[f].var_idx].value += for_stack[f].step_val;
-                    double v = vars[for_stack[f].var_idx].value;
+                    int var_idx = for_stack[f].var_idx;
+                    Variable *loop_var = get_variable_ptr(var_idx);
+                    double next_value = (loop_var ? loop_var->value : 0.0) + for_stack[f].step_val;
+                    set_numeric_variable(var_idx, -1, next_value);
+                    loop_var = get_variable_ptr(var_idx);
+                    double v = loop_var ? loop_var->value : 0.0;
                     if ((for_stack[f].step_val > 0 && v <= for_stack[f].end_val) || (for_stack[f].step_val < 0 && v >= for_stack[f].end_val)) {
                         curr = for_stack[f].start_stmt;
                         resume_ptr = NULL;

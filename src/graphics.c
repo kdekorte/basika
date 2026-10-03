@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <SDL3_image/SDL_image.h>
 #include <SDL3_ttf/SDL_ttf.h>
 #include "graphics.h"
@@ -1116,8 +1117,12 @@ void draw_line(double ux1, double uy1, double ux2, double uy2, int color, int fi
     update_graphics();
 }
 
-void draw_circle(double ucx, double ucy, double uradius, int color, int fill) {
+static void draw_circle_with_alpha(double ucx, double ucy, double uradius, int color, int fill, int alpha) {
     if (!renderer || !canvas) return;
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    if (alpha == 0) return;
+
     int cx, cy;
     transform_coords(ucx, ucy, &cx, &cy);
     // Approximate physical radius from x scale
@@ -1126,15 +1131,38 @@ void draw_circle(double ucx, double ucy, double uradius, int color, int fill) {
     int radius = abs(p_cx - cx);
     if (radius == 0 && uradius > 0) radius = 1;
     if (radius <= 0) return;
-    
+
     apply_clipping();
 
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE); // Ensure opaque drawing
+    SDL_SetRenderDrawBlendMode(renderer, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     SDL_Color draw_color = get_graphics_color(color);
+    draw_color.a = (Uint8)alpha;
     SDL_SetRenderDrawColor(renderer, draw_color.r, draw_color.g, draw_color.b, draw_color.a);
 
     double xs = (double)canvas_width / mode_res_w;
     double ys = (double)canvas_height / mode_res_h;
+
+    if (fill == 2 && alpha < 255) {
+        for (int row = -radius; row <= radius; row++) {
+            int row_sq = row * row;
+            int row_half = (int)sqrt((double)radius * radius - (double)row_sq);
+            for (int col = -row_half; col <= row_half; col++) {
+                SDL_FRect cell = {
+                    (float)((cx + col) * xs),
+                    (float)((cy + row) * ys),
+                    (float)(xs + 0.5f),
+                    (float)(ys + 0.5f)
+                };
+                SDL_RenderFillRect(renderer, &cell);
+            }
+        }
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        gfx_cursor_x = cx;
+        gfx_cursor_y = cy;
+        remove_clipping();
+        update_graphics();
+        return;
+    }
 
     int x = 0;
     int y = radius;
@@ -1156,8 +1184,8 @@ void draw_circle(double ucx, double ucy, double uradius, int color, int fill) {
             int px[8] = {cx + x, cx - x, cx + x, cx - x, cx + y, cx - y, cx + y, cx - y};
             int py[8] = {cy + y, cy + y, cy - y, cy - y, cy + x, cy + x, cy - x, cy - x};
             for (int i = 0; i < 8; i++) {
-                // Draw slightly larger blocks (xs+1) to ensure logical pixels 
-                // overlap at corners, creating a water-tight border for PAINT 
+                // Draw slightly larger blocks (xs+1) to ensure logical pixels
+                // overlap at corners, creating a water-tight border for PAINT
                 // commands in high-resolution modes.
                 SDL_FRect r = { (float)(px[i] * xs), (float)(py[i] * ys), (float)(xs + 1.0f), (float)(ys + 1.0f) };
                 SDL_RenderFillRect(renderer, &r);
@@ -1174,8 +1202,17 @@ void draw_circle(double ucx, double ucy, double uradius, int color, int fill) {
     }
     gfx_cursor_x = cx;
     gfx_cursor_y = cy;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     remove_clipping();
     update_graphics();
+}
+
+void draw_circle(double cx, double cy, double radius, int color, int fill) {
+    draw_circle_with_alpha(cx, cy, radius, color, fill, 255);
+}
+
+void draw_circle_alpha(double cx, double cy, double radius, int color, int fill, int alpha) {
+    draw_circle_with_alpha(cx, cy, radius, color, fill, alpha);
 }
 
 typedef struct {

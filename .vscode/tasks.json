@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Final alpha circle validation",
+			"type": "shell",
+			"command": "make -s && ./basika --headless tests/circle_alpha.bas && test -f tests/circle_alpha.png && rm -f tests/circle_alpha.png && printf 'circle alpha PASS\\n'",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

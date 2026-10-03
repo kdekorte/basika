@@ -121,11 +121,13 @@ TESTS=(
   "tests/def_types"
   "tests/auto_screenshot"
   "tests/graphics_primitives"
+  "tests/circle_alpha"
   "tests/autodisplay"
   "tests/labels_no_lines"
   "tests/qbasic_sub"
   "tests/qbasic_function"
   "tests/qbasic_scope"
+  "tests/qbasic_nested_calls"
 )
 
 for t in "${TESTS[@]}"; do
@@ -161,6 +163,14 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/autodisplay.png
+  elif [ "$t" = "tests/circle_alpha" ]; then
+    rm -f tests/circle_alpha.png
+    OUT=$(./basika --headless "$t.bas" 2>&1)
+    if [ ! -f tests/circle_alpha.png ]; then
+      echo "$t FAIL: screenshot file tests/circle_alpha.png not found"
+      exit 2
+    fi
+    rm -f tests/circle_alpha.png
   else
     OUT=$(./basika "$t.bas" 2>&1)
   fi

@@ -12,6 +12,7 @@ int graphics_get_text_cols(void);
 void set_pixel(double x, double y, int color);
 void draw_line(double x1, double y1, double x2, double y2, int color, int fill);
 void draw_circle(double cx, double cy, double radius, int color, int fill);
+void draw_circle_alpha(double cx, double cy, double radius, int color, int fill, int alpha);
 int graphics_save_screenshot(const char *filename);
 int graphics_loadimage(const char *filename, int mode);
 int graphics_freeimage(int handle);
