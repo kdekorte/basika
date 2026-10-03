@@ -9,6 +9,7 @@
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
+static int autodisplay_enabled = 1;
 void update_graphics(); // Forward declaration
 static void render_canvas_to_window(void); // Forward declaration
 static SDL_Texture **get_active_glyph_cache(void); // Forward declaration
@@ -374,7 +375,7 @@ void graphics_cls() {
 
 void graphics_sleep(int ms) {
     if (ms > 0) {
-        graphics_present_now();
+        graphics_present_if_autodisplay();
         handle_events();
         SDL_Delay(ms);
     }
@@ -906,6 +907,15 @@ void graphics_present_now() {
     }
 }
 
+void graphics_present_if_autodisplay() {
+    if (autodisplay_enabled) graphics_present_now();
+}
+
+void graphics_set_autodisplay(int enabled) {
+    autodisplay_enabled = enabled != 0;
+    if (autodisplay_enabled) graphics_present_now();
+}
+
 void set_text_color(int color_value) {
     if (color_value < 0) color_value = 0;
     if (color_value > 15) color_value = 15;
@@ -1256,7 +1266,7 @@ void draw_paint(double ux, double uy, int paint_color, int border_color) {
     
     gfx_cursor_x = x;
     gfx_cursor_y = y;
-    graphics_present_now();
+    graphics_present_if_autodisplay();
 }
 
 void set_window_title(const char *title) {
@@ -1266,7 +1276,7 @@ void set_window_title(const char *title) {
 }
 
 void update_graphics() {
-    if (!renderer || !canvas) return;
+    if (!renderer || !canvas || !autodisplay_enabled) return;
 
     Uint64 now = SDL_GetTicks();
     if (present_interval_ms > 0 && (now - last_present < (Uint64)present_interval_ms)) {

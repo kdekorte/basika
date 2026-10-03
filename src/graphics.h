@@ -46,6 +46,8 @@ int get_graphics_key(void);
 int get_graphics_char(void);
 void graphics_readline(char *buffer, int size);
 void graphics_present_now();
+void graphics_present_if_autodisplay();
+void graphics_set_autodisplay(int enabled);
 void set_present_interval(int ms);
 
 #endif

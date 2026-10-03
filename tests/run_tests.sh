@@ -121,6 +121,7 @@ TESTS=(
   "tests/def_types"
   "tests/auto_screenshot"
   "tests/graphics_primitives"
+  "tests/autodisplay"
   "tests/labels_no_lines"
   "tests/qbasic_sub"
   "tests/qbasic_function"
@@ -152,6 +153,14 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/graphics_primitives.png
+  elif [ "$t" = "tests/autodisplay" ]; then
+    rm -f tests/autodisplay.png
+    OUT=$(./basika --headless "$t.bas" 2>&1)
+    if [ ! -f tests/autodisplay.png ]; then
+      echo "$t FAIL: screenshot file tests/autodisplay.png not found"
+      exit 2
+    fi
+    rm -f tests/autodisplay.png
   else
     OUT=$(./basika "$t.bas" 2>&1)
   fi

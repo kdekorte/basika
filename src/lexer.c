@@ -155,6 +155,8 @@ static const KeywordMap keyword_table[] = {
     {"WHILE", TOKEN_WHILE},
     {"WINDOW", TOKEN_WINDOW},
     {"XOR", TOKEN_XOR},
+    {"_AUTODISPLAY", TOKEN_AUTODISPLAY},
+    {"_DISPLAY", TOKEN_DISPLAY},
     {"_FONT", TOKEN_FONT},
     {"_FREEFONT", TOKEN_FREEFONT},
     {"_FREEIMAGE", TOKEN_FREEIMAGE},

@@ -79,6 +79,7 @@ Graphics demos can be run with a visible window using `-w`:
 ./basika -w demo/image_demo.bas
 ./basika -w demo/printstring.bas
 ./basika -w demo/randomtext.bas
+./basika -w demo/boing_ball.bas
 ```
 
 Image demos require `SDL3_image` and load the repository fixture from  

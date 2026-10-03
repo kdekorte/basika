@@ -22,9 +22,12 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
-`VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_FONT`, `_FREEFONT`, `_FREEIMAGE`,
-`_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
+`VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DISPLAY`, `_FONT`,
+`_FREEFONT`, `_FREEIMAGE`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
 `_DEFLATE$`, `_INFLATE$`.
+
+`_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
+Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
 
 ## Line Numbers and Labels
 

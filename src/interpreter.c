@@ -5552,7 +5552,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
         } else if (t.type == TOKEN_CLS) {
             graphics_cls();
-            if (graphics_is_active()) graphics_present_now();
+            if (graphics_is_active()) graphics_present_if_autodisplay();
             print_col = 0;
         } else if (t.type == TOKEN_SLEEP) {
             int ms = (int)evaluate_expression(&ptr);
@@ -5622,7 +5622,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                                 set_pixel(x + i, y + j, final_col);
                             }
                         }
-                        if (graphics_is_active()) graphics_present_now();
+                        if (graphics_is_active()) graphics_present_if_autodisplay();
                     }
                 }
             } else if (next.type == TOKEN_HASH) {
@@ -5767,6 +5767,17 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 ptr = saved;
                 report_runtime_error(ERR_SYNTAX_ERROR);
             }
+        } else if (t.type == TOKEN_AUTODISPLAY) {
+            Token state = get_next_token(&ptr);
+            if (state.type == TOKEN_ON) {
+                graphics_set_autodisplay(1);
+            } else if (state.type == TOKEN_OFF) {
+                graphics_set_autodisplay(0);
+            } else {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+            }
+        } else if (t.type == TOKEN_DISPLAY) {
+            graphics_present_now();
         } else if (t.type == TOKEN_FREEIMAGE) {
             int handle = (int)evaluate_expression(&ptr);
             if (!graphics_freeimage(handle)) {
@@ -6242,7 +6253,7 @@ void run_program() {
                         if (s >= 0 && s < 8) strig_event_active[s] = 0;
                     }
                     if (graphics_is_active()) {
-                        graphics_present_now();
+                        graphics_present_if_autodisplay();
                     }
                     
                     jumped = 1;
