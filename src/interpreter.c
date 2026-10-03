@@ -167,6 +167,7 @@ typedef struct {
     
     Variable local_vars[128];
     int local_var_count;
+    Variable *resolved_variables[1024];
     
     Variable *byref_caller_variable[MAX_PROC_PARAMS];
     int byref_caller_var_idx[MAX_PROC_PARAMS];
@@ -216,57 +217,60 @@ static Variable *get_variable_ptr(int idx) {
     if (idx < 0 || idx >= 1024) return &vars[0];
     if (call_stack_depth > 0) {
         CallFrame *frame = &call_stack[call_stack_depth - 1];
+        if (frame->resolved_variables[idx]) return frame->resolved_variables[idx];
+
+        Variable **resolved = &frame->resolved_variables[idx];
         const char *name = vars[idx].name;
         
         // 1. Check if parameter
         for (int p = 0; p < frame->proc->param_count; p++) {
             if (proc_name_match(frame->proc->params[p].name, name)) {
-                if (frame->byref_caller_variable[p]) return frame->byref_caller_variable[p];
+                if (frame->byref_caller_variable[p]) return *resolved = frame->byref_caller_variable[p];
                 if (frame->byref_caller_var_idx[p] != -1) {
                     int cframe = frame->byref_caller_frame[p];
                     int cidx = frame->byref_caller_var_idx[p];
                     if (cframe < 0) {
-                        return &vars[cidx];
+                        return *resolved = &vars[cidx];
                     } else if (cframe < call_stack_depth - 1) {
-                        return &call_stack[cframe].local_vars[cidx];
+                        return *resolved = &call_stack[cframe].local_vars[cidx];
                     }
                 }
                 for (int l = 0; l < frame->local_var_count; l++) {
-                    if (proc_name_match(frame->local_vars[l].name, name)) return &frame->local_vars[l];
+                    if (proc_name_match(frame->local_vars[l].name, name)) return *resolved = &frame->local_vars[l];
                 }
                 int lidx = frame->local_var_count++;
                 memset(&frame->local_vars[lidx], 0, sizeof(Variable));
                 strncpy(frame->local_vars[lidx].name, name, 31);
-                return &frame->local_vars[lidx];
+                return *resolved = &frame->local_vars[lidx];
             }
         }
 
         // 2. Check if SHARED
         for (int s = 0; s < frame->shared_count; s++) {
             if (proc_name_match(frame->shared_var_names[s], name)) {
-                return &vars[idx];
+                return *resolved = &vars[idx];
             }
         }
 
         // 3. Check if Function Name return target
         if (frame->proc->is_function && proc_name_match(frame->proc->name, name)) {
             for (int l = 0; l < frame->local_var_count; l++) {
-                if (proc_name_match(frame->local_vars[l].name, name)) return &frame->local_vars[l];
+                if (proc_name_match(frame->local_vars[l].name, name)) return *resolved = &frame->local_vars[l];
             }
             int lidx = frame->local_var_count++;
             memset(&frame->local_vars[lidx], 0, sizeof(Variable));
             strncpy(frame->local_vars[lidx].name, name, 31);
-            return &frame->local_vars[lidx];
+            return *resolved = &frame->local_vars[lidx];
         }
 
         // 4. Local procedure variable
         for (int l = 0; l < frame->local_var_count; l++) {
-            if (strcasecmp(frame->local_vars[l].name, name) == 0) return &frame->local_vars[l];
+            if (strcasecmp(frame->local_vars[l].name, name) == 0) return *resolved = &frame->local_vars[l];
         }
         int lidx = frame->local_var_count++;
         memset(&frame->local_vars[lidx], 0, sizeof(Variable));
         strncpy(frame->local_vars[lidx].name, name, 31);
-        return &frame->local_vars[lidx];
+        return *resolved = &frame->local_vars[lidx];
     }
     return &vars[idx];
 }
@@ -6377,6 +6381,7 @@ void run_program() {
                         ts.pos++;
                         if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COMMA) ts.pos++;
                     }
+                    memset(frame->resolved_variables, 0, sizeof(frame->resolved_variables));
                 } else {
                     ts.pos = exec_stmt->token_count;
                 }

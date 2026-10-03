@@ -1146,15 +1146,13 @@ static void draw_circle_with_alpha(double ucx, double ucy, double uradius, int c
         for (int row = -radius; row <= radius; row++) {
             int row_sq = row * row;
             int row_half = (int)sqrt((double)radius * radius - (double)row_sq);
-            for (int col = -row_half; col <= row_half; col++) {
-                SDL_FRect cell = {
-                    (float)((cx + col) * xs),
-                    (float)((cy + row) * ys),
-                    (float)(xs + 0.5f),
-                    (float)(ys + 0.5f)
-                };
-                SDL_RenderFillRect(renderer, &cell);
-            }
+            SDL_FRect span = {
+                (float)((cx - row_half) * xs),
+                (float)((cy + row) * ys),
+                (float)((2 * row_half + 1) * xs + 0.5f),
+                (float)(ys + 0.5f)
+            };
+            SDL_RenderFillRect(renderer, &span);
         }
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         gfx_cursor_x = cx;
