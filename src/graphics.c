@@ -291,6 +291,7 @@ void set_screen_newimage(int width, int height, int colors) {
 
     canvas_width = width;
     canvas_height = height;
+    if (window) SDL_SetWindowSize(window, width, height);
 
     text_columns = width / 8;
     text_rows = height / 16;
@@ -993,22 +994,32 @@ static SDL_Color get_graphics_color(int color_value) {
     return palette256[color_value];
 }
 
-void set_pixel(double user_x, double user_y, int color) {
+void set_pixel_alpha(double user_x, double user_y, int color, int alpha) {
     if (!renderer || !canvas) return;
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    if (alpha == 0) return;
     SDL_SetRenderTarget(renderer, canvas);
     int x, y;
     transform_coords(user_x, user_y, &x, &y);
     if (!clip_point(x, y)) return;
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE); // Ensure opaque drawing
-    SDL_SetRenderDrawColor(renderer, get_graphics_color(color).r, get_graphics_color(color).g, get_graphics_color(color).b, get_graphics_color(color).a);
+    SDL_SetRenderDrawBlendMode(renderer, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    SDL_Color draw_color = get_graphics_color(color);
+    draw_color.a = (Uint8)alpha;
+    SDL_SetRenderDrawColor(renderer, draw_color.r, draw_color.g, draw_color.b, draw_color.a);
     
     double xs = (double)canvas_width / mode_res_w;
     double ys = (double)canvas_height / mode_res_h;
     
     SDL_FRect r = { (float)(x * xs), (float)(y * ys), (float)xs, (float)ys };
     SDL_RenderFillRect(renderer, &r);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     gfx_cursor_x = x;
     gfx_cursor_y = y;
+}
+
+void set_pixel(double user_x, double user_y, int color) {
+    set_pixel_alpha(user_x, user_y, color, 255);
 }
 
 int get_pixel(double user_x, double user_y) {
@@ -1033,13 +1044,22 @@ int get_pixel(double user_x, double user_y) {
     SDL_ReadSurfacePixel(surf, 0, 0, &r, &g, &b, &a);
     SDL_DestroySurface(surf);
 
-    // Find closest match in the 256-color palette
+    // Return the nearest palette entry so blended pixels remain readable.
+    int closest = 0;
+    int closest_distance = 3 * 255 * 255 + 1;
     for (int i = 0; i < 256; i++) {
         SDL_Color c = get_graphics_color(i);
-        if (c.r == r && c.g == g && c.b == b) return i;
+        int dr = (int)c.r - r;
+        int dg = (int)c.g - g;
+        int db = (int)c.b - b;
+        int distance = dr * dr + dg * dg + db * db;
+        if (distance < closest_distance) {
+            closest = i;
+            closest_distance = distance;
+            if (distance == 0) break;
+        }
     }
-
-    return 0;
+    return closest;
 }
 
 int graphics_save_screenshot(const char *filename) {
@@ -1071,7 +1091,10 @@ int graphics_save_screenshot(const char *filename) {
     return result;
 }
 
-void draw_line(double ux1, double uy1, double ux2, double uy2, int color, int fill) {
+void draw_line_alpha(double ux1, double uy1, double ux2, double uy2, int color, int fill, int alpha) {
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    if (alpha == 0) return;
     int x1, y1, x2, y2;
     transform_coords(ux1, uy1, &x1, &y1);
     transform_coords(ux2, uy2, &x2, &y2);
@@ -1079,10 +1102,10 @@ void draw_line(double ux1, double uy1, double ux2, double uy2, int color, int fi
     apply_clipping();
 
     if (!renderer || !canvas) return;
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE); // Ensure opaque drawing
+    SDL_SetRenderDrawBlendMode(renderer, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     SDL_Color draw_color = get_graphics_color(color);
+    draw_color.a = (Uint8)alpha;
     SDL_SetRenderDrawColor(renderer, draw_color.r, draw_color.g, draw_color.b, draw_color.a);
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
     double xs = (double)canvas_width / mode_res_w;
     double ys = (double)canvas_height / mode_res_h;
@@ -1102,19 +1125,26 @@ void draw_line(double ux1, double uy1, double ux2, double uy2, int color, int fi
             SDL_RenderFillRect(renderer, &r);
         } else {
             // Draw 4 thick borders matching logical pixel size to prevent PAINT leaks
+            float inner_height = (float)height - 2.0f * (float)ys;
+            if (inner_height < 0.0f) inner_height = 0.0f;
             SDL_FRect edges[4] = {
                 { (float)left, (float)top, (float)width, (float)ys },
-                { (float)left, (float)(top + height - ys), (float)width, (float)ys },
-                { (float)left, (float)top, (float)xs, (float)height },
-                { (float)(left + width - xs), (float)top, (float)xs, (float)height }
+                { (float)left, (float)(top + height - ys), (float)width, height > ys ? (float)ys : 0.0f },
+                { (float)left, (float)(top + ys), (float)xs, inner_height },
+                { (float)(left + width - xs), (float)(top + ys), (float)xs, inner_height }
             };
             for (int i = 0; i < 4; i++) SDL_RenderFillRect(renderer, &edges[i]);
         }
     } else {
         SDL_RenderLine(renderer, (float)sx1, (float)sy1, (float)sx2, (float)sy2);
     }
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     remove_clipping();
     update_graphics();
+}
+
+void draw_line(double ux1, double uy1, double ux2, double uy2, int color, int fill) {
+    draw_line_alpha(ux1, uy1, ux2, uy2, color, fill, 255);
 }
 
 static void draw_circle_with_alpha(double ucx, double ucy, double uradius, int color, int fill, int alpha) {
@@ -1217,8 +1247,23 @@ typedef struct {
     int x, y;
 } Point;
 
-void draw_paint(double ux, double uy, int paint_color, int border_color) {
+static Uint32 blend_paint_pixel(Uint32 destination, Uint32 source, int alpha,
+                                const SDL_PixelFormatDetails *details, SDL_Palette *palette) {
+    Uint8 dr, dg, db;
+    Uint8 sr, sg, sb;
+    SDL_GetRGB(destination, details, palette, &dr, &dg, &db);
+    SDL_GetRGB(source, details, palette, &sr, &sg, &sb);
+    Uint8 r = (Uint8)((sr * alpha + dr * (255 - alpha) + 127) / 255);
+    Uint8 g = (Uint8)((sg * alpha + dg * (255 - alpha) + 127) / 255);
+    Uint8 b = (Uint8)((sb * alpha + db * (255 - alpha) + 127) / 255);
+    return SDL_MapRGBA(details, palette, r, g, b, 255);
+}
+
+void draw_paint_alpha(double ux, double uy, int paint_color, int border_color, int alpha) {
     if (!renderer || !canvas) return;
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    if (alpha == 0) return;
     int x, y;
     transform_coords(ux, uy, &x, &y);
     if (!clip_point(x, y)) return;
@@ -1265,13 +1310,19 @@ void draw_paint(double ux, double uy, int paint_color, int border_color) {
 
     int capacity = surf->w * surf->h;
     Point *queue = malloc(capacity * sizeof(Point));
-    if (!queue) {
+    Uint8 *visited = alpha < 255 ? calloc((size_t)capacity, sizeof(Uint8)) : NULL;
+    if (!queue || (alpha < 255 && !visited)) {
+        free(queue);
+        free(visited);
         SDL_DestroySurface(surf);
         return;
     }
     int head = 0, tail = 0;
 
-    pixels[sy * pitch_pixels + sx] = u_paint;
+    pixels[sy * pitch_pixels + sx] = alpha < 255
+        ? blend_paint_pixel(start_color, u_paint, alpha, details, palette)
+        : u_paint;
+    if (visited) visited[(size_t)sy * (size_t)surf->w + (size_t)sx] = 1;
     queue[tail++] = (Point){sx, sy};
 
     while (head < tail) {
@@ -1286,9 +1337,14 @@ void draw_paint(double ux, double uy, int paint_color, int border_color) {
             int ny = neighbors[i].y;
 
             if (nx >= 0 && nx < surf->w && ny >= 0 && ny < surf->h) {
+                size_t index = (size_t)ny * (size_t)surf->w + (size_t)nx;
+                if (visited && visited[index]) continue;
                 Uint32 c = pixels[ny * pitch_pixels + nx];
                 if ((c & mask) != (u_border & mask) && (c & mask) != (u_paint & mask)) {
-                    pixels[ny * pitch_pixels + nx] = u_paint;
+                    pixels[ny * pitch_pixels + nx] = alpha < 255
+                        ? blend_paint_pixel(c, u_paint, alpha, details, palette)
+                        : u_paint;
+                    if (visited) visited[index] = 1;
                     queue[tail++] = (Point){nx, ny};
                 }
             }
@@ -1298,10 +1354,15 @@ void draw_paint(double ux, double uy, int paint_color, int border_color) {
     SDL_UpdateTexture(canvas, NULL, surf->pixels, surf->pitch);
     SDL_DestroySurface(surf);
     free(queue);
+    free(visited);
     
     gfx_cursor_x = x;
     gfx_cursor_y = y;
     graphics_present_if_autodisplay();
+}
+
+void draw_paint(double ux, double uy, int paint_color, int border_color) {
+    draw_paint_alpha(ux, uy, paint_color, border_color, 255);
 }
 
 void set_window_title(const char *title) {

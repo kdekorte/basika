@@ -29,7 +29,8 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
 Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
 
-`CIRCLE (x, y), radius, color, 2, alpha` draws a filled circle with alpha from 0 (transparent) to 255 (opaque).
+`PSET`, `LINE`, `CIRCLE`, and `PAINT` accept an optional final alpha value from
+0 (transparent) to 255 (opaque). Omitting alpha preserves opaque drawing.
 
 ## Line Numbers and Labels
 
@@ -122,13 +123,13 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `SYSTEM` / `QUIT`: Exits the interpreter.
 
 ## Graphics and Sound
-- `CIRCLE (x,y), radius[, color[, fill]]`: Draws a circle. Use `2` for solid fill.
+- `CIRCLE (x,y), radius[, color[, fill[, alpha]]]`: Draws a circle. Use `2` for solid fill.
 - `DRAW "mml"`: String-driven graphics command.
 - `GET (x1,y1)-(x2,y2), array`: Captures a screen area into a numeric array.
-- `LINE [(x1,y1)]-(x2,y2)[, [color][, [B|BF]]]`: Draws lines or boxes.
-- `PAINT (x,y)[, color[, border]]`: Area fill.
+- `LINE [(x1,y1)]-(x2,y2)[, [color][, [B|BF][, alpha]]]`: Draws lines or boxes. Alpha may follow color directly when no box mode is specified.
+- `PAINT (x,y)[, color[, border[, alpha]]]`: Area fill.
 - `PLAY "mml"`: Plays Music Macro Language.
-- `PSET (x,y)[, color]`: Sets a pixel.
+- `PSET (x,y)[, color[, alpha]]`: Sets a pixel.
 - `PUT (x,y), array[, action]`: Places a captured area on the screen. Actions: `PSET`, `PRESET`, `AND`, `OR`, `XOR` (default).
 - `SCREEN mode`: Sets graphics mode.
 - `SCREENSHOT "filename.png"`: Saves the current graphics window content to a file. Supports `.png` and `.jpg`/`.jpeg` extensions.

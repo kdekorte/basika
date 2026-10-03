@@ -5585,7 +5585,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             } else {
                 ptr = saved;
             }
-            set_pixel(x, y, col);
+            int alpha = 255;
+            saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_COMMA) {
+                alpha = (int)evaluate_expression(&ptr);
+            } else {
+                ptr = saved;
+            }
+            set_pixel_alpha(x, y, col, alpha);
             update_graphics();
         } else if (t.type == TOKEN_LINE) {
             double x1, y1, x2, y2;
@@ -5644,16 +5651,30 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
 
             int fill = 0;
+            int alpha = 255;
             saved = ptr;
             if (get_next_token(&ptr).type == TOKEN_COMMA) {
                 Token flag = get_next_token(&ptr);
                 if (strcasecmp(flag.text, "BF") == 0) fill = 2;
                 else if (strcasecmp(flag.text, "B") == 0) fill = 1;
-                else ptr = saved;
+                else {
+                    ptr = saved;
+                    if (get_next_token(&ptr).type == TOKEN_COMMA) {
+                        alpha = (int)evaluate_expression(&ptr);
+                    }
+                }
             } else {
                 ptr = saved;
             }
-            draw_line(x1, y1, x2, y2, col, fill);
+            if (fill != 0) {
+                saved = ptr;
+                if (get_next_token(&ptr).type == TOKEN_COMMA) {
+                    alpha = (int)evaluate_expression(&ptr);
+                } else {
+                    ptr = saved;
+                }
+            }
+            draw_line_alpha(x1, y1, x2, y2, col, fill, alpha);
         } else if (t.type == TOKEN_CIRCLE) { // CIRCLE (cx,cy),radius[,color[,fill[,alpha]]]
             double cx, cy, radius;
             const char *saved = ptr;
@@ -5694,7 +5715,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             if (alpha < 255) draw_circle_alpha(cx, cy, radius, col, fill, alpha);
             else draw_circle(cx, cy, radius, col, fill);
-        } else if (t.type == TOKEN_PAINT) { // PAINT (x,y)[,color[,border]]
+        } else if (t.type == TOKEN_PAINT) { // PAINT (x,y)[,color[,border[,alpha]]]
             double x, y;
             const char *saved = ptr;
             if (get_next_token(&ptr).type == TOKEN_LPAREN) {
@@ -5722,7 +5743,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             } else {
                 ptr = saved;
             }
-            draw_paint(x, y, col, border);
+            int alpha = 255;
+            saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_COMMA) {
+                alpha = (int)evaluate_expression(&ptr);
+            } else {
+                ptr = saved;
+            }
+            draw_paint_alpha(x, y, col, border, alpha);
         } else if (t.type == TOKEN_SCREEN) {
             const char *saved_screen = ptr;
             Token nxt = get_next_token(&ptr);

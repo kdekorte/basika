@@ -2,6 +2,12 @@
 
 All notable changes to this project are recorded in this file.
 
+## 0.99.6 — 2026-10-03
+
+- **Alpha Drawing Primitives**: Added optional alpha values to `PSET`, `LINE`, and `PAINT`, complementing `CIRCLE`. `PAINT` composites against existing pixels, and `GET` now reports the nearest palette color for blended pixels.
+- **Custom Screen Window Sizing**: `_NEWIMAGE(width, height, colors)` now resizes the native window to match the requested canvas dimensions.
+- **Graphics Showcase**: Added a high-resolution 1280x1024 demo featuring alpha-blended drawing primitives, palette swatches, a layered planet, and animation. Added graphics regression coverage for alpha blending.
+
 ## 0.99.5 — 2026-10-02
 
 - **Error Line Reporting**: Console diagnostics for programs without explicit BASIC line numbers now report the physical source-file line instead of the internal virtual line number. `ERL` continues to return the internal line number. Added syntax-error coverage for numbered and unnumbered programs.

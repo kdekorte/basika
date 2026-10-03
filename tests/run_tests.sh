@@ -122,6 +122,7 @@ TESTS=(
   "tests/auto_screenshot"
   "tests/graphics_primitives"
   "tests/circle_alpha"
+  "tests/drawing_alpha"
   "tests/autodisplay"
   "tests/labels_no_lines"
   "tests/qbasic_sub"
@@ -171,6 +172,21 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/circle_alpha.png
+  elif [ "$t" = "tests/drawing_alpha" ]; then
+    rm -f tests/drawing_alpha.png
+    rm -f tests/drawing_alpha.result
+    OUT=$(./basika --headless "$t.bas" 2>&1)
+    if [ ! -f tests/drawing_alpha.png ]; then
+      echo "$t FAIL: screenshot file tests/drawing_alpha.png not found"
+      exit 2
+    fi
+    if [ ! -f tests/drawing_alpha.result ] || [ "$(tr -d '[:space:]' < tests/drawing_alpha.result)" != "1" ]; then
+      echo "$t FAIL: alpha blending assertions failed"
+      cat tests/drawing_alpha.result 2>/dev/null || true
+      exit 2
+    fi
+    rm -f tests/drawing_alpha.png
+    rm -f tests/drawing_alpha.result
   else
     OUT=$(./basika "$t.bas" 2>&1)
   fi

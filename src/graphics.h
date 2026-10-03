@@ -10,7 +10,9 @@ void set_screen_newimage(int width, int height, int colors);
 int graphics_get_text_rows(void);
 int graphics_get_text_cols(void);
 void set_pixel(double x, double y, int color);
+void set_pixel_alpha(double x, double y, int color, int alpha);
 void draw_line(double x1, double y1, double x2, double y2, int color, int fill);
+void draw_line_alpha(double x1, double y1, double x2, double y2, int color, int fill, int alpha);
 void draw_circle(double cx, double cy, double radius, int color, int fill);
 void draw_circle_alpha(double cx, double cy, double radius, int color, int fill, int alpha);
 int graphics_save_screenshot(const char *filename);
@@ -20,6 +22,7 @@ int graphics_putimage(int x1, int y1, int x2, int y2, int handle,
 					  int sx1, int sy1, int sx2, int sy2, int has_source);
 int get_pixel(double x, double y);
 void draw_paint(double x, double y, int color, int border_color);
+void draw_paint_alpha(double x, double y, int color, int border_color, int alpha);
 
 void graphics_set_window(int use_screen, double x1, double y1, double x2, double y2);
 void graphics_reset_window();
