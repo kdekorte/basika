@@ -7,6 +7,7 @@ All notable changes to this project are recorded in this file.
 - **Alpha Drawing Primitives**: Added optional alpha values to `PSET`, `LINE`, and `PAINT`, complementing `CIRCLE`. `PAINT` composites against existing pixels, and `GET` now reports the nearest palette color for blended pixels.
 - **Custom Screen Window Sizing**: `_NEWIMAGE(width, height, colors)` now resizes the native window to match the requested canvas dimensions.
 - **Graphics Showcase**: Added a high-resolution 1280x1024 demo featuring alpha-blended drawing primitives, palette swatches, a layered planet, and animation. Added graphics regression coverage for alpha blending.
+- **Interpreter and Demo Performance**: Compiled eligible numeric expressions when programs load and cached procedure variable lookups. The `basica.bas` 10-million-iteration benchmark improved from about 1.17 s to 0.64-0.67 s, with the expected result unchanged. Also optimized translucent filled-circle rendering; the `boing_ball.bas` demo benefits from faster drawing and variable access.
 
 ## 0.99.5 — 2026-10-02
 
