@@ -1,31 +1,57 @@
-10 SCREEN _NEWIMAGE(1280, 1024, 256)
-20 DIM A(20)
-25 DIM C(20)
-30 REM INITIALIZE WITH RANDOM HEIGHTS
-40 FOR I = 1 TO 20
-41 A(I) = (INT(RND * 150) + 10) * 2
-42 C(I) = INT(RND * 16) + 1
-43 NEXT I
-50 CLS : GOSUB 500 : REM INITIAL DRAW
-60 REM BUBBLE SORT
-70 FOR I = 1 TO 19
-80 FOR J = 1 TO 20 - I
-90 IF A(J) > A(J+1) THEN GOSUB 600: SWAP A(J), A(J+1): SWAP C(J), C(J+1): GOSUB 700: SLEEP 10
-100 NEXT J
-110 NEXT I
-120 LOCATE 1,1: PRINT "SORTED!"
-130 END
-500 REM DRAWING ROUTINE
-520 FOR K = 1 TO 20
-530 X = K * 50
-540 LINE (X, 780)-(X + 40, 480 - A(K)), C(K), BF
-550 NEXT K
-560 RETURN
-600 REM ERASE BARS J AND J+1
-610 X = J * 50 : LINE (X - 5, 499)-(X + 45, 0), 0, BF
-620 X = (J + 1) * 50 : LINE (X - 5, 499)-(X + 45, 0), 0, BF
-630 RETURN
-700 REM REDRAW BARS J AND J+1
-710 X = J * 50 : LINE (X, 780)-(X + 40, 480 - A(J)), C(J), BF
-720 X = (J + 1) * 50 : LINE (X, 780)-(X + 40, 480 - A(J + 1)), C(J + 1), BF
-730 RETURN
+REM BUBBLE SORT VISUALIZER
+REM Run with: basika -w demo/sort3.bas
+SCREEN _NEWIMAGE(1280, 1024, 256)
+_AUTODISPLAY OFF
+
+DIM SortValue(20), BarColor(20)
+
+FOR BarIndex = 1 TO 20
+	SortValue(BarIndex) = (INT(RND * 150) + 10) * 2
+	BarColor(BarIndex) = INT(RND * 16) + 1
+NEXT BarIndex
+
+CLS
+CALL DrawAllBars
+_DISPLAY
+
+FOR Pass = 1 TO 19
+	FOR BarIndex = 1 TO 20 - Pass
+		IF SortValue(BarIndex) <= SortValue(BarIndex + 1) THEN GOTO NoSwap
+		CALL EraseBarPair((BarIndex))
+		SWAP SortValue(BarIndex), SortValue(BarIndex + 1)
+		SWAP BarColor(BarIndex), BarColor(BarIndex + 1)
+		CALL DrawBarPair((BarIndex))
+		_DISPLAY
+		SLEEP 10
+	NoSwap:
+	NEXT BarIndex
+NEXT Pass
+
+LOCATE 1, 1
+PRINT "SORTED!"
+_DISPLAY
+END
+
+SUB DrawAllBars
+	SHARED SortValue, BarColor
+	FOR BarIndex = 1 TO 20
+		X = BarIndex * 50
+		LINE (X, 780)-(X + 40, 480 - SortValue(BarIndex)), BarColor(BarIndex), BF
+	NEXT BarIndex
+END SUB
+
+SUB EraseBarPair(FirstBar)
+	SHARED SortValue, BarColor
+	FOR BarIndex = FirstBar TO FirstBar + 1
+		X = BarIndex * 50
+		LINE (X - 5, 780)-(X + 45, 0), 0, BF
+	NEXT BarIndex
+END SUB
+
+SUB DrawBarPair(FirstBar)
+	SHARED SortValue, BarColor
+	FOR BarIndex = FirstBar TO FirstBar + 1
+		X = BarIndex * 50
+		LINE (X, 780)-(X + 40, 480 - SortValue(BarIndex)), BarColor(BarIndex), BF
+	NEXT BarIndex
+END SUB
