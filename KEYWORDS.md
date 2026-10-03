@@ -36,9 +36,17 @@ Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume au
 
 `TYPE name ... END TYPE` defines a record type. Fields use `field AS typeName`,
 where `typeName` can be `STRING`, `INTEGER`, `SINGLE`, `DOUBLE`, or another
-user-defined type. Declare an instance with `DIM variable AS typeName`, then
-read or assign fields with chained member notation such as
-`variable.location.x = 10` or `PRINT variable.label.text`.
+user-defined type. Fields may be arrays, and `STRING * n` declares a fixed-width
+string field. Declare scalar or array instances with `DIM variable AS typeName`
+or `DIM variable(size) AS typeName`, then read or assign fields with chained
+member notation such as `variable.location.x = 10` or
+`variable.samples(2) = 5`. Whole records of the same type can be assigned with
+`destination = source`. Typed `SUB`/`FUNCTION` parameters accept UDT variables
+by reference; parenthesizing a scalar argument passes a copy. `GET #file,
+record, variable` and `PUT #file, record, variable` support random-record I/O
+for UDTs containing numeric fields and fixed-length strings, including arrays
+and nested types. UDT file records use packed, little-endian field storage;
+dynamic string fields cannot be written as records.
 
 ## Line Numbers and Labels
 

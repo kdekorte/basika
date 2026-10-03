@@ -100,6 +100,19 @@ Run the repository test suite:
 make test
 ```
 
+The performance regression guard runs the 10-million-iteration
+`demo/basica.bas` benchmark and compares its median over five runs against a
+machine-local, benchmark-specific baseline kept outside the repository (under
+`${XDG_CACHE_HOME:-$HOME/.cache}/basika/performance`). The first run on a
+machine initializes that baseline and passes. During iterative debugging, run
+`BASIKA_SKIP_PERFORMANCE=1 make test` to skip only the timing check. The
+repository pre-commit hook always performs a clean optimized build and runs the
+guard, regardless of that skip setting. Enable the hook once per clone with:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Supported features
 
 Basika supports a wide range of IBM BASICA-compatible commands and modern QBasic-style modular programming.  

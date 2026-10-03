@@ -1,0 +1,4 @@
+10 TYPE Item
+20 VALUE AS MissingType
+30 END TYPE
+40 END

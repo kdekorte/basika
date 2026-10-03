@@ -17,10 +17,10 @@ else
   exit 2
 fi
 
-echo "Running tests/args_test.bas with arguments"
-OUT=$(./basika tests/args_test.bas "hello" "world space" 2>&1)
+echo "Running tests/system/args_test.bas with arguments"
+OUT=$(./basika tests/system/args_test.bas "hello" "world space" 2>&1)
 EXP="ARGC: 3 
-0: tests/args_test.bas
+0: tests/system/args_test.bas
 1: hello
 2: world space
 CMD: hello world space"
@@ -34,114 +34,110 @@ else
 fi
 
 TESTS=(
-  # Arrays
-  "tests/array_test"
-  "tests/numeric_array"
-  "tests/dim_edge_cases"
-  "tests/multidim_bounds"
-  "tests/erase"
-  "tests/option_base_test"
-
-  # File I/O
-  "tests/filo_block"
-  "tests/filo_random"
-  "tests/putget"
-  "tests/put_from_array"
-  "tests/get_into_array"
-  "tests/delete"
-  "tests/delete_line"
-  "tests/name_test"
-  "tests/kill_wildcard"
-
-  "tests/files"
-  "tests/dir_ops"
-  "tests/dir_ops_ext"
-  "tests/shell_test"
-  "tests/sound_play"
-
-  # Strings
-  "tests/asc_chr_beep"
-  "tests/print_using"
-  "tests/print_using_ext"
-  "tests/tab_len"
-  "tests/string_funcs"
-  "tests/instr_val_str"
-  "tests/string_cmp"
-  "tests/more_string_funcs"
-  "tests/string_numeric_funcs"
-  "tests/compression_test"
-  "tests/long_string_test"
-  "tests/dynamic_string_growth"
-  "tests/dynamic_string_functions"
-  "tests/fixed_string_declarations"
-  "tests/basic_string_storage_test"
-  "tests/mki_mks_mkd"
-  "tests/input_multi"
-  "tests/get_dollar"
-  "tests/inkey_dollar"
-  "tests/on_error_goto"
-  "tests/environ_test"
-
-  # Math and Data handling
-  "tests/math_funcs"
-  "tests/def_fn"
-  "tests/def_fn_compiled"
-  "tests/peek_poke"
-  "tests/random"
-  "tests/data_read_restore"
-  "tests/swap"
-  "tests/swap_array"
-  "tests/variable_suffixes"
-  "tests/nested_for"
-  "tests/nested_while"
-  "tests/on_goto_nested"
-  "tests/on_goto_gosub"
-
-  # IF ELSE
-  "tests/if_else_basic"
-  "tests/if_else_no_else"
-  "tests/if_else_multiple_statements"
-  "tests/if_else_nested"
-  "tests/if_else_string_vars"
-
-  # Error Recovery
-  "tests/syntax_error"
-  "tests/unnumbered_syntax_error"
-  "tests/return_error"
-
-  # New Features
-  "tests/lof_loc_test"
-  "tests/files_redirect_test"
-  "tests/shebang_test"
-  "tests/bitwise"
-  "tests/bitwise_control"
-  "tests/field_record"
-  "tests/on_timer"
-  "tests/nested_paren"
-  "tests/def_types"
-  "tests/auto_screenshot"
-  "tests/graphics_primitives"
-  "tests/circle_alpha"
-  "tests/drawing_alpha"
-  "tests/autodisplay"
-  "tests/labels_no_lines"
-  "tests/qbasic_sub"
-  "tests/qbasic_function"
-  "tests/qbasic_scope"
-  "tests/qbasic_nested_calls"
-  "tests/user_types"
+  "tests/arrays/array_test"
+  "tests/arrays/numeric_array"
+  "tests/arrays/dim_edge_cases"
+  "tests/arrays/multidim_bounds"
+  "tests/arrays/erase"
+  "tests/arrays/option_base_test"
+  "tests/file_io/filo_block"
+  "tests/file_io/filo_random"
+  "tests/file_io/putget"
+  "tests/file_io/put_from_array"
+  "tests/file_io/get_into_array"
+  "tests/file_io/delete"
+  "tests/file_io/delete_line"
+  "tests/file_io/name_test"
+  "tests/file_io/kill_wildcard"
+  "tests/file_io/files"
+  "tests/file_io/dir_ops"
+  "tests/file_io/dir_ops_ext"
+  "tests/file_io/shell_test"
+  "tests/audio/sound_play"
+  "tests/audio/asc_chr_beep"
+  "tests/strings/print_using"
+  "tests/strings/print_using_ext"
+  "tests/strings/tab_len"
+  "tests/strings/string_funcs"
+  "tests/strings/instr_val_str"
+  "tests/strings/string_cmp"
+  "tests/strings/more_string_funcs"
+  "tests/strings/string_numeric_funcs"
+  "tests/strings/compression_test"
+  "tests/strings/long_string_test"
+  "tests/strings/dynamic_string_growth"
+  "tests/strings/dynamic_string_functions"
+  "tests/strings/fixed_string_declarations"
+  "tests/strings/basic_string_storage_test"
+  "tests/file_io/mki_mks_mkd"
+  "tests/strings/input_multi"
+  "tests/strings/get_dollar"
+  "tests/strings/inkey_dollar"
+  "tests/errors/on_error_goto"
+  "tests/strings/environ_test"
+  "tests/math/math_funcs"
+  "tests/math/def_fn"
+  "tests/math/def_fn_compiled"
+  "tests/math/peek_poke"
+  "tests/math/random"
+  "tests/math/data_read_restore"
+  "tests/math/swap"
+  "tests/math/swap_array"
+  "tests/math/variable_suffixes"
+  "tests/control_flow/nested_for"
+  "tests/control_flow/nested_while"
+  "tests/control_flow/on_goto_nested"
+  "tests/control_flow/on_goto_gosub"
+  "tests/control_flow/if_else_basic"
+  "tests/control_flow/if_else_no_else"
+  "tests/control_flow/if_else_multiple_statements"
+  "tests/control_flow/if_else_nested"
+  "tests/control_flow/if_else_string_vars"
+  "tests/errors/syntax_error"
+  "tests/errors/unnumbered_syntax_error"
+  "tests/errors/return_error"
+  "tests/file_io/lof_loc_test"
+  "tests/file_io/files_redirect_test"
+  "tests/system/shebang_test"
+  "tests/math/bitwise"
+  "tests/math/bitwise_control"
+  "tests/file_io/field_record"
+  "tests/control_flow/on_timer"
+  "tests/control_flow/nested_paren"
+  "tests/math/def_types"
+  "tests/graphics/auto_screenshot"
+  "tests/graphics/graphics_primitives"
+  "tests/graphics/circle_alpha"
+  "tests/graphics/drawing_alpha"
+  "tests/graphics/autodisplay"
+  "tests/control_flow/labels_no_lines"
+  "tests/procedures/qbasic_sub"
+  "tests/procedures/qbasic_function"
+  "tests/procedures/qbasic_scope"
+  "tests/procedures/qbasic_nested_calls"
+  "tests/user_types/user_types"
+  "tests/user_types/user_types_arrays"
+  "tests/user_types/user_types_assignment"
+  "tests/user_types/user_types_record_io"
+  "tests/user_types/user_types_duplicate_field"
+  "tests/user_types/user_types_duplicate_type"
+  "tests/user_types/user_types_unknown_field"
+  "tests/user_types/user_types_missing_end"
+  "tests/user_types/user_types_recursive"
+  "tests/user_types/user_types_malformed_field"
+  "tests/user_types/user_types_type_mismatch"
 )
 
 for t in "${TESTS[@]}"; do
   echo "Running $t.bas"
   # Prepare deterministic fixtures for tests that rely on filesystem timestamps
-  if [ "$t" = "tests/files" ]; then
+  if [ "$t" = "tests/file_io/files" ]; then
     printf "test\n" > tests/f.tmp
     # Set a fixed timestamp: 2026-06-10 09:01:16
     touch -t 202606100901.16 tests/f.tmp
   fi
 
-  if [ "$t" = "tests/auto_screenshot" ]; then
+  if [ "$t" = "tests/graphics/auto_screenshot" ]; then
     rm -f tests/auto_out.png
     OUT=$(./basika --headless "$t.bas" 2>&1)
     if [ ! -f tests/auto_out.png ]; then
@@ -149,7 +145,7 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/auto_out.png
-  elif [ "$t" = "tests/graphics_primitives" ]; then
+  elif [ "$t" = "tests/graphics/graphics_primitives" ]; then
     rm -f tests/graphics_primitives.png
     OUT=$(./basika --headless "$t.bas" 2>&1)
     if [ ! -f tests/graphics_primitives.png ]; then
@@ -157,7 +153,7 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/graphics_primitives.png
-  elif [ "$t" = "tests/autodisplay" ]; then
+  elif [ "$t" = "tests/graphics/autodisplay" ]; then
     rm -f tests/autodisplay.png
     OUT=$(./basika --headless "$t.bas" 2>&1)
     if [ ! -f tests/autodisplay.png ]; then
@@ -165,7 +161,7 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/autodisplay.png
-  elif [ "$t" = "tests/circle_alpha" ]; then
+  elif [ "$t" = "tests/graphics/circle_alpha" ]; then
     rm -f tests/circle_alpha.png
     OUT=$(./basika --headless "$t.bas" 2>&1)
     if [ ! -f tests/circle_alpha.png ]; then
@@ -173,7 +169,7 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f tests/circle_alpha.png
-  elif [ "$t" = "tests/drawing_alpha" ]; then
+  elif [ "$t" = "tests/graphics/drawing_alpha" ]; then
     rm -f tests/drawing_alpha.png
     rm -f tests/drawing_alpha.result
     OUT=$(./basika --headless "$t.bas" 2>&1)
@@ -210,10 +206,18 @@ for t in "${TESTS[@]}"; do
   fi
 done
 
+if [ "${BASIKA_SKIP_PERFORMANCE:-0}" = "1" ]; then
+  echo "Skipping performance regression guard (BASIKA_SKIP_PERFORMANCE=1)"
+else
+  echo "Running performance regression guard"
+  bash tests/scripts/performance_guard.sh
+fi
+
 echo "All tests PASS"
 
 echo "Cleaning up temp files"
 rm -rf test_dir_ext tests/filo_test.tmp tests/putget.tmp tests/putfrom.tmp tests/getinto.tmp tests/delete_test.tmp tests/kill_tmp1.tmp tests/kill_tmp2.tmp tests/input_multi.tmp
 rm -f tests/field_record.tmp
+rm -f tests/user_types_record.tmp
 
 exit 0

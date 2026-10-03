@@ -1,0 +1,4 @@
+10 TYPE Item
+20 NEXT AS Item
+30 END TYPE
+40 END

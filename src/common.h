@@ -39,7 +39,7 @@ typedef enum {
     TOKEN_MKI, TOKEN_MKS, TOKEN_MKD, TOKEN_CVI, TOKEN_CVS, TOKEN_CVD,
     TOKEN_EOF, TOKEN_ERROR, TOKEN_COMMA, TOKEN_SEMICOLON, TOKEN_COLON, TOKEN_LESS, TOKEN_GREATER,
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_LPAREN, TOKEN_RPAREN, 
-    TOKEN_POWER, TOKEN_MOD, TOKEN_IDIV, TOKEN_HASH,
+    TOKEN_POWER, TOKEN_MOD, TOKEN_IDIV, TOKEN_HASH, TOKEN_DOT,
     TOKEN_ABS, TOKEN_SQR, TOKEN_SIN, TOKEN_COS, TOKEN_TAN, TOKEN_ATN, 
     TOKEN_EXP, TOKEN_LOG, TOKEN_INT, TOKEN_FIX, TOKEN_RND, TOKEN_SGN,
     TOKEN_SUB, TOKEN_FUNCTION, TOKEN_CALL, TOKEN_DECLARE, TOKEN_SHARED, TOKEN_STATIC, TOKEN_EXIT, TOKEN_TYPE,
@@ -95,7 +95,7 @@ int basic_string_assign(BasicString **target, const void *data, size_t length);
 int basic_string_append(BasicString *target, const void *data, size_t length);
 
 typedef struct {
-    char name[32];
+    char name[128];
     double value;
     BasicString *s_value;
     double *array;
@@ -103,6 +103,7 @@ typedef struct {
     int array_size;
     int num_dims;
     int dims[3];  // Support up to 3D arrays
+    int lower_bounds[3];
     int string_declared;
     size_t string_fixed_length;
 } Variable;

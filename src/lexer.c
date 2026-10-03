@@ -230,7 +230,8 @@ Token get_next_token(const char **input) {
         return token;
     }
 
-    if (isdigit(**input) || **input == '.') {
+    if (isdigit((unsigned char)**input) ||
+        (**input == '.' && isdigit((unsigned char)(*input)[1]))) {
         char buffer[32];
         int i = 0;
         int is_double = 0;
@@ -266,6 +267,12 @@ Token get_next_token(const char **input) {
             token.double_val = (double)((float)token.double_val);
         }
         token.int_val = (int)token.double_val;
+        return token;
+    }
+
+    if (**input == '.') {
+        (*input)++;
+        token.type = TOKEN_DOT;
         return token;
     }
 

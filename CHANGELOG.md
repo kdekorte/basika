@@ -9,7 +9,9 @@ All notable changes to this project are recorded in this file.
 - **Graphics Showcase**: Added a high-resolution 1280x1024 demo featuring alpha-blended drawing primitives, palette swatches, a layered planet, and animation. Added graphics regression coverage for alpha blending.
 - **Interpreter and Demo Performance**: Compiled eligible numeric expressions when programs load and cached procedure variable lookups. The `basica.bas` 10-million-iteration benchmark improved from about 1.17 s to 0.64-0.67 s, with the expected result unchanged. Also optimized translucent filled-circle rendering; the `boing_ball.bas` demo benefits from faster drawing and variable access.
 - **Boing Ball Demo**: Improved floor-grid visibility with brighter, thicker lines; moved the ball's bounce point forward onto the floor grid; and made its alpha shadow scale and fade with its height above the floor.
-- **User-Defined Types**: Added `TYPE ... END TYPE` declarations with nested `STRING`, `INTEGER`, `SINGLE`, `DOUBLE`, and user-defined fields, plus chained member access and assignment. Added nested field regression coverage.
+- **User-Defined Types**: Expanded `TYPE ... END TYPE` with fixed-length string and array fields, arrays of records, chained indexed member access, same-type record assignment, and typed `SUB`/`FUNCTION` parameters with by-reference and scalar by-value behavior. Added declaration validation and packed little-endian random-record `GET`/`PUT` for supported fixed-layout records.
+- **TYPE Regression Coverage**: Added tests for nested records, arrays, assignment, procedure scope and parameters, random-record I/O, and invalid declarations. Organized the test suite into topic-based subdirectories.
+- **Performance Regression Guard**: Added an opt-out timing check during iterative debugging and an enabled pre-commit hook that runs the optimized BASICA 10-million-iteration benchmark against a per-machine baseline stored outside the repository. Skipped UDT resolution on programs without `TYPE` declarations; the BASICA demo remains around its prior 0.64-0.67-second range.
 
 ## 0.99.5 — 2026-10-02
 

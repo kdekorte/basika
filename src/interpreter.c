@@ -7,6 +7,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <stddef.h>
+#include <limits.h>
 #include <glob.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -34,19 +35,38 @@ static int var_count = 0;
 
 #define MAX_USER_TYPES 64
 #define MAX_TYPE_FIELDS 64
+#define MAX_RECORD_INSTANCES 128
 typedef struct {
     char name[32];
     char type_name[32];
+    int num_dims;
+    int dims[3];
+    int lower_bounds[3];
+    size_t fixed_string_length;
+    int is_fixed_string;
+    Statement *declaration_stmt;
 } TypeField;
 
 typedef struct {
     char name[32];
     TypeField fields[MAX_TYPE_FIELDS];
     int field_count;
+    Statement *declaration_stmt;
 } UserType;
 
 static UserType user_types[MAX_USER_TYPES];
 static int user_type_count = 0;
+typedef struct {
+    int root_variable_index;
+    int type_index;
+    int num_dims;
+    int dims[3];
+    int lower_bounds[3];
+    int element_count;
+} UserTypeInstance;
+
+static UserTypeInstance user_type_instances[MAX_RECORD_INSTANCES];
+static int user_type_instance_count = 0;
 #define VAR_HASH_CAPACITY 2048
 #define VAR_HASH_MASK (VAR_HASH_CAPACITY - 1)
 /* Open-addressed table; load stays at or below 50% (1024 variables). */
@@ -159,6 +179,7 @@ typedef struct {
     char name[32];
     int is_string;
     int is_array;
+    int user_type_index;
 } ProcParamDef;
 
 typedef struct {
@@ -200,6 +221,10 @@ typedef struct {
 static CallFrame call_stack[MAX_CALL_FRAMES];
 static int call_stack_depth = 0;
 
+static int find_variable_raw_name(const char *name);
+static void report_runtime_error(RuntimeError code);
+static Variable *get_variable_ptr_for_frame(int idx, int frame_index);
+
 static ProcedureDef *find_procedure(const char *name) {
     if (!name || !name[0]) return NULL;
     char norm[64];
@@ -230,66 +255,129 @@ static int proc_name_match(const char *name1, const char *name2) {
     return strncasecmp(name1, name2, len1) == 0;
 }
 
+static int has_record_prefix(const char *name, const char *prefix) {
+    size_t prefix_length = strlen(prefix);
+    return strncasecmp(name, prefix, prefix_length) == 0 &&
+        (name[prefix_length] == '.' || name[prefix_length] == '@');
+}
+
+static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
+    if (idx < 0 || idx >= 1024) return &vars[0];
+    if (frame_index < 0) return &vars[idx];
+    if (frame_index >= call_stack_depth) return &vars[idx];
+
+    CallFrame *frame = &call_stack[frame_index];
+    if (frame->resolved_variables[idx]) return frame->resolved_variables[idx];
+    Variable **resolved = &frame->resolved_variables[idx];
+    const char *name = vars[idx].name;
+
+    for (int p = 0; p < frame->proc->param_count; p++) {
+        ProcParamDef *parameter = &frame->proc->params[p];
+        if (proc_name_match(parameter->name, name)) {
+            if (frame->byref_caller_variable[p]) {
+                return *resolved = frame->byref_caller_variable[p];
+            }
+            int caller_index = frame->byref_caller_var_idx[p];
+            if (caller_index >= 0) {
+                return *resolved = get_variable_ptr_for_frame(
+                    caller_index, frame->byref_caller_frame[p]);
+            }
+            for (int l = 0; l < frame->local_var_count; l++) {
+                if (proc_name_match(frame->local_vars[l].name, name)) {
+                    return *resolved = &frame->local_vars[l];
+                }
+            }
+            if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return &vars[0];
+            }
+            int local_index = frame->local_var_count++;
+            memset(&frame->local_vars[local_index], 0, sizeof(Variable));
+            snprintf(frame->local_vars[local_index].name,
+                     sizeof(frame->local_vars[local_index].name), "%s", name);
+            return *resolved = &frame->local_vars[local_index];
+        }
+
+        if (parameter->user_type_index >= 0 && has_record_prefix(name, parameter->name)) {
+            int caller_index = frame->byref_caller_var_idx[p];
+            if (caller_index >= 0) {
+                const char *caller_root = frame->byref_caller_variable[p]
+                    ? frame->byref_caller_variable[p]->name : vars[caller_index].name;
+                char member_name[128];
+                int written = snprintf(member_name, sizeof(member_name), "%s%s",
+                                       caller_root, name + strlen(parameter->name));
+                if (written < 0 || (size_t)written >= sizeof(member_name)) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return &vars[0];
+                }
+                int member_index = find_variable_raw_name(member_name);
+                return *resolved = get_variable_ptr_for_frame(
+                    member_index, frame->byref_caller_frame[p]);
+            }
+            if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return &vars[0];
+            }
+            int local_index = frame->local_var_count++;
+            memset(&frame->local_vars[local_index], 0, sizeof(Variable));
+            snprintf(frame->local_vars[local_index].name,
+                     sizeof(frame->local_vars[local_index].name), "%s", name);
+            return *resolved = &frame->local_vars[local_index];
+        }
+
+        if (parameter->user_type_index >= 0 &&
+            frame->byref_caller_var_idx[p] >= 0 &&
+            frame->byref_caller_variable[p] &&
+            has_record_prefix(name, frame->byref_caller_variable[p]->name)) {
+            return *resolved = get_variable_ptr_for_frame(
+                idx, frame->byref_caller_frame[p]);
+        }
+    }
+
+    for (int s = 0; s < frame->shared_count; s++) {
+        if (proc_name_match(frame->shared_var_names[s], name) ||
+            has_record_prefix(name, frame->shared_var_names[s])) {
+            return *resolved = &vars[idx];
+        }
+    }
+
+    if (frame->proc->is_function && proc_name_match(frame->proc->name, name)) {
+        for (int l = 0; l < frame->local_var_count; l++) {
+            if (proc_name_match(frame->local_vars[l].name, name)) {
+                return *resolved = &frame->local_vars[l];
+            }
+        }
+        if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return &vars[0];
+        }
+        int local_index = frame->local_var_count++;
+        memset(&frame->local_vars[local_index], 0, sizeof(Variable));
+        snprintf(frame->local_vars[local_index].name,
+                 sizeof(frame->local_vars[local_index].name), "%s", name);
+        return *resolved = &frame->local_vars[local_index];
+    }
+
+    for (int l = 0; l < frame->local_var_count; l++) {
+        if (strcasecmp(frame->local_vars[l].name, name) == 0) {
+            return *resolved = &frame->local_vars[l];
+        }
+    }
+    if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return &vars[0];
+    }
+    int local_index = frame->local_var_count++;
+    memset(&frame->local_vars[local_index], 0, sizeof(Variable));
+    snprintf(frame->local_vars[local_index].name,
+             sizeof(frame->local_vars[local_index].name), "%s", name);
+    return *resolved = &frame->local_vars[local_index];
+}
+
 static Variable *get_variable_ptr(int idx) {
     if (idx < 0 || idx >= 1024) return &vars[0];
-    if (call_stack_depth > 0) {
-        CallFrame *frame = &call_stack[call_stack_depth - 1];
-        if (frame->resolved_variables[idx]) return frame->resolved_variables[idx];
-
-        Variable **resolved = &frame->resolved_variables[idx];
-        const char *name = vars[idx].name;
-        
-        // 1. Check if parameter
-        for (int p = 0; p < frame->proc->param_count; p++) {
-            if (proc_name_match(frame->proc->params[p].name, name)) {
-                if (frame->byref_caller_variable[p]) return *resolved = frame->byref_caller_variable[p];
-                if (frame->byref_caller_var_idx[p] != -1) {
-                    int cframe = frame->byref_caller_frame[p];
-                    int cidx = frame->byref_caller_var_idx[p];
-                    if (cframe < 0) {
-                        return *resolved = &vars[cidx];
-                    } else if (cframe < call_stack_depth - 1) {
-                        return *resolved = &call_stack[cframe].local_vars[cidx];
-                    }
-                }
-                for (int l = 0; l < frame->local_var_count; l++) {
-                    if (proc_name_match(frame->local_vars[l].name, name)) return *resolved = &frame->local_vars[l];
-                }
-                int lidx = frame->local_var_count++;
-                memset(&frame->local_vars[lidx], 0, sizeof(Variable));
-                strncpy(frame->local_vars[lidx].name, name, 31);
-                return *resolved = &frame->local_vars[lidx];
-            }
-        }
-
-        // 2. Check if SHARED
-        for (int s = 0; s < frame->shared_count; s++) {
-            if (proc_name_match(frame->shared_var_names[s], name)) {
-                return *resolved = &vars[idx];
-            }
-        }
-
-        // 3. Check if Function Name return target
-        if (frame->proc->is_function && proc_name_match(frame->proc->name, name)) {
-            for (int l = 0; l < frame->local_var_count; l++) {
-                if (proc_name_match(frame->local_vars[l].name, name)) return *resolved = &frame->local_vars[l];
-            }
-            int lidx = frame->local_var_count++;
-            memset(&frame->local_vars[lidx], 0, sizeof(Variable));
-            strncpy(frame->local_vars[lidx].name, name, 31);
-            return *resolved = &frame->local_vars[lidx];
-        }
-
-        // 4. Local procedure variable
-        for (int l = 0; l < frame->local_var_count; l++) {
-            if (strcasecmp(frame->local_vars[l].name, name) == 0) return *resolved = &frame->local_vars[l];
-        }
-        int lidx = frame->local_var_count++;
-        memset(&frame->local_vars[lidx], 0, sizeof(Variable));
-        strncpy(frame->local_vars[lidx].name, name, 31);
-        return *resolved = &frame->local_vars[lidx];
-    }
-    return &vars[idx];
+    if (call_stack_depth == 0) return &vars[idx];
+    return get_variable_ptr_for_frame(idx, call_stack_depth - 1);
 }
 
 static void reset_variable_hash_table(void) {
@@ -1096,9 +1184,9 @@ static void insert_variable_index(const char *normalized, int idx) {
 }
 
 int find_variable(const char *name) {
-    char normalized[64];
+    char normalized[128];
     int i;
-    for (i = 0; i < 63 && name[i]; i++) {
+    for (i = 0; i < 127 && name[i]; i++) {
         normalized[i] = (char)toupper((unsigned char)name[i]);
     }
     normalized[i] = '\0';
@@ -1135,12 +1223,41 @@ int find_variable(const char *name) {
     if (var_count < 1024) {
         idx = var_count++;
         memset(&vars[idx], 0, sizeof(Variable));
-        strncpy(vars[idx].name, normalized, 31);
-        vars[idx].name[31] = '\0';
+        strncpy(vars[idx].name, normalized, sizeof(vars[idx].name) - 1);
+        vars[idx].name[sizeof(vars[idx].name) - 1] = '\0';
         insert_variable_index(normalized, idx);
         return idx;
     }
     return -1;
+}
+
+static int find_variable_raw_name(const char *name) {
+    char normalized[128];
+    size_t length = 0;
+    while (length < sizeof(normalized) - 1 && name[length]) {
+        normalized[length] = (char)toupper((unsigned char)name[length]);
+        length++;
+    }
+    normalized[length] = '\0';
+    int idx = find_variable_index(normalized);
+    if (idx >= 0) return idx;
+    if (var_count >= 1024) return -1;
+    idx = var_count++;
+    memset(&vars[idx], 0, sizeof(vars[idx]));
+    snprintf(vars[idx].name, sizeof(vars[idx].name), "%s", normalized);
+    insert_variable_index(normalized, idx);
+    return idx;
+}
+
+static int find_existing_variable_raw_name(const char *name) {
+    char normalized[128];
+    size_t length = 0;
+    while (length < sizeof(normalized) - 1 && name[length]) {
+        normalized[length] = (char)toupper((unsigned char)name[length]);
+        length++;
+    }
+    normalized[length] = '\0';
+    return find_variable_index(normalized);
 }
 
 static UserType *find_user_type(const char *name) {
@@ -1150,37 +1267,174 @@ static UserType *find_user_type(const char *name) {
     return NULL;
 }
 
-static void scan_user_types(void) {
+static int is_primitive_user_type(const char *name) {
+    return strcasecmp(name, "STRING") == 0 ||
+        strcasecmp(name, "INTEGER") == 0 ||
+        strcasecmp(name, "SINGLE") == 0 ||
+        strcasecmp(name, "DOUBLE") == 0;
+}
+
+static void report_type_declaration_error(Statement *stmt) {
+    if (stmt) {
+        current_executing_line = stmt->line_number;
+        current_source_line_number = stmt->source_line_number;
+        current_has_explicit_line_number = stmt->has_explicit_line_number;
+    }
+    report_runtime_error(ERR_SYNTAX_ERROR);
+}
+
+static int validate_user_type_graph(int type_index, unsigned char states[MAX_USER_TYPES]) {
+    if (states[type_index] == 1) return 0;
+    if (states[type_index] == 2) return 1;
+    states[type_index] = 1;
+    UserType *type = &user_types[type_index];
+    for (int field_index = 0; field_index < type->field_count; field_index++) {
+        UserType *nested = find_user_type(type->fields[field_index].type_name);
+        if (!nested) continue;
+        int nested_index = (int)(nested - user_types);
+        if (!validate_user_type_graph(nested_index, states)) return 0;
+    }
+    states[type_index] = 2;
+    return 1;
+}
+
+static int scan_user_types(void) {
     user_type_count = 0;
+    user_type_instance_count = 0;
     for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
-        if (stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_TYPE ||
-            stmt->tokens[1].type != TOKEN_IDENTIFIER || user_type_count >= MAX_USER_TYPES) continue;
+        if (stmt->token_count == 0 || stmt->tokens[0].type != TOKEN_TYPE) continue;
+        if (stmt->token_count < 2 || stmt->tokens[1].type != TOKEN_IDENTIFIER ||
+            stmt->token_count > 2 || user_type_count >= MAX_USER_TYPES) {
+            report_type_declaration_error(stmt);
+            return 0;
+        }
+        if (find_user_type(stmt->tokens[1].text)) {
+            report_type_declaration_error(stmt);
+            return 0;
+        }
         UserType *type = &user_types[user_type_count++];
         memset(type, 0, sizeof(*type));
         strncpy(type->name, stmt->tokens[1].text, sizeof(type->name) - 1);
+        type->declaration_stmt = stmt;
     }
 
-    UserType *current = NULL;
+    int current_type = -1;
+    Statement *type_start = NULL;
     for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
         if (stmt->token_count >= 2 && stmt->tokens[0].type == TOKEN_TYPE) {
-            current = find_user_type(stmt->tokens[1].text);
+            current_type = (int)(find_user_type(stmt->tokens[1].text) - user_types);
+            type_start = stmt;
             continue;
         }
         if (stmt->token_count >= 2 && stmt->tokens[0].type == TOKEN_END &&
             stmt->tokens[1].type == TOKEN_TYPE) {
-            current = NULL;
+            if (current_type < 0 || stmt->token_count != 2) {
+                report_type_declaration_error(stmt);
+                return 0;
+            }
+            current_type = -1;
+            type_start = NULL;
             continue;
         }
-        if (!current || stmt->token_count < 3 ||
-            stmt->tokens[0].type != TOKEN_IDENTIFIER ||
-            stmt->tokens[1].type != TOKEN_AS ||
-            stmt->tokens[2].type != TOKEN_IDENTIFIER ||
-            current->field_count >= MAX_TYPE_FIELDS) continue;
+        if (current_type < 0) continue;
 
-        TypeField *field = &current->fields[current->field_count++];
-        strncpy(field->name, stmt->tokens[0].text, sizeof(field->name) - 1);
-        strncpy(field->type_name, stmt->tokens[2].text, sizeof(field->type_name) - 1);
+        int position = 0;
+        if (stmt->token_count < 3 || stmt->tokens[position++].type != TOKEN_IDENTIFIER) {
+            report_type_declaration_error(stmt);
+            return 0;
+        }
+        Token *field_token = &stmt->tokens[0];
+        int upper_bounds[3] = {0};
+        int lower_bounds[3] = {-1, -1, -1};
+        int dimension_count = 0;
+        if (stmt->tokens[position].type == TOKEN_LPAREN) {
+            position++;
+            while (dimension_count < 3) {
+                if (stmt->tokens[position].type != TOKEN_NUMBER) break;
+                int first_bound = stmt->tokens[position++].int_val;
+                int upper = first_bound;
+                if (stmt->tokens[position].type == TOKEN_TO) {
+                    lower_bounds[dimension_count] = first_bound;
+                    position++;
+                    if (stmt->tokens[position].type != TOKEN_NUMBER) break;
+                    upper = stmt->tokens[position++].int_val;
+                }
+                if (upper < first_bound || upper > 100000) break;
+                upper_bounds[dimension_count++] = upper;
+                if (stmt->tokens[position].type != TOKEN_COMMA) break;
+                position++;
+            }
+            if (dimension_count == 0 || stmt->tokens[position++].type != TOKEN_RPAREN) {
+                report_type_declaration_error(stmt);
+                return 0;
+            }
+        }
+        if (stmt->tokens[position++].type != TOKEN_AS ||
+            stmt->tokens[position].type != TOKEN_IDENTIFIER) {
+            report_type_declaration_error(stmt);
+            return 0;
+        }
+        Token *field_type = &stmt->tokens[position++];
+        size_t fixed_string_length = 0;
+        int is_fixed_string = 0;
+        if (strcasecmp(field_type->text, "STRING") == 0 &&
+            stmt->tokens[position].type == TOKEN_STAR) {
+            position++;
+            if (stmt->tokens[position].type != TOKEN_NUMBER ||
+                stmt->tokens[position].int_val < 0) {
+                report_type_declaration_error(stmt);
+                return 0;
+            }
+            fixed_string_length = (size_t)stmt->tokens[position++].int_val;
+            is_fixed_string = 1;
+        }
+        if (stmt->tokens[position].type != TOKEN_EOF) {
+            report_type_declaration_error(stmt);
+            return 0;
+        }
+
+        UserType *type = &user_types[current_type];
+        if (type->field_count >= MAX_TYPE_FIELDS) {
+            report_type_declaration_error(stmt);
+            return 0;
+        }
+        for (int i = 0; i < type->field_count; i++) {
+            if (strcasecmp(type->fields[i].name, field_token->text) == 0) {
+                report_type_declaration_error(stmt);
+                return 0;
+            }
+        }
+        TypeField *field = &type->fields[type->field_count++];
+        strncpy(field->name, field_token->text, sizeof(field->name) - 1);
+        strncpy(field->type_name, field_type->text, sizeof(field->type_name) - 1);
+        field->num_dims = dimension_count;
+        memcpy(field->dims, upper_bounds, sizeof(upper_bounds));
+        memcpy(field->lower_bounds, lower_bounds, sizeof(lower_bounds));
+        field->fixed_string_length = fixed_string_length;
+        field->is_fixed_string = is_fixed_string;
+        field->declaration_stmt = stmt;
     }
+    if (current_type >= 0) {
+        report_type_declaration_error(type_start);
+        return 0;
+    }
+    for (int i = 0; i < user_type_count; i++) {
+        for (int field_index = 0; field_index < user_types[i].field_count; field_index++) {
+            TypeField *field = &user_types[i].fields[field_index];
+            if (!is_primitive_user_type(field->type_name) && !find_user_type(field->type_name)) {
+                report_type_declaration_error(field->declaration_stmt);
+                return 0;
+            }
+        }
+    }
+    unsigned char states[MAX_USER_TYPES] = {0};
+    for (int i = 0; i < user_type_count; i++) {
+        if (!validate_user_type_graph(i, states)) {
+            report_type_declaration_error(user_types[i].declaration_stmt);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int instantiate_user_type(const char *prefix, UserType *type, int depth) {
@@ -1191,26 +1445,63 @@ static int instantiate_user_type(const char *prefix, UserType *type, int depth) 
     }
     for (int i = 0; i < type->field_count; i++) {
         TypeField *field = &type->fields[i];
-        char member_name[64];
+        char member_name[128];
         int written = snprintf(member_name, sizeof(member_name), "%s.%s", prefix, field->name);
-        if (written < 0 || (size_t)written >= sizeof(member_name) || written >= 31) {
+        if (written < 0 || (size_t)written >= sizeof(member_name)) {
             report_runtime_error(ERR_SYNTAX_ERROR);
             return 0;
         }
 
         UserType *nested = find_user_type(field->type_name);
+        if (!nested && !is_primitive_user_type(field->type_name)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+        int element_count = 1;
+        int lower_bounds[3] = {0};
+        for (int dim = 0; dim < field->num_dims; dim++) {
+            lower_bounds[dim] = field->lower_bounds[dim] < 0
+                ? option_base : field->lower_bounds[dim];
+            int count = field->dims[dim] - lower_bounds[dim] + 1;
+            if (count <= 0 || element_count > 100000 / count) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return 0;
+            }
+            element_count *= count;
+        }
         if (nested) {
-            if (!instantiate_user_type(member_name, nested, depth + 1)) return 0;
+            if (field->num_dims > 0) {
+                int marker_index = find_variable(member_name);
+                Variable *marker = get_variable_ptr(marker_index);
+                if (!marker->array) {
+                    marker->array = calloc((size_t)element_count, sizeof(*marker->array));
+                    if (!marker->array) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        return 0;
+                    }
+                    marker->array_size = element_count;
+                    marker->num_dims = field->num_dims;
+                    for (int dim = 0; dim < field->num_dims; dim++) {
+                        marker->dims[dim] = field->dims[dim];
+                        marker->lower_bounds[dim] = lower_bounds[dim];
+                    }
+                }
+            }
+            for (int element = 0; element < element_count; element++) {
+                char nested_name[128];
+                if (field->num_dims == 0) {
+                    snprintf(nested_name, sizeof(nested_name), "%s", member_name);
+                } else {
+                    snprintf(nested_name, sizeof(nested_name), "%s@%d", member_name, element);
+                }
+                if (!instantiate_user_type(nested_name, nested, depth + 1)) return 0;
+            }
         } else {
-            int is_primitive = strcasecmp(field->type_name, "STRING") == 0 ||
-                strcasecmp(field->type_name, "INTEGER") == 0 ||
-                strcasecmp(field->type_name, "SINGLE") == 0 ||
-                strcasecmp(field->type_name, "DOUBLE") == 0;
-            if (!is_primitive) {
+            if (!is_primitive_user_type(field->type_name)) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return 0;
             }
-            char variable_name[64];
+            char variable_name[128];
             size_t field_len = strlen(field->name);
             char suffix_char = field_len > 0 ? field->name[field_len - 1] : '\0';
             if (suffix_char != '$' && suffix_char != '%' && suffix_char != '!' && suffix_char != '#') {
@@ -1223,14 +1514,347 @@ static int instantiate_user_type(const char *prefix, UserType *type, int depth) 
             char suffix[2] = {suffix_char, '\0'};
             if (!suffix_char) suffix[0] = '\0';
             written = snprintf(variable_name, sizeof(variable_name), "%s%s", member_name, suffix);
-            if (written < 0 || (size_t)written >= sizeof(variable_name) || written >= 32) {
+            if (written < 0 || (size_t)written >= sizeof(variable_name)) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return 0;
             }
-            find_variable(variable_name);
+            int idx = find_variable(variable_name);
+            Variable *variable = get_variable_ptr(idx);
+            if (field->num_dims > 0) {
+                if (variable->array || variable->s_array) {
+                    report_runtime_error(ERR_DUPLICATE_DEFINITION);
+                    return 0;
+                }
+                if (strcasecmp(field->type_name, "STRING") == 0) {
+                    variable->s_array = calloc((size_t)element_count, sizeof(*variable->s_array));
+                    if (!variable->s_array) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        return 0;
+                    }
+                } else {
+                    variable->array = calloc((size_t)element_count, sizeof(*variable->array));
+                    if (!variable->array) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        return 0;
+                    }
+                }
+                variable->array_size = element_count;
+                variable->num_dims = field->num_dims;
+                for (int dim = 0; dim < field->num_dims; dim++) {
+                    variable->dims[dim] = field->dims[dim];
+                    variable->lower_bounds[dim] = lower_bounds[dim];
+                }
+            }
+            if (field->is_fixed_string) {
+                variable->string_declared = 1;
+                variable->string_fixed_length = field->fixed_string_length;
+                fixed_string_declarations_present = 1;
+            }
         }
     }
     return 1;
+}
+
+static UserTypeInstance *find_user_type_instance(int root_variable_index) {
+    for (int i = 0; i < user_type_instance_count; i++) {
+        if (user_type_instances[i].root_variable_index == root_variable_index) {
+            return &user_type_instances[i];
+        }
+    }
+    return NULL;
+}
+
+static int get_user_type_instance_at_frame(int root_variable_index, int frame_index,
+                                           UserTypeInstance *instance_out) {
+    if (root_variable_index < 0 || root_variable_index >= var_count) return 0;
+    if (frame_index < 0 && user_type_instance_count == 0) return 0;
+    if (frame_index >= 0 && frame_index < call_stack_depth) {
+        CallFrame *frame = &call_stack[frame_index];
+        const char *root_name = vars[root_variable_index].name;
+        for (int p = 0; p < frame->proc->param_count; p++) {
+            ProcParamDef *parameter = &frame->proc->params[p];
+            if (parameter->user_type_index < 0 ||
+                !proc_name_match(parameter->name, root_name)) continue;
+            memset(instance_out, 0, sizeof(*instance_out));
+            instance_out->root_variable_index = root_variable_index;
+            instance_out->type_index = parameter->user_type_index;
+            instance_out->element_count = 1;
+            if (parameter->is_array && frame->byref_caller_var_idx[p] >= 0) {
+                UserTypeInstance caller_instance;
+                if (get_user_type_instance_at_frame(frame->byref_caller_var_idx[p],
+                        frame->byref_caller_frame[p], &caller_instance)) {
+                    *instance_out = caller_instance;
+                    instance_out->root_variable_index = root_variable_index;
+                }
+            }
+            return 1;
+        }
+    }
+    UserTypeInstance *instance = find_user_type_instance(root_variable_index);
+    if (!instance) return 0;
+    *instance_out = *instance;
+    return 1;
+}
+
+static int get_user_type_instance_for_root(int root_variable_index,
+                                           UserTypeInstance *instance_out) {
+    return get_user_type_instance_at_frame(root_variable_index,
+                                           call_stack_depth - 1, instance_out);
+}
+
+static int declare_user_type_instance(int root_variable_index, UserType *type,
+                                      int num_dims, const int *upper_bounds) {
+    if (root_variable_index < 0 || !type || num_dims < 0 || num_dims > 3) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return 0;
+    }
+    int type_index = (int)(type - user_types);
+    int lower_bounds[3] = {0};
+    int element_count = 1;
+    for (int dim = 0; dim < num_dims; dim++) {
+        lower_bounds[dim] = option_base;
+        int dimension_size = upper_bounds[dim] - lower_bounds[dim] + 1;
+        if (dimension_size <= 0 || element_count > 100000 / dimension_size) {
+            report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+            return 0;
+        }
+        element_count *= dimension_size;
+    }
+
+    UserTypeInstance *instance = find_user_type_instance(root_variable_index);
+    if (instance) {
+        if (instance->type_index != type_index || instance->num_dims != num_dims ||
+            (num_dims > 0 &&
+             memcmp(instance->dims, upper_bounds, (size_t)num_dims * sizeof(*upper_bounds)) != 0)) {
+            report_runtime_error(ERR_DUPLICATE_DEFINITION);
+            return 0;
+        }
+    } else {
+        if (user_type_instance_count >= MAX_RECORD_INSTANCES) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return 0;
+        }
+        instance = &user_type_instances[user_type_instance_count++];
+        memset(instance, 0, sizeof(*instance));
+        instance->root_variable_index = root_variable_index;
+        instance->type_index = type_index;
+        instance->num_dims = num_dims;
+        instance->element_count = element_count;
+        if (num_dims > 0) memcpy(instance->dims, upper_bounds, sizeof(instance->dims));
+        memcpy(instance->lower_bounds, lower_bounds, sizeof(instance->lower_bounds));
+    }
+
+    Variable *root = get_variable_ptr(root_variable_index);
+    if (num_dims > 0 && !root->array) {
+        root->array = calloc((size_t)element_count, sizeof(*root->array));
+        if (!root->array) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return 0;
+        }
+        root->array_size = element_count;
+        root->num_dims = num_dims;
+        for (int dim = 0; dim < num_dims; dim++) {
+            root->dims[dim] = upper_bounds[dim];
+            root->lower_bounds[dim] = lower_bounds[dim];
+        }
+    } else if (num_dims == 0 && (root->array || root->s_array)) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    } else if (num_dims > 0 && (root->array_size != element_count ||
+               root->num_dims != num_dims)) {
+        report_runtime_error(ERR_DUPLICATE_DEFINITION);
+        return 0;
+    }
+
+    for (int element = 0; element < element_count; element++) {
+        char prefix[128];
+        if (num_dims == 0) {
+            snprintf(prefix, sizeof(prefix), "%s", root->name);
+        } else {
+            snprintf(prefix, sizeof(prefix), "%s@%d", root->name, element);
+        }
+        if (!instantiate_user_type(prefix, type, 0)) return 0;
+    }
+    return 1;
+}
+
+static TypeField *find_user_type_field(UserType *type, const char *name) {
+    if (!type) return NULL;
+    for (int i = 0; i < type->field_count; i++) {
+        if (strcasecmp(type->fields[i].name, name) == 0) return &type->fields[i];
+    }
+    return NULL;
+}
+
+static int append_user_type_member_chunk(const char *chunk, UserType **current_type,
+                                        char *prefix, size_t prefix_size,
+                                        TokenStream *ts, int *member_index,
+                                        int *member_array_index) {
+    char components[BASIC_TOKEN_TEXT_MAX];
+    snprintf(components, sizeof(components), "%s", chunk);
+    char *saveptr = NULL;
+    char *component = strtok_r(components, ".", &saveptr);
+    while (component) {
+        TypeField *field = find_user_type_field(*current_type, component);
+        if (!field) {
+            report_runtime_error(ERR_TYPE_MISMATCH);
+            return 0;
+        }
+        size_t prefix_length = strlen(prefix);
+        int written = snprintf(prefix + prefix_length, prefix_size - prefix_length,
+                               ".%s", field->name);
+        if (written < 0 || (size_t)written >= prefix_size - prefix_length) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+
+        char *next_component = strtok_r(NULL, ".", &saveptr);
+        UserType *nested = find_user_type(field->type_name);
+        if (nested) {
+            if (field->num_dims > 0) {
+                int marker_index = find_variable(prefix);
+                int array_index = parse_array_index_tok(ts, marker_index);
+                if (array_index < 0) {
+                    report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+                    return 0;
+                }
+                prefix_length = strlen(prefix);
+                written = snprintf(prefix + prefix_length, prefix_size - prefix_length,
+                                   "@%d", array_index);
+                if (written < 0 || (size_t)written >= prefix_size - prefix_length) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return 0;
+                }
+                if (next_component) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return 0;
+                }
+            }
+            *current_type = nested;
+            component = next_component;
+            continue;
+        }
+
+        if (next_component) {
+            report_runtime_error(ERR_TYPE_MISMATCH);
+            return 0;
+        }
+        size_t field_name_length = strlen(field->name);
+        char suffix = field_name_length > 0 ? field->name[field_name_length - 1] : '\0';
+        if (suffix != '$' && suffix != '%' && suffix != '!' && suffix != '#') {
+            if (strcasecmp(field->type_name, "STRING") == 0) suffix = '$';
+            else if (strcasecmp(field->type_name, "INTEGER") == 0) suffix = '%';
+            else if (strcasecmp(field->type_name, "SINGLE") == 0) suffix = '!';
+            else if (strcasecmp(field->type_name, "DOUBLE") == 0) suffix = '#';
+            else suffix = '\0';
+        }
+        if (suffix) {
+            prefix_length = strlen(prefix);
+            if (prefix_length + 1 >= prefix_size) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return 0;
+            }
+            prefix[prefix_length] = suffix;
+            prefix[prefix_length + 1] = '\0';
+        }
+        *member_index = find_variable(prefix);
+        *member_array_index = field->num_dims > 0
+            ? parse_array_index_tok(ts, *member_index) : -1;
+        if (field->num_dims > 0 && *member_array_index < 0) {
+            report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+            return 0;
+        }
+        *current_type = NULL;
+        return 1;
+    }
+    return 1;
+}
+
+static int resolve_user_type_reference_tok(TokenStream *ts, const Token *base_token,
+                                           int *member_index, int *member_array_index) {
+    char root_name[BASIC_TOKEN_TEXT_MAX];
+    const char *dot = strchr(base_token->text, '.');
+    if (!dot) {
+        if (ts->tokens[ts->pos].type != TOKEN_LPAREN) return 0;
+        int depth = 0;
+        int close_position = ts->pos;
+        for (; close_position < ts->statement->token_count; close_position++) {
+            if (ts->tokens[close_position].type == TOKEN_LPAREN) depth++;
+            else if (ts->tokens[close_position].type == TOKEN_RPAREN && --depth == 0) break;
+        }
+        if (close_position >= ts->statement->token_count ||
+            ts->tokens[close_position + 1].type != TOKEN_DOT) return 0;
+    }
+    size_t root_length = dot ? (size_t)(dot - base_token->text) : strlen(base_token->text);
+    if (root_length == 0 || root_length >= sizeof(root_name)) return 0;
+    memcpy(root_name, base_token->text, root_length);
+    root_name[root_length] = '\0';
+    int root_index = find_variable_raw_name(root_name);
+    UserTypeInstance instance_storage;
+    if (!get_user_type_instance_for_root(root_index, &instance_storage)) return 0;
+    UserTypeInstance *instance = &instance_storage;
+
+    UserType *current_type = &user_types[instance->type_index];
+    char prefix[128];
+    Variable *root = get_variable_ptr(root_index);
+    if (instance->num_dims > 0) {
+        int root_array_index = parse_array_index_tok(ts, root_index);
+        if (root_array_index < 0) {
+            report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+            return -1;
+        }
+        snprintf(prefix, sizeof(prefix), "%s@%d", root->name, root_array_index);
+    } else {
+        snprintf(prefix, sizeof(prefix), "%s", root->name);
+    }
+
+    if (dot && !append_user_type_member_chunk(dot + 1, &current_type, prefix,
+            sizeof(prefix), ts, member_index, member_array_index)) return -1;
+    while (ts->tokens[ts->pos].type == TOKEN_DOT) {
+        if (!current_type) {
+            report_runtime_error(ERR_TYPE_MISMATCH);
+            return -1;
+        }
+        ts->pos++;
+        if (ts->tokens[ts->pos].type != TOKEN_IDENTIFIER) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return -1;
+        }
+        Token *member_token = &ts->tokens[ts->pos++];
+        if (!append_user_type_member_chunk(member_token->text, &current_type, prefix,
+                sizeof(prefix), ts, member_index, member_array_index)) return -1;
+    }
+    if (current_type) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return -1;
+    }
+    return 1;
+}
+
+static int resolve_user_type_reference_text(const char **input, const Token *base_token,
+                                            int *member_index, int *member_array_index) {
+    Token tokens[256];
+    Statement statement = {0};
+    const char *cursor = *input;
+    int count = 0;
+    while (count < 255) {
+        const char *start = cursor;
+        Token token = get_next_token(&cursor);
+        if (token.type == TOKEN_EOF) break;
+        token.start_ptr = start;
+        token.var_idx = -1;
+        tokens[count++] = token;
+    }
+    tokens[count] = (Token){.type = TOKEN_EOF, .start_ptr = cursor, .var_idx = -1};
+    statement.tokens = tokens;
+    statement.token_count = count;
+    TokenStream ts = {tokens, 0, &statement};
+    int result = resolve_user_type_reference_tok(&ts, base_token,
+                                                 member_index, member_array_index);
+    if (result != 0) {
+        *input = tokens[ts.pos].start_ptr;
+    }
+    return result;
 }
 
 /*
@@ -1693,22 +2317,24 @@ static int calc_linear_index(Variable *var, int *indices, int num_indices) {
     int multiplier = 1;
     for (int i = var->num_dims - 1; i >= 0; i--) {
         int max_subscript = var->dims[i];
+        int min_subscript = var->lower_bounds[i];
         int val = indices[i];
-        if (val < option_base || val > max_subscript) {
+        if (val < min_subscript || val > max_subscript) {
             report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
             return -1;
         }
-        int offset = (option_base == 0) ? val : (val - 1);
+        int offset = val - min_subscript;
         linear += offset * multiplier;
         
-        int dim_size = (option_base == 0) ? (max_subscript + 1) : max_subscript;
+        int dim_size = max_subscript - min_subscript + 1;
         multiplier *= dim_size;
     }
     return linear;
 }
 
 static void ensure_array_dimensioned(int idx, int num_dims) {
-    if (vars[idx].array || vars[idx].s_array) return; // already dimensioned
+    Variable *variable = get_variable_ptr(idx);
+    if (variable->array || variable->s_array) return; // already dimensioned
     
     // Auto-dimension to 10 for each dimension
     int total_size = 1;
@@ -1717,15 +2343,22 @@ static void ensure_array_dimensioned(int idx, int num_dims) {
         total_size *= dim_size;
     }
     
-    if (vars[idx].name[strlen(vars[idx].name)-1] == '$') {
-        vars[idx].s_array = calloc(total_size, sizeof(char*));
+    if (variable->name[strlen(variable->name)-1] == '$') {
+        variable->s_array = calloc(total_size, sizeof(char*));
     } else {
-        vars[idx].array = malloc(total_size * sizeof(double));
-        for (int i = 0; i < total_size; i++) vars[idx].array[i] = 0;
+        variable->array = malloc(total_size * sizeof(double));
+        if (!variable->array) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return;
+        }
+        for (int i = 0; i < total_size; i++) variable->array[i] = 0;
     }
-    vars[idx].array_size = total_size;
-    vars[idx].num_dims = num_dims;
-    for (int i = 0; i < num_dims; i++) vars[idx].dims[i] = 10;
+    variable->array_size = total_size;
+    variable->num_dims = num_dims;
+    for (int i = 0; i < num_dims; i++) {
+        variable->lower_bounds[i] = option_base;
+        variable->dims[i] = 10;
+    }
     
     arrays_dimensioned = 1;
 }
@@ -1762,7 +2395,7 @@ static int parse_array_index(const char **input, int var_idx) {
     // Auto-dimension if not already dimensioned
     ensure_array_dimensioned(var_idx, num_indices);
 
-    return calc_linear_index(&vars[var_idx], indices, num_indices);
+    return calc_linear_index(get_variable_ptr(var_idx), indices, num_indices);
 }
 
 static int parse_array_index_tok(TokenStream *ts, int var_idx) {
@@ -1797,7 +2430,7 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
             ts->pos += 2;
             ensure_array_dimensioned(var_idx, 1);
             int indices[1] = {index_value};
-            return calc_linear_index(&vars[var_idx], indices, 1);
+            return calc_linear_index(get_variable_ptr(var_idx), indices, 1);
         }
     }
 
@@ -1815,7 +2448,7 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
 
     ensure_array_dimensioned(var_idx, num_indices);
-    return calc_linear_index(&vars[var_idx], indices, num_indices);
+    return calc_linear_index(get_variable_ptr(var_idx), indices, num_indices);
 }
 
 static void get_string_variable_value(int idx, int array_idx, char *dest, int dest_size) {
@@ -2142,16 +2775,36 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
             ts->pos++;
-        } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
+        } else if (t.type == TOKEN_IDENTIFIER) {
             ProcedureDef *pfunc = find_procedure(t.text);
             if (pfunc && pfunc->is_function) {
                 ts->pos++;
                 evaluate_function_call_string(pfunc, ts, &term);
             } else {
-                int idx = resolve_token_variable(&ts->tokens[ts->pos]);
-                ts->pos++;
-                int array_idx = parse_array_index_tok(ts, idx);
-                append_string_variable_value(&term, idx, array_idx);
+                int token_index = ts->pos++;
+                int idx = -1;
+                int array_idx = -1;
+                int is_member = user_type_count > 0
+                    ? resolve_user_type_reference_tok(ts, &ts->tokens[token_index],
+                                                      &idx, &array_idx)
+                    : 0;
+                if (is_member < 0) return 0;
+                if (is_member && is_string_var(get_variable_ptr(idx)->name)) {
+                    append_string_variable_value(&term, idx, array_idx);
+                } else if (!is_member && is_string_var(t.text)) {
+                    ts->pos = token_index;
+                    idx = resolve_token_variable(&ts->tokens[ts->pos]);
+                    ts->pos++;
+                    array_idx = parse_array_index_tok(ts, idx);
+                    append_string_variable_value(&term, idx, array_idx);
+                } else {
+                    ts->pos = token_index;
+                    if (parsed) break;
+                    double val = evaluate_expression_tok(ts);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "%g", val);
+                    basic_string_append(&term, buf, strlen(buf));
+                }
             }
         } else {
             if (parsed) break;
@@ -2446,14 +3099,31 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             }
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
-        } else if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) {
+        } else if (t.type == TOKEN_IDENTIFIER) {
             ProcedureDef *pfunc = find_procedure(t.text);
             if (pfunc && pfunc->is_function) {
                 evaluate_function_call_string_text(pfunc, input, &term);
             } else {
-                int idx = find_variable(t.text);
-                int array_idx = parse_array_index(input, idx);
-                append_string_variable_value(&term, idx, array_idx);
+                int idx = -1;
+                int array_idx = -1;
+                int is_member = user_type_count > 0
+                    ? resolve_user_type_reference_text(input, &t, &idx, &array_idx)
+                    : 0;
+                if (is_member < 0) return 0;
+                if (is_member && is_string_var(get_variable_ptr(idx)->name)) {
+                    append_string_variable_value(&term, idx, array_idx);
+                } else if (!is_member && is_string_var(t.text)) {
+                    idx = find_variable(t.text);
+                    array_idx = parse_array_index(input, idx);
+                    append_string_variable_value(&term, idx, array_idx);
+                } else {
+                    *input = saved;
+                    if (parsed) break;
+                    double val = evaluate_expression(input);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "%g", val);
+                    basic_string_append(&term, buf, strlen(buf));
+                }
             }
         } else {
             if (parsed) break;
@@ -2559,10 +3229,669 @@ static void apply_basika_using_str(const char *fmt, const char *val, char *out, 
     }
 }
 
+static Variable *get_or_create_frame_variable(CallFrame *frame, int variable_index) {
+    if (variable_index < 0 || variable_index >= 1024) return &vars[0];
+    if (frame->resolved_variables[variable_index]) {
+        return frame->resolved_variables[variable_index];
+    }
+    const char *name = vars[variable_index].name;
+    for (int i = 0; i < frame->local_var_count; i++) {
+        if (strcasecmp(frame->local_vars[i].name, name) == 0) {
+            return frame->resolved_variables[variable_index] = &frame->local_vars[i];
+        }
+    }
+    if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return &vars[0];
+    }
+    int local_index = frame->local_var_count++;
+    memset(&frame->local_vars[local_index], 0, sizeof(Variable));
+    snprintf(frame->local_vars[local_index].name,
+             sizeof(frame->local_vars[local_index].name), "%s", name);
+    return frame->resolved_variables[variable_index] = &frame->local_vars[local_index];
+}
+
+static char user_type_field_suffix(const TypeField *field) {
+    size_t length = strlen(field->name);
+    char suffix = length > 0 ? field->name[length - 1] : '\0';
+    if (suffix == '$' || suffix == '%' || suffix == '!' || suffix == '#') return '\0';
+    if (strcasecmp(field->type_name, "STRING") == 0) return '$';
+    if (strcasecmp(field->type_name, "INTEGER") == 0) return '%';
+    if (strcasecmp(field->type_name, "SINGLE") == 0) return '!';
+    if (strcasecmp(field->type_name, "DOUBLE") == 0) return '#';
+    return '\0';
+}
+
+static int copy_variable_contents(Variable *destination, const Variable *source) {
+    if (destination == source) return 1;
+    destination->value = source->value;
+    destination->string_declared = source->string_declared;
+    destination->string_fixed_length = source->string_fixed_length;
+    if (source->array) {
+        if (!destination->array || destination->array_size != source->array_size) {
+            free(destination->array);
+            destination->array = malloc((size_t)source->array_size * sizeof(*destination->array));
+            if (!destination->array) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return 0;
+            }
+        }
+        memcpy(destination->array, source->array,
+               (size_t)source->array_size * sizeof(*destination->array));
+    }
+    if (source->s_array) {
+        if (!destination->s_array || destination->array_size != source->array_size) {
+            if (destination->s_array) {
+                for (int i = 0; i < destination->array_size; i++) {
+                    basic_string_destroy(destination->s_array[i]);
+                }
+                free(destination->s_array);
+            }
+            destination->s_array = calloc((size_t)source->array_size,
+                                          sizeof(*destination->s_array));
+            if (!destination->s_array) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return 0;
+            }
+        }
+        for (int i = 0; i < source->array_size; i++) {
+            if (source->s_array[i]) {
+                if (destination->string_declared && !destination->s_array[i]) {
+                    destination->s_array[i] = basic_string_create(NULL, 0);
+                    if (!destination->s_array[i]) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        return 0;
+                    }
+                }
+                if (destination->string_declared) {
+                    destination->s_array[i]->is_fixed = 1;
+                    destination->s_array[i]->fixed_length = destination->string_fixed_length;
+                }
+                if (!basic_string_assign(&destination->s_array[i],
+                                         source->s_array[i]->data,
+                                         source->s_array[i]->length)) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    return 0;
+                }
+            }
+        }
+    }
+    destination->array_size = source->array_size;
+    destination->num_dims = source->num_dims;
+    memcpy(destination->dims, source->dims, sizeof(destination->dims));
+    memcpy(destination->lower_bounds, source->lower_bounds,
+           sizeof(destination->lower_bounds));
+    if (source->s_value) {
+        if (destination->string_declared) {
+            if (!destination->s_value) {
+                destination->s_value = basic_string_create(NULL, 0);
+                if (!destination->s_value) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    return 0;
+                }
+            }
+            destination->s_value->is_fixed = 1;
+            destination->s_value->fixed_length = destination->string_fixed_length;
+        }
+        if (!basic_string_assign(&destination->s_value, source->s_value->data,
+                                 source->s_value->length)) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return 0;
+        }
+    } else if (destination->string_declared) {
+        if (!destination->s_value) destination->s_value = basic_string_create(NULL, 0);
+        if (!destination->s_value) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return 0;
+        }
+        destination->s_value->is_fixed = 1;
+        destination->s_value->fixed_length = destination->string_fixed_length;
+        if (!basic_string_assign(&destination->s_value, NULL, 0)) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int copy_user_type_value(const char *source_prefix, const char *destination_prefix,
+                                UserType *type, int depth, CallFrame *destination_frame) {
+    if (!type || depth >= MAX_USER_TYPES) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return 0;
+    }
+    for (int i = 0; i < type->field_count; i++) {
+        TypeField *field = &type->fields[i];
+        char source_member[128];
+        char destination_member[128];
+        char suffix[2] = {user_type_field_suffix(field), '\0'};
+        int source_written = snprintf(source_member, sizeof(source_member), "%s.%s%s",
+                                      source_prefix, field->name, suffix);
+        int destination_written = snprintf(destination_member, sizeof(destination_member),
+                                           "%s.%s%s", destination_prefix,
+                                           field->name, suffix);
+        if (source_written < 0 || (size_t)source_written >= sizeof(source_member) ||
+            destination_written < 0 ||
+            (size_t)destination_written >= sizeof(destination_member)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+
+        UserType *nested = find_user_type(field->type_name);
+        if (nested) {
+            int lower_bounds[3] = {0};
+            int element_count = 1;
+            for (int dim = 0; dim < field->num_dims; dim++) {
+                lower_bounds[dim] = field->lower_bounds[dim] < 0
+                    ? option_base : field->lower_bounds[dim];
+                int count = field->dims[dim] - lower_bounds[dim] + 1;
+                if (count <= 0 || element_count > 100000 / count) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    return 0;
+                }
+                element_count *= count;
+            }
+            for (int element = 0; element < element_count; element++) {
+                char source_nested[128];
+                char destination_nested[128];
+                if (field->num_dims > 0) {
+                    source_written = snprintf(source_nested, sizeof(source_nested),
+                                              "%s@%d", source_member, element);
+                    destination_written = snprintf(destination_nested,
+                                                   sizeof(destination_nested),
+                                                   "%s@%d", destination_member, element);
+                } else {
+                    source_written = snprintf(source_nested, sizeof(source_nested),
+                                              "%s", source_member);
+                    destination_written = snprintf(destination_nested,
+                                                   sizeof(destination_nested), "%s",
+                                                   destination_member);
+                }
+                if (source_written < 0 || (size_t)source_written >= sizeof(source_nested) ||
+                    destination_written < 0 ||
+                    (size_t)destination_written >= sizeof(destination_nested) ||
+                    !copy_user_type_value(source_nested, destination_nested, nested,
+                                          depth + 1, destination_frame)) return 0;
+            }
+            continue;
+        }
+
+        int source_index = find_variable_raw_name(source_member);
+        int destination_index = find_variable_raw_name(destination_member);
+        Variable *source = get_variable_ptr(source_index);
+        Variable *destination = destination_frame
+            ? get_or_create_frame_variable(destination_frame, destination_index)
+            : get_variable_ptr(destination_index);
+        if (field->is_fixed_string) {
+            destination->string_declared = 1;
+            destination->string_fixed_length = field->fixed_string_length;
+            fixed_string_declarations_present = 1;
+        }
+        if (field->num_dims > 0 && !destination->array && !destination->s_array) {
+            int lower_bounds[3] = {0};
+            int count = 1;
+            for (int dim = 0; dim < field->num_dims; dim++) {
+                lower_bounds[dim] = field->lower_bounds[dim] < 0
+                    ? option_base : field->lower_bounds[dim];
+                int size = field->dims[dim] - lower_bounds[dim] + 1;
+                if (size <= 0 || count > 100000 / size) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    return 0;
+                }
+                count *= size;
+            }
+            if (strcasecmp(field->type_name, "STRING") == 0) {
+                destination->s_array = calloc((size_t)count,
+                                              sizeof(*destination->s_array));
+            } else {
+                destination->array = calloc((size_t)count, sizeof(*destination->array));
+            }
+            if ((!destination->array && strcasecmp(field->type_name, "STRING") != 0) ||
+                (!destination->s_array && strcasecmp(field->type_name, "STRING") == 0)) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return 0;
+            }
+            destination->array_size = count;
+            destination->num_dims = field->num_dims;
+            for (int dim = 0; dim < field->num_dims; dim++) {
+                destination->dims[dim] = field->dims[dim];
+                destination->lower_bounds[dim] = lower_bounds[dim];
+            }
+        }
+        if (!copy_variable_contents(destination, source)) return 0;
+    }
+    return 1;
+}
+
+static int bind_user_type_parameter_byref(CallFrame *frame, int parameter_index,
+                                          ProcParamDef *parameter, int source_index) {
+    UserTypeInstance source_instance;
+    if (!get_user_type_instance_for_root(source_index, &source_instance) ||
+        source_instance.type_index != parameter->user_type_index ||
+        parameter->is_array != (source_instance.num_dims > 0)) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    frame->byref_caller_variable[parameter_index] = get_variable_ptr(source_index);
+    frame->byref_caller_var_idx[parameter_index] = source_index;
+    frame->byref_caller_frame[parameter_index] = call_stack_depth > 0
+        ? call_stack_depth - 1 : -1;
+    return 1;
+}
+
+static int bind_user_type_parameter_value(CallFrame *frame,
+                                          ProcParamDef *parameter,
+                                          int source_index) {
+    UserTypeInstance source_instance;
+    if (!get_user_type_instance_for_root(source_index, &source_instance) ||
+        source_instance.type_index != parameter->user_type_index ||
+        source_instance.num_dims != 0) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    Variable *source_root = get_variable_ptr(source_index);
+    if (!copy_user_type_value(source_root->name, parameter->name,
+            &user_types[parameter->user_type_index], 0, frame)) return 0;
+    int destination_index = find_variable_raw_name(parameter->name);
+    get_or_create_frame_variable(frame, destination_index);
+    return 1;
+}
+
+static int bind_user_type_parameter_value_tok(TokenStream *ts, CallFrame *frame,
+                                              ProcParamDef *parameter) {
+    if (ts->tokens[ts->pos].type != TOKEN_LPAREN ||
+        ts->tokens[ts->pos + 1].type != TOKEN_IDENTIFIER ||
+        ts->tokens[ts->pos + 2].type != TOKEN_RPAREN) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    ts->pos++;
+    int source_index = find_existing_variable_raw_name(ts->tokens[ts->pos++].text);
+    ts->pos++;
+    return bind_user_type_parameter_value(frame, parameter, source_index);
+}
+
+static int bind_user_type_parameter_value_text(const char **input, CallFrame *frame,
+                                               ProcParamDef *parameter) {
+    const char *cursor = skip_whitespace_fast(*input);
+    if (*cursor++ != '(') {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    cursor = skip_whitespace_fast(cursor);
+    char name[128];
+    size_t length = 0;
+    if (!isalpha((unsigned char)*cursor) && *cursor != '_') {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    while (isalnum((unsigned char)*cursor) || *cursor == '_' || *cursor == '$' ||
+           *cursor == '%' || *cursor == '!' || *cursor == '#') {
+        if (length + 1 >= sizeof(name)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+        name[length++] = *cursor++;
+    }
+    name[length] = '\0';
+    cursor = skip_whitespace_fast(cursor);
+    if (*cursor++ != ')') {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    int source_index = find_existing_variable_raw_name(name);
+    if (!bind_user_type_parameter_value(frame, parameter, source_index)) return 0;
+    *input = cursor;
+    return 1;
+}
+
+static int copy_user_type_instance_value(int destination_index, int destination_array_index,
+                                         int source_index, int source_array_index,
+                                         CallFrame *destination_frame) {
+    UserTypeInstance destination_instance;
+    UserTypeInstance source_instance;
+    if (!get_user_type_instance_for_root(destination_index, &destination_instance) ||
+        !get_user_type_instance_for_root(source_index, &source_instance) ||
+        destination_instance.type_index != source_instance.type_index ||
+        (destination_instance.num_dims > 0) != (destination_array_index >= 0) ||
+        (source_instance.num_dims > 0) != (source_array_index >= 0)) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    Variable *source_root = get_variable_ptr(source_index);
+    Variable *destination_root = destination_frame
+        ? get_or_create_frame_variable(destination_frame, destination_index)
+        : get_variable_ptr(destination_index);
+    char source_prefix[128];
+    char destination_prefix[128];
+    if (source_instance.num_dims > 0) {
+        snprintf(source_prefix, sizeof(source_prefix), "%s@%d",
+                 source_root->name, source_array_index);
+    } else {
+        snprintf(source_prefix, sizeof(source_prefix), "%s", source_root->name);
+    }
+    if (destination_instance.num_dims > 0) {
+        snprintf(destination_prefix, sizeof(destination_prefix), "%s@%d",
+                 destination_root->name, destination_array_index);
+    } else {
+        snprintf(destination_prefix, sizeof(destination_prefix), "%s",
+                 destination_root->name);
+    }
+    return copy_user_type_value(source_prefix, destination_prefix,
+                                &user_types[destination_instance.type_index],
+                                0, destination_frame);
+}
+
+static int assign_user_type_value_tok(TokenStream *ts, int destination_index,
+                                      int destination_array_index) {
+    UserTypeInstance destination_instance;
+    if (!get_user_type_instance_for_root(destination_index, &destination_instance)) return 0;
+    if (ts->tokens[ts->pos].type != TOKEN_IDENTIFIER) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return -1;
+    }
+    int source_index = find_existing_variable_raw_name(ts->tokens[ts->pos].text);
+    if (source_index < 0) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return -1;
+    }
+    ts->pos++;
+    UserTypeInstance source_instance;
+    if (!get_user_type_instance_for_root(source_index, &source_instance)) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return -1;
+    }
+    int source_array_index = -1;
+    if (source_instance.num_dims > 0) {
+        source_array_index = parse_array_index_tok(ts, source_index);
+    }
+    TokenType trailing = ts->tokens[ts->pos].type;
+    if (trailing != TOKEN_EOF && trailing != TOKEN_COLON && trailing != TOKEN_ELSE) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return -1;
+    }
+    if (destination_instance.type_index != source_instance.type_index ||
+        ((destination_instance.num_dims > 0) != (destination_array_index >= 0)) ||
+        ((source_instance.num_dims > 0) != (source_array_index >= 0))) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return -1;
+    }
+    return copy_user_type_instance_value(destination_index, destination_array_index,
+                                         source_index, source_array_index, NULL) ? 1 : -1;
+}
+
+static int user_type_field_element_count(const TypeField *field, int *count_out) {
+    int count = 1;
+    for (int dim = 0; dim < field->num_dims; dim++) {
+        int lower = field->lower_bounds[dim] < 0
+            ? option_base : field->lower_bounds[dim];
+        int dimension_size = field->dims[dim] - lower + 1;
+        if (dimension_size <= 0 || count > BASIC_STRING_MAX / dimension_size) {
+            report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+            return 0;
+        }
+        count *= dimension_size;
+    }
+    *count_out = count;
+    return 1;
+}
+
+static int user_type_storage_size(UserType *type, size_t *size_out, int depth) {
+    if (!type || depth >= MAX_USER_TYPES) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    size_t total = 0;
+    for (int i = 0; i < type->field_count; i++) {
+        TypeField *field = &type->fields[i];
+        int element_count;
+        if (!user_type_field_element_count(field, &element_count)) return 0;
+        UserType *nested = find_user_type(field->type_name);
+        size_t element_size;
+        if (nested) {
+            if (!user_type_storage_size(nested, &element_size, depth + 1)) return 0;
+        } else if (strcasecmp(field->type_name, "STRING") == 0) {
+            if (!field->is_fixed_string || field->fixed_string_length <= 0) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return 0;
+            }
+            element_size = (size_t)field->fixed_string_length;
+        } else if (strcasecmp(field->type_name, "INTEGER") == 0) {
+            element_size = sizeof(int16_t);
+        } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
+            element_size = sizeof(float);
+        } else if (strcasecmp(field->type_name, "DOUBLE") == 0) {
+            element_size = sizeof(double);
+        } else {
+            report_runtime_error(ERR_TYPE_MISMATCH);
+            return 0;
+        }
+        if (element_size > BASIC_STRING_MAX / (size_t)element_count ||
+            total > BASIC_STRING_MAX - element_size * (size_t)element_count) {
+            report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+            return 0;
+        }
+        total += element_size * (size_t)element_count;
+    }
+    *size_out = total;
+    return 1;
+}
+
+static void transfer_little_endian_bytes(unsigned char *bytes, void *value,
+                                         size_t size, int writing) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    unsigned char *native_bytes = value;
+    for (size_t i = 0; i < size; i++) {
+        if (writing) bytes[i] = native_bytes[size - i - 1];
+        else native_bytes[size - i - 1] = bytes[i];
+    }
+#else
+    if (writing) memcpy(bytes, value, size);
+    else memcpy(value, bytes, size);
+#endif
+}
+
+static int transfer_user_type_fields(UserType *type, const char *prefix,
+                                     unsigned char *buffer, size_t *offset,
+                                     int writing, int depth) {
+    if (!type || depth >= MAX_USER_TYPES) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    for (int i = 0; i < type->field_count; i++) {
+        TypeField *field = &type->fields[i];
+        char member[128];
+        char suffix[2] = {user_type_field_suffix(field), '\0'};
+        int written = snprintf(member, sizeof(member), "%s.%s%s",
+                               prefix, field->name, suffix);
+        if (written < 0 || (size_t)written >= sizeof(member)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+        int element_count;
+        if (!user_type_field_element_count(field, &element_count)) return 0;
+        UserType *nested = find_user_type(field->type_name);
+        size_t element_size = 0;
+        if (nested) {
+            if (!user_type_storage_size(nested, &element_size, depth + 1)) return 0;
+        } else if (strcasecmp(field->type_name, "STRING") == 0) {
+            element_size = (size_t)field->fixed_string_length;
+        } else if (strcasecmp(field->type_name, "INTEGER") == 0) {
+            element_size = sizeof(int16_t);
+        } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
+            element_size = sizeof(float);
+        } else {
+            element_size = sizeof(double);
+        }
+
+        for (int element = 0; element < element_count; element++) {
+            if (nested) {
+                char nested_prefix[128];
+                written = field->num_dims > 0
+                    ? snprintf(nested_prefix, sizeof(nested_prefix), "%s@%d",
+                               member, element)
+                    : snprintf(nested_prefix, sizeof(nested_prefix), "%s", member);
+                if (written < 0 || (size_t)written >= sizeof(nested_prefix) ||
+                    !transfer_user_type_fields(nested, nested_prefix, buffer, offset,
+                                               writing, depth + 1)) return 0;
+                continue;
+            }
+            int variable_index = find_variable_raw_name(member);
+            Variable *variable = get_variable_ptr(variable_index);
+            int array_index = field->num_dims > 0 ? element : -1;
+            if (strcasecmp(field->type_name, "STRING") == 0) {
+                BasicString *value = array_index >= 0
+                    ? (variable->s_array ? variable->s_array[array_index] : NULL)
+                    : variable->s_value;
+                if (writing) {
+                    memset(buffer + *offset, ' ', element_size);
+                    if (value && value->data) {
+                        size_t copy_length = value->length < element_size
+                            ? value->length : element_size;
+                        memcpy(buffer + *offset, value->data, copy_length);
+                    }
+                } else {
+                    BasicString **target = array_index >= 0
+                        ? &variable->s_array[array_index] : &variable->s_value;
+                    if (!*target) {
+                        *target = basic_string_create(NULL, 0);
+                        if (!*target) {
+                            report_runtime_error(ERR_OUT_OF_MEMORY);
+                            return 0;
+                        }
+                    }
+                    (*target)->is_fixed = 1;
+                    (*target)->fixed_length = element_size;
+                    if (!basic_string_assign(target, (const char *)buffer + *offset,
+                                             element_size)) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        return 0;
+                    }
+                }
+            } else if (writing) {
+                double value = array_index >= 0 && variable->array
+                    ? variable->array[array_index] : variable->value;
+                if (strcasecmp(field->type_name, "INTEGER") == 0) {
+                    int16_t integer = (int16_t)value;
+                    transfer_little_endian_bytes(buffer + *offset, &integer,
+                                                 sizeof(integer), 1);
+                } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
+                    float single = (float)value;
+                    transfer_little_endian_bytes(buffer + *offset, &single,
+                                                 sizeof(single), 1);
+                } else {
+                    transfer_little_endian_bytes(buffer + *offset, &value,
+                                                 sizeof(value), 1);
+                }
+            } else {
+                double value;
+                if (strcasecmp(field->type_name, "INTEGER") == 0) {
+                    int16_t integer;
+                    transfer_little_endian_bytes(buffer + *offset, &integer,
+                                                 sizeof(integer), 0);
+                    value = integer;
+                } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
+                    float single;
+                    transfer_little_endian_bytes(buffer + *offset, &single,
+                                                 sizeof(single), 0);
+                    value = single;
+                } else {
+                    transfer_little_endian_bytes(buffer + *offset, &value,
+                                                 sizeof(value), 0);
+                }
+                if (array_index >= 0 && variable->array) {
+                    variable->array[array_index] = value;
+                } else {
+                    variable->value = value;
+                }
+            }
+            *offset += element_size;
+        }
+    }
+    return 1;
+}
+
+static int transfer_user_type_record(int file_number, double record_number,
+                                     int root_index, int array_index, int writing) {
+    if (file_number < 1 || file_number >= 16 || !file_handles[file_number]) {
+        report_runtime_error(ERR_BAD_FILE_NUMBER);
+        return 0;
+    }
+    UserTypeInstance instance;
+    if (!get_user_type_instance_for_root(root_index, &instance) ||
+        ((instance.num_dims > 0) != (array_index >= 0))) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    size_t record_size;
+    if (!user_type_storage_size(&user_types[instance.type_index], &record_size, 0) ||
+        record_size == 0) return 0;
+    if (record_number < 1.0 || record_number > (double)LONG_MAX / (double)record_size) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return 0;
+    }
+    Variable *root = get_variable_ptr(root_index);
+    char prefix[128];
+    int written = instance.num_dims > 0
+        ? snprintf(prefix, sizeof(prefix), "%s@%d", root->name, array_index)
+        : snprintf(prefix, sizeof(prefix), "%s", root->name);
+    if (written < 0 || (size_t)written >= sizeof(prefix)) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return 0;
+    }
+    unsigned char *buffer = calloc(record_size, 1);
+    if (!buffer) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 0;
+    }
+    long offset_in_file = (long)((record_number - 1.0) * (double)record_size);
+    int success = 1;
+    if (writing) {
+        size_t offset = 0;
+        success = transfer_user_type_fields(&user_types[instance.type_index], prefix,
+                                            buffer, &offset, 1, 0);
+        if (success && (fseek(file_handles[file_number], offset_in_file, SEEK_SET) != 0 ||
+            fwrite(buffer, 1, record_size, file_handles[file_number]) != record_size ||
+            fflush(file_handles[file_number]) != 0)) {
+            report_runtime_error(ERR_BAD_FILE_NUMBER);
+            success = 0;
+        }
+    } else {
+        if (fseek(file_handles[file_number], offset_in_file, SEEK_SET) != 0) {
+            report_runtime_error(ERR_BAD_FILE_NUMBER);
+            success = 0;
+        } else {
+            size_t bytes_read = fread(buffer, 1, record_size, file_handles[file_number]);
+            if (bytes_read < record_size) {
+                memset(buffer + bytes_read, 0, record_size - bytes_read);
+            }
+            size_t offset = 0;
+            success = transfer_user_type_fields(&user_types[instance.type_index], prefix,
+                                                buffer, &offset, 0, 0);
+        }
+    }
+    free(buffer);
+    return success;
+}
+
 static void execute_assignment(const char **input, Token var_token) {
-    int idx = strchr(var_token.text, '.') ? find_variable(var_token.text) : var_token.var_idx;
-    if (idx == -1) idx = find_variable(var_token.text);
-    int array_idx = parse_array_index(input, idx);
+    int idx = var_token.var_idx;
+    int array_idx = -1;
+    int is_member = user_type_count > 0
+        ? resolve_user_type_reference_text(input, &var_token, &idx, &array_idx)
+        : 0;
+    if (is_member < 0) return;
+    if (!is_member) {
+        int raw_index = find_existing_variable_raw_name(var_token.text);
+        UserTypeInstance existing_instance;
+        if (raw_index >= 0 && get_user_type_instance_for_root(raw_index, &existing_instance)) {
+            idx = raw_index;
+        } else {
+            idx = strchr(var_token.text, '.') ? find_variable(var_token.text) : var_token.var_idx;
+            if (idx == -1) idx = find_variable(var_token.text);
+        }
+        array_idx = parse_array_index(input, idx);
+    }
     const char *saved = *input;
     Token eq = get_next_token(input);
     if (eq.type != TOKEN_EQUALS) {
@@ -2571,7 +3900,54 @@ static void execute_assignment(const char **input, Token var_token) {
         return;
     }
 
-    if (is_string_var(var_token.text)) {
+    UserTypeInstance destination_instance;
+    if (get_user_type_instance_for_root(idx, &destination_instance)) {
+        Token source_token = get_next_token(input);
+        int source_index = source_token.type == TOKEN_IDENTIFIER
+            ? find_existing_variable_raw_name(source_token.text) : -1;
+        UserTypeInstance source_instance;
+        int source_array_index = -1;
+        if (source_index >= 0 &&
+            get_user_type_instance_for_root(source_index, &source_instance)) {
+            if (source_instance.num_dims > 0) {
+                source_array_index = parse_array_index(input, source_index);
+            }
+            const char *trailing_saved = *input;
+            Token trailing = get_next_token(input);
+            *input = trailing_saved;
+            if (source_instance.type_index != destination_instance.type_index ||
+                ((source_instance.num_dims > 0) != (source_array_index >= 0)) ||
+                ((destination_instance.num_dims > 0) != (array_idx >= 0)) ||
+                (trailing.type != TOKEN_EOF && trailing.type != TOKEN_COLON)) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return;
+            }
+            Variable *source_root = get_variable_ptr(source_index);
+            Variable *destination_root = get_variable_ptr(idx);
+            char source_prefix[128];
+            char destination_prefix[128];
+            if (source_instance.num_dims > 0) {
+                snprintf(source_prefix, sizeof(source_prefix), "%s@%d",
+                         source_root->name, source_array_index);
+            } else {
+                snprintf(source_prefix, sizeof(source_prefix), "%s", source_root->name);
+            }
+            if (destination_instance.num_dims > 0) {
+                snprintf(destination_prefix, sizeof(destination_prefix), "%s@%d",
+                         destination_root->name, array_idx);
+            } else {
+                snprintf(destination_prefix, sizeof(destination_prefix), "%s",
+                         destination_root->name);
+            }
+            if (copy_user_type_value(source_prefix, destination_prefix,
+                    &user_types[destination_instance.type_index], 0, NULL)) return;
+            return;
+        }
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return;
+    }
+
+    if (is_string_var(get_variable_ptr(idx)->name)) {
         BasicString dynamic_value = {0};
         const char *dynamic_saved = *input;
         if (parse_dynamic_string_expression(input, &dynamic_value)) {
@@ -2913,30 +4289,69 @@ static void scan_procedures(void) {
                         pos++;
                         while (pos < stmt->token_count && stmt->tokens[pos].type != TOKEN_RPAREN) {
                             if (stmt->tokens[pos].type == TOKEN_IDENTIFIER) {
-                                if (p->param_count < MAX_PROC_PARAMS) {
-                                    ProcParamDef *param = &p->params[p->param_count++];
-                                    strncpy(param->name, stmt->tokens[pos].text, 31);
-                                    for (int c = 0; param->name[c]; c++) param->name[c] = (char)toupper((unsigned char)param->name[c]);
-                                    
+                                if (p->param_count >= MAX_PROC_PARAMS) {
+                                    report_type_declaration_error(stmt);
+                                    return;
+                                }
+                                ProcParamDef *param = &p->params[p->param_count++];
+                                param->user_type_index = -1;
+                                snprintf(param->name, sizeof(param->name), "%s",
+                                         stmt->tokens[pos].text);
+                                for (int c = 0; param->name[c]; c++) {
+                                    param->name[c] = (char)toupper((unsigned char)param->name[c]);
+                                }
+                                pos++;
+                                if (pos < stmt->token_count &&
+                                    stmt->tokens[pos].type == TOKEN_LPAREN) {
+                                    param->is_array = 1;
+                                    while (pos < stmt->token_count &&
+                                           stmt->tokens[pos].type != TOKEN_RPAREN) pos++;
+                                    if (pos < stmt->token_count) pos++;
+                                }
+                                if (pos < stmt->token_count &&
+                                    stmt->tokens[pos].type == TOKEN_AS) {
+                                    pos++;
+                                    if (pos >= stmt->token_count ||
+                                        stmt->tokens[pos].type != TOKEN_IDENTIFIER) {
+                                        report_runtime_error(ERR_SYNTAX_ERROR);
+                                        return;
+                                    }
+                                    UserType *parameter_type =
+                                        find_user_type(stmt->tokens[pos].text);
+                                    if (parameter_type) {
+                                        param->user_type_index =
+                                            (int)(parameter_type - user_types);
+                                    } else if (strcasecmp(stmt->tokens[pos].text, "STRING") == 0) {
+                                        param->is_string = 1;
+                                    } else if (!is_primitive_user_type(stmt->tokens[pos].text)) {
+                                        report_runtime_error(ERR_SYNTAX_ERROR);
+                                        return;
+                                    }
+                                    pos++;
+                                } else {
                                     size_t len = strlen(param->name);
-                                    if (len > 0 && param->name[len-1] != '$' && param->name[len-1] != '%' && param->name[len-1] != '!' && param->name[len-1] != '#') {
-                                        char suffix = default_type_map[param->name[0] - 'A'];
-                                        if (suffix != '\0') {
-                                            param->name[len] = suffix;
-                                            param->name[len+1] = '\0';
+                                    if (len > 0 && param->name[len - 1] != '$' &&
+                                        param->name[len - 1] != '%' && param->name[len - 1] != '!' &&
+                                        param->name[len - 1] != '#') {
+                                        int first = toupper((unsigned char)param->name[0]) - 'A';
+                                        if (first >= 0 && first < 26) {
+                                            char suffix = default_type_map[first];
+                                            if (suffix != '\0' && len + 1 < sizeof(param->name)) {
+                                                param->name[len] = suffix;
+                                                param->name[len + 1] = '\0';
+                                            }
                                         }
                                     }
-                                    
-                                    if (pos + 1 < stmt->token_count && stmt->tokens[pos+1].type == TOKEN_LPAREN) {
-                                        param->is_array = 1;
-                                        pos++;
-                                        if (pos + 1 < stmt->token_count && stmt->tokens[pos+1].type == TOKEN_RPAREN) pos++;
+                                    len = strlen(param->name);
+                                    if (len > 0 && param->name[len - 1] == '$') {
+                                        param->is_string = 1;
                                     }
-                                    if (param->name[strlen(param->name)-1] == '$') param->is_string = 1;
                                 }
+                                if (pos < stmt->token_count &&
+                                    stmt->tokens[pos].type == TOKEN_COMMA) pos++;
+                                continue;
                             }
                             pos++;
-                            if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_COMMA) pos++;
                         }
                         if (pos < stmt->token_count && stmt->tokens[pos].type == TOKEN_RPAREN) pos++;
                     }
@@ -3003,7 +4418,20 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
                            ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
         if (is_var_id && next_is_sep) {
-            int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            int c_var_idx;
+            if (pdef->user_type_index >= 0) {
+                c_var_idx = find_variable_raw_name(t_arg.text);
+                UserTypeInstance argument_type;
+                if (!get_user_type_instance_for_root(c_var_idx, &argument_type) ||
+                    argument_type.type_index != pdef->user_type_index ||
+                    pdef->is_array != (argument_type.num_dims > 0)) {
+                    report_runtime_error(ERR_TYPE_MISMATCH);
+                    return NULL;
+                }
+            } else {
+                c_var_idx = resolve_token_variable(&ts->tokens[ts->pos]);
+            }
+            ts->pos++;
             frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
             frame->byref_caller_var_idx[arg_idx] = c_var_idx;
             frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
@@ -3011,19 +4439,47 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
             frame->byref_caller_var_idx[arg_idx] = -1;
             frame->byref_caller_frame[arg_idx] = -1;
 
-            if (pdef->is_string) {
+            if (pdef->user_type_index >= 0) {
+                if (ts->tokens[ts->pos].type != TOKEN_LPAREN ||
+                    ts->tokens[ts->pos + 1].type != TOKEN_IDENTIFIER ||
+                    ts->tokens[ts->pos + 2].type != TOKEN_RPAREN) {
+                    report_runtime_error(ERR_TYPE_MISMATCH);
+                    return NULL;
+                }
+                ts->pos++;
+                Token *source_token = &ts->tokens[ts->pos++];
+                int source_index = find_variable_raw_name(source_token->text);
+                if (ts->tokens[ts->pos++].type != TOKEN_RPAREN) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return NULL;
+                }
+                UserTypeInstance source_instance;
+                if (!get_user_type_instance_for_root(source_index, &source_instance) ||
+                    source_instance.type_index != pdef->user_type_index ||
+                    source_instance.num_dims != 0) {
+                    report_runtime_error(ERR_TYPE_MISMATCH);
+                    return NULL;
+                }
+                Variable *source_root = get_variable_ptr(source_index);
+                char destination_root[128];
+                snprintf(destination_root, sizeof(destination_root), "%s", pdef->name);
+                if (!copy_user_type_value(source_root->name, destination_root,
+                        &user_types[pdef->user_type_index], 0, frame)) return NULL;
+                int destination_index = find_variable_raw_name(pdef->name);
+                get_or_create_frame_variable(frame, destination_index);
+            } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
                 double val = evaluate_expression_tok(ts);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 lv->value = val;
             }
         }
@@ -3294,10 +4750,32 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     continue;
                 }
                 int idx = resolve_token_variable(current_token);
-                int array_idx = parse_array_index_tok(&ts, idx);
+                int array_idx = -1;
+                int is_member = user_type_count > 0
+                    ? resolve_user_type_reference_tok(&ts, current_token, &idx,
+                                                      &array_idx)
+                    : 0;
+                if (is_member < 0) break;
+                if (!is_member) {
+                    UserTypeInstance record_instance;
+                    if (user_type_count > 0) {
+                        int raw_index = find_existing_variable_raw_name(t.text);
+                        if (raw_index >= 0 &&
+                            get_user_type_instance_for_root(raw_index, &record_instance)) {
+                            idx = raw_index;
+                        }
+                    }
+                    array_idx = parse_array_index_tok(&ts, idx);
+                }
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
                     ts.pos++;
-                    if (is_string_var(t.text)) {
+                    UserTypeInstance record_instance;
+                    if (user_type_count > 0 &&
+                        get_user_type_instance_for_root(idx, &record_instance)) {
+                        assign_user_type_value_tok(&ts, idx, array_idx);
+                    } else if (is_member
+                            ? is_string_var(get_variable_ptr(idx)->name)
+                            : is_string_var(t.text)) {
                         BasicString value = {0};
                         if (parse_string_expression_tok_heap(&ts, &value)) {
                             assign_string_variable_value(idx, array_idx, value.data, value.length);
@@ -3382,28 +4860,36 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
         int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':'));
 
         if (is_simple_var) {
-            int c_var_idx = find_variable(var_buf);
-            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
-            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
-            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            int c_var_idx = pdef->user_type_index >= 0
+                ? find_variable_raw_name(var_buf) : find_variable(var_buf);
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return 0.0;
+            } else {
+                frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
+                frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+                frame->byref_caller_frame[arg_idx] =
+                    call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            }
             *input = after_var;
         } else {
             frame->byref_caller_var_idx[arg_idx] = -1;
             frame->byref_caller_frame[arg_idx] = -1;
 
-            if (pdef->is_string) {
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_value_text(input, frame, pdef)) return 0.0;
+            } else if (pdef->is_string) {
                 BasicString sval = {0};
                 parse_string_expression_heap(input, &sval);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, sval.data, sval.length);
                 basic_string_release(&sval);
             } else {
                 double val = evaluate_expression(input);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 lv->value = val;
             }
         }
@@ -3483,28 +4969,36 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
         int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':'));
 
         if (is_simple_var) {
-            int c_var_idx = find_variable(var_buf);
-            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
-            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
-            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            int c_var_idx = pdef->user_type_index >= 0
+                ? find_variable_raw_name(var_buf) : find_variable(var_buf);
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return 0;
+            } else {
+                frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
+                frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+                frame->byref_caller_frame[arg_idx] =
+                    call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            }
             *input = after_var;
         } else {
             frame->byref_caller_var_idx[arg_idx] = -1;
             frame->byref_caller_frame[arg_idx] = -1;
 
-            if (pdef->is_string) {
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_value_text(input, frame, pdef)) return 0;
+            } else if (pdef->is_string) {
                 BasicString sval = {0};
                 parse_string_expression_heap(input, &sval);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, sval.data, sval.length);
                 basic_string_release(&sval);
             } else {
                 double val = evaluate_expression(input);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 lv->value = val;
             }
         }
@@ -3574,27 +5068,37 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
         int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
         if (is_var_id && next_is_sep) {
-            int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
-            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
-            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
-            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            int c_var_idx = pdef->user_type_index >= 0
+                ? find_variable_raw_name(t_arg.text)
+                : resolve_token_variable(&ts->tokens[ts->pos]);
+            ts->pos++;
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return 0.0;
+            } else {
+                frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
+                frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+                frame->byref_caller_frame[arg_idx] =
+                    call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            }
         } else {
             frame->byref_caller_var_idx[arg_idx] = -1;
             frame->byref_caller_frame[arg_idx] = -1;
 
-            if (pdef->is_string) {
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_value_tok(ts, frame, pdef)) return 0.0;
+            } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
                 double val = evaluate_expression_tok(ts);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 lv->value = val;
             }
         }
@@ -3656,27 +5160,37 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
         int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
         if (is_var_id && next_is_sep) {
-            int c_var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
-            frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
-            frame->byref_caller_var_idx[arg_idx] = c_var_idx;
-            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            int c_var_idx = pdef->user_type_index >= 0
+                ? find_variable_raw_name(t_arg.text)
+                : resolve_token_variable(&ts->tokens[ts->pos]);
+            ts->pos++;
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return 0;
+            } else {
+                frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
+                frame->byref_caller_var_idx[arg_idx] = c_var_idx;
+                frame->byref_caller_frame[arg_idx] =
+                    call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+            }
         } else {
             frame->byref_caller_var_idx[arg_idx] = -1;
             frame->byref_caller_frame[arg_idx] = -1;
 
-            if (pdef->is_string) {
+            if (pdef->user_type_index >= 0) {
+                if (!bind_user_type_parameter_value_tok(ts, frame, pdef)) return 0;
+            } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
                 double val = evaluate_expression_tok(ts);
                 Variable *lv = &frame->local_vars[frame->local_var_count++];
                 memset(lv, 0, sizeof(Variable));
-                strncpy(lv->name, pdef->name, 31);
+                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 lv->value = val;
             }
         }
@@ -3734,6 +5248,26 @@ static double primary_tok(TokenStream *ts) {
         ProcedureDef *pfunc = proc_count > 0 ? find_procedure(token->text) : NULL;
         if (pfunc && pfunc->is_function) {
             return evaluate_function_call_numeric(pfunc, ts);
+        }
+
+        int member_index = -1;
+        int member_array_index = -1;
+        int is_member = user_type_count > 0
+            ? resolve_user_type_reference_tok(ts, token, &member_index,
+                                              &member_array_index)
+            : 0;
+        if (is_member != 0) {
+            if (is_member < 0) return 0;
+            Variable *member = get_variable_ptr(member_index);
+            if (!member || is_string_var(member->name)) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return 0;
+            }
+            if (member->name[strlen(member->name) - 1] == '#') last_expression_is_double = 1;
+            return member_array_index >= 0
+                ? (member->array && member_array_index < member->array_size
+                    ? member->array[member_array_index] : 0.0)
+                : member->value;
         }
 
         int idx = resolve_token_variable(token);
@@ -4205,6 +5739,25 @@ static double primary(const char **input) {
         ProcedureDef *pfunc = find_procedure(t.text);
         if (pfunc && pfunc->is_function) {
             return evaluate_function_call_numeric_text(pfunc, input);
+        }
+        int member_index = -1;
+        int member_array_index = -1;
+        int is_member = user_type_count > 0
+            ? resolve_user_type_reference_text(input, &t, &member_index,
+                                               &member_array_index)
+            : 0;
+        if (is_member != 0) {
+            if (is_member < 0) return 0;
+            Variable *member = get_variable_ptr(member_index);
+            if (!member || is_string_var(member->name)) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return 0;
+            }
+            if (member->name[strlen(member->name) - 1] == '#') last_expression_is_double = 1;
+            return member_array_index >= 0
+                ? (member->array && member_array_index < member->array_size
+                    ? member->array[member_array_index] : 0.0)
+                : member->value;
         }
         int idx = find_variable(t.text);
         Variable *v = (idx != -1) ? get_variable_ptr(idx) : NULL;
@@ -5581,8 +7134,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     Token type = get_next_token(&ptr);
                     UserType *user_type = find_user_type(type.text);
                     if (user_type) {
-                        find_variable(var.text);
-                        if (!instantiate_user_type(var.text, user_type, 0)) break;
+                        int idx = find_variable_raw_name(var.text);
+                        if (!declare_user_type_instance(idx, user_type, 0, NULL)) break;
                         const char *comma_saved = ptr;
                         if (get_next_token(&ptr).type != TOKEN_COMMA) ptr = comma_saved;
                         continue;
@@ -5627,9 +7180,21 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 int idx = find_variable(var.text);
                 const char *type_saved = ptr;
                 Token type_as = get_next_token(&ptr);
-                int fixed_length = 0;
                 if (type_as.type == TOKEN_AS) {
                     Token type = get_next_token(&ptr);
+                    UserType *user_type = find_user_type(type.text);
+                    if (user_type) {
+                        int record_idx = find_variable_raw_name(var.text);
+                        if (!declare_user_type_instance(record_idx, user_type, num_dims, dims)) break;
+                        arrays_dimensioned = 1;
+                        saved = ptr;
+                        Token comma = get_next_token(&ptr);
+                        if (comma.type != TOKEN_COMMA) {
+                            ptr = saved;
+                            break;
+                        }
+                        continue;
+                    }
                     Token star = get_next_token(&ptr);
                     Token length_token = get_next_token(&ptr);
                     if (strcasecmp(type.text, "STRING") != 0 || star.type != TOKEN_STAR ||
@@ -5637,9 +7202,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         report_runtime_error(ERR_SYNTAX_ERROR);
                         break;
                     }
-                    fixed_length = length_token.int_val;
                     vars[idx].string_declared = 1;
-                    vars[idx].string_fixed_length = (size_t)fixed_length;
+                    vars[idx].string_fixed_length = (size_t)length_token.int_val;
                     fixed_string_declarations_present = 1;
                 } else {
                     ptr = type_saved;
@@ -5649,7 +7213,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 int total_size = 1;
                 int dim_err = 0;
                 for (int i = 0; i < num_dims; i++) {
-                    int dim_size = (option_base == 0) ? (dims[i] + 1) : dims[i];
+                    int dim_size = dims[i] - option_base + 1;
                     if (dim_size <= 0) {
                         report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
                         dim_err = 1;
@@ -5675,7 +7239,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 vars[idx].array_size = total_size;
                 vars[idx].num_dims = num_dims;
-                for(int i=0; i<num_dims; i++) vars[idx].dims[i] = dims[i];
+                for(int i=0; i<num_dims; i++) {
+                    vars[idx].dims[i] = dims[i];
+                    vars[idx].lower_bounds[i] = option_base;
+                }
                 
                 arrays_dimensioned = 1;
                 
@@ -6110,37 +7677,51 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                             fflush(file_handles[fnum]);
                         }
                     } else {
-                        int len = (int)evaluate_expression(&ptr);
-                        sep = get_next_token(&ptr);
-                        char data[512] = "";
-                        if (sep.type == TOKEN_COMMA) {
-                            const char *expr_saved = ptr;
-                            Token tok = get_next_token(&ptr);
-                            if (tok.type == TOKEN_STRING) {
-                                strncpy(data, tok.text, sizeof(data) - 1);
-                            } else if (tok.type == TOKEN_IDENTIFIER && is_string_var(tok.text)) {
-                                int src_idx = find_variable(tok.text);
-                                int src_array_idx = parse_array_index(&ptr, src_idx);
-                                char temp[BASIC_STRING_MAX] = "";
-                                get_string_variable_value(src_idx, src_array_idx, temp, sizeof(temp));
-                                strncpy(data, temp, sizeof(data) - 1);
+                        const char *argument_start = ptr;
+                        Token argument = get_next_token(&ptr);
+                        int root_index = argument.type == TOKEN_IDENTIFIER
+                            ? find_existing_variable_raw_name(argument.text) : -1;
+                        UserTypeInstance record_instance;
+                        if (root_index >= 0 &&
+                            get_user_type_instance_for_root(root_index, &record_instance)) {
+                            int array_index = record_instance.num_dims > 0
+                                ? parse_array_index(&ptr, root_index) : -1;
+                            transfer_user_type_record(fnum, rec, root_index,
+                                                      array_index, 1);
+                        } else {
+                            ptr = argument_start;
+                            int len = (int)evaluate_expression(&ptr);
+                            sep = get_next_token(&ptr);
+                            char data[512] = "";
+                            if (sep.type == TOKEN_COMMA) {
+                                const char *expr_saved = ptr;
+                                Token tok = get_next_token(&ptr);
+                                if (tok.type == TOKEN_STRING) {
+                                    strncpy(data, tok.text, sizeof(data) - 1);
+                                } else if (tok.type == TOKEN_IDENTIFIER && is_string_var(tok.text)) {
+                                    int src_idx = find_variable(tok.text);
+                                    int src_array_idx = parse_array_index(&ptr, src_idx);
+                                    char temp[BASIC_STRING_MAX] = "";
+                                    get_string_variable_value(src_idx, src_array_idx, temp, sizeof(temp));
+                                    strncpy(data, temp, sizeof(data) - 1);
+                                } else {
+                                    ptr = expr_saved;
+                                    parse_string_expression(&ptr, data, sizeof(data));
+                                }
                             } else {
-                                ptr = expr_saved;
-                                parse_string_expression(&ptr, data, sizeof(data));
+                                ptr = saved;
                             }
-                        } else {
-                            ptr = saved;
-                        }
-                        if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                            report_runtime_error(ERR_BAD_FILE_NUMBER);
-                        } else {
-                            long offset = (long)((rec - 1) * len);
-                            fseek(file_handles[fnum], offset, SEEK_SET);
-                            char buf[BASIC_STRING_MAX];
-                            memset(buf, ' ', len);
-                            strncpy(buf, data, len);
-                            fwrite(buf, 1, len, file_handles[fnum]);
-                            fflush(file_handles[fnum]);
+                            if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+                                report_runtime_error(ERR_BAD_FILE_NUMBER);
+                            } else {
+                                long offset = (long)((rec - 1) * len);
+                                fseek(file_handles[fnum], offset, SEEK_SET);
+                                char buf[BASIC_STRING_MAX];
+                                memset(buf, ' ', len);
+                                strncpy(buf, data, len);
+                                fwrite(buf, 1, len, file_handles[fnum]);
+                                fflush(file_handles[fnum]);
+                            }
                         }
                     }
                 }
@@ -6203,29 +7784,43 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                             file_field_state[fnum].buffer[file_field_state[fnum].size] = '\0';
                         }
                     } else {
-                        int len = (int)evaluate_expression(&ptr);
-                        sep = get_next_token(&ptr);
-                        if (sep.type != TOKEN_COMMA) { ptr = saved; }
-                        else {
-                            Token var = get_next_token(&ptr);
-                            if (!(var.type == TOKEN_IDENTIFIER && is_string_var(var.text))) { ptr = saved; }
+                        const char *argument_start = ptr;
+                        Token argument = get_next_token(&ptr);
+                        int root_index = argument.type == TOKEN_IDENTIFIER
+                            ? find_existing_variable_raw_name(argument.text) : -1;
+                        UserTypeInstance record_instance;
+                        if (root_index >= 0 &&
+                            get_user_type_instance_for_root(root_index, &record_instance)) {
+                            int array_index = record_instance.num_dims > 0
+                                ? parse_array_index(&ptr, root_index) : -1;
+                            transfer_user_type_record(fnum, rec, root_index,
+                                                      array_index, 0);
+                        } else {
+                            ptr = argument_start;
+                            int len = (int)evaluate_expression(&ptr);
+                            sep = get_next_token(&ptr);
+                            if (sep.type != TOKEN_COMMA) { ptr = saved; }
                             else {
-                                int idx = find_variable(var.text);
-                                int array_idx = parse_array_index(&ptr, idx);
-                                if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                                    report_runtime_error(ERR_BAD_FILE_NUMBER);
-                                } else {
-                                    long offset = (long)((rec - 1) * len);
-                                    fseek(file_handles[fnum], offset, SEEK_SET);
-                                    char buf[BASIC_STRING_MAX];
-                                    size_t r = fread(buf, 1, len, file_handles[fnum]);
-                                    if (r < (size_t)len) {
-                                        for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
+                                Token var = get_next_token(&ptr);
+                                if (!(var.type == TOKEN_IDENTIFIER && is_string_var(var.text))) { ptr = saved; }
+                                else {
+                                    int idx = find_variable(var.text);
+                                    int array_idx = parse_array_index(&ptr, idx);
+                                    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+                                        report_runtime_error(ERR_BAD_FILE_NUMBER);
+                                    } else {
+                                        long offset = (long)((rec - 1) * len);
+                                        fseek(file_handles[fnum], offset, SEEK_SET);
+                                        char buf[BASIC_STRING_MAX];
+                                        size_t r = fread(buf, 1, len, file_handles[fnum]);
+                                        if (r < (size_t)len) {
+                                            for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
+                                        }
+                                        buf[len] = '\0';
+                                        int trim = len - 1;
+                                        while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
+                                        set_string_variable(idx, array_idx, buf);
                                     }
-                                    buf[len] = '\0';
-                                    int trim = len - 1;
-                                    while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
-                                    set_string_variable(idx, array_idx, buf);
                                 }
                             }
                         }
@@ -6369,9 +7964,11 @@ void interpret_line(const char *input, int is_direct, int *last_line_num, int so
 
 void run_program() {
     clear_variables(1); // Keep registry for RUN to maintain pre-tokenized indices
-    scan_user_types();
     stop_running = 0;
     runtime_error_occurred = 0;
+    if (!scan_user_types() || runtime_error_occurred) {
+        return;
+    }
     gosub_ptr = 0;
     while_ptr = 0;
     for_ptr = 0;
@@ -6935,10 +8532,32 @@ void run_program() {
                 }
                 // Direct handling of assignments
                 int idx = resolve_token_variable(current_token);
-                int array_idx = parse_array_index_tok(&ts, idx);
+                int array_idx = -1;
+                int is_member = user_type_count > 0
+                    ? resolve_user_type_reference_tok(&ts, current_token, &idx,
+                                                      &array_idx)
+                    : 0;
+                if (is_member < 0) break;
+                if (!is_member) {
+                    UserTypeInstance record_instance;
+                    if (user_type_count > 0) {
+                        int raw_index = find_existing_variable_raw_name(t.text);
+                        if (raw_index >= 0 &&
+                            get_user_type_instance_for_root(raw_index, &record_instance)) {
+                            idx = raw_index;
+                        }
+                    }
+                    array_idx = parse_array_index_tok(&ts, idx);
+                }
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
                     ts.pos++;
-                    if (is_string_var(t.text)) {
+                    UserTypeInstance record_instance;
+                    if (user_type_count > 0 &&
+                        get_user_type_instance_for_root(idx, &record_instance)) {
+                        assign_user_type_value_tok(&ts, idx, array_idx);
+                    } else if (is_member
+                            ? is_string_var(get_variable_ptr(idx)->name)
+                            : is_string_var(t.text)) {
                         BasicString value = {0};
                         if (parse_string_expression_tok_heap(&ts, &value)) {
                             assign_string_variable_value(idx, array_idx, value.data, value.length);

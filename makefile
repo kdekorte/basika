@@ -22,10 +22,13 @@ $(TARGET): $(OBJ)
 
 $(OBJ): src/common.h src/lexer.h
 
-.PHONY: test clean install uninstall package
+.PHONY: test test-performance clean install uninstall package
 
 test: $(TARGET)
 	./tests/run_tests.sh
+
+test-performance: $(TARGET)
+	bash tests/scripts/performance_guard.sh
 
 clean:
 	rm -f $(OBJ) $(TARGET)

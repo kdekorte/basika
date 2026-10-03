@@ -1,0 +1,46 @@
+10 TYPE Point
+20 X AS INTEGER
+30 Y AS INTEGER
+40 END TYPE
+50 TYPE OtherPoint
+60 X AS INTEGER
+70 Y AS INTEGER
+80 END TYPE
+90 SUB MovePoint(P AS Point)
+100 P.X = P.X + 10
+110 END SUB
+115 SUB ForwardPoint(P AS Point)
+116 CALL MovePoint(P)
+117 END SUB
+118 SUB AddPoints(P() AS Point)
+119 P(2).X = P(2).X + 5
+120 END SUB
+125 SUB LocalPoint(V AS INTEGER)
+126 DIM LOCALP AS Point
+127 LOCALP.X = V
+128 PRINT LTRIM$(STR$(LOCALP.X))
+129 END SUB
+121 FUNCTION ChangeAndReturn(P AS Point)
+122 P.X = P.X + 1
+123 ChangeAndReturn = P.X
+124 END FUNCTION
+130 OPTION BASE 1
+140 DIM A AS Point
+150 DIM B AS Point
+160 DIM C(2) AS Point
+170 DIM WRONG AS OtherPoint
+180 A.X = 3
+190 A.Y = 4
+200 B = A
+210 C(2) = B
+220 CALL MovePoint(A)
+230 CALL ForwardPoint(A)
+240 CALL MovePoint((B))
+250 CALL AddPoints(C)
+260 PRINT LTRIM$(STR$(A.X)); ","; LTRIM$(STR$(B.X)); ","; LTRIM$(STR$(C(2).X))
+270 RESULT = ChangeAndReturn(A)
+280 COPIED = ChangeAndReturn((B))
+290 PRINT LTRIM$(STR$(RESULT)); ","; LTRIM$(STR$(COPIED)); ","; LTRIM$(STR$(A.X)); ","; LTRIM$(STR$(B.X))
+300 CALL LocalPoint(5)
+310 CALL LocalPoint(7)
+320 END
