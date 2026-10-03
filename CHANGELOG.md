@@ -8,6 +8,7 @@ All notable changes to this project are recorded in this file.
 - **Custom Screen Window Sizing**: `_NEWIMAGE(width, height, colors)` now resizes the native window to match the requested canvas dimensions.
 - **Graphics Showcase**: Added a high-resolution 1280x1024 demo featuring alpha-blended drawing primitives, palette swatches, a layered planet, and animation. Added graphics regression coverage for alpha blending.
 - **Interpreter and Demo Performance**: Compiled eligible numeric expressions when programs load and cached procedure variable lookups. The `basica.bas` 10-million-iteration benchmark improved from about 1.17 s to 0.64-0.67 s, with the expected result unchanged. Also optimized translucent filled-circle rendering; the `boing_ball.bas` demo benefits from faster drawing and variable access.
+- **Boing Ball Demo**: Improved floor-grid visibility with brighter, thicker lines; moved the ball's bounce point forward onto the floor grid; and made its alpha shadow scale and fade with its height above the floor.
 
 ## 0.99.5 — 2026-10-02
 

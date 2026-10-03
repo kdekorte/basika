@@ -8,6 +8,7 @@ DIM SIN_ANGLE(96), COS_ANGLE(96)
 PI = 3.14159
 BALL_RADIUS = SphereHalfWidth(60, 0)
 FLOOR_Y = 330
+BALL_CONTACT_Y = FLOOR_Y + 34
 BALL_X = 140
 BALL_Y = 115
 OLD_X = BALL_X
@@ -20,7 +21,7 @@ CALL InitializeTextureAngles(PI)
 CALL DrawBackdrop((FLOOR_Y))
 
 WHILE 1
-	CALL RestoreBallArea((OLD_X), (OLD_Y), (BALL_RADIUS), (FLOOR_Y))
+	CALL RestoreBallArea((OLD_X), (OLD_Y), (BALL_RADIUS), (FLOOR_Y), (BALL_CONTACT_Y))
 
 	BALL_X = BALL_X + VELOCITY_X
 	BALL_Y = BALL_Y + VELOCITY_Y
@@ -28,9 +29,9 @@ WHILE 1
 
 	IF BALL_X < 138 THEN BALL_X = 138: VELOCITY_X = -VELOCITY_X
 	IF BALL_X > 502 THEN BALL_X = 502: VELOCITY_X = -VELOCITY_X
-	IF BALL_Y > FLOOR_Y - BALL_RADIUS THEN BALL_Y = FLOOR_Y - BALL_RADIUS: VELOCITY_Y = -11.2
+	IF BALL_Y > BALL_CONTACT_Y - BALL_RADIUS THEN BALL_Y = BALL_CONTACT_Y - BALL_RADIUS: VELOCITY_Y = -11.2
 
-	CALL DrawBall((BALL_X), (BALL_Y), (BALL_RADIUS), (FRAME), (PI))
+	CALL DrawBall((BALL_X), (BALL_Y), (BALL_RADIUS), (FRAME), (PI), (BALL_CONTACT_Y))
 	OLD_X = BALL_X
 	OLD_Y = BALL_Y
 	FRAME = FRAME + 1
@@ -51,31 +52,56 @@ SUB InitializeTextureAngles(PiValue)
 END SUB
 
 SUB DrawBackdrop(FloorY)
-	LINE (76, 20)-(564, FloorY), 13, B
+	REM Bright cyan, doubled strokes stay visible after the canvas is scaled down.
+	LINE (76, 20)-(564, FloorY), 11, B
+	LINE (77, 21)-(563, FloorY - 1), 11, B
 	FOR GridX = 101 TO 539 STEP 25
-		LINE (GridX, 20)-(GridX, FloorY), 13
+		LINE (GridX, 20)-(GridX, FloorY), 11
+		LINE (GridX + 1, 20)-(GridX + 1, FloorY), 11
 	NEXT GridX
 	FOR GridY = 45 TO 305 STEP 25
-		LINE (76, GridY)-(564, GridY), 13
+		LINE (76, GridY)-(564, GridY), 11
+		LINE (76, GridY + 1)-(564, GridY + 1), 11
 	NEXT GridY
-	LINE (76, FloorY)-(22, 465), 13
-	LINE (564, FloorY)-(618, 465), 13
+	LINE (76, FloorY)-(22, 465), 11
+	LINE (77, FloorY)-(23, 465), 11
+	LINE (564, FloorY)-(618, 465), 11
+	LINE (563, FloorY)-(617, 465), 11
 	FOR GridX = 76 TO 564 STEP 25
-		LINE (GridX, FloorY)-(22 + (GridX - 76) * 600 / 488, 465), 13
+		BottomX = 22 + (GridX - 76) * 600 / 488
+		LINE (GridX, FloorY)-(BottomX, 465), 11
+		LINE (GridX + 1, FloorY)-(BottomX + 1, 465), 11
 	NEXT GridX
 	FOR Row = 1 TO 8
 		GridY = FloorY + Row * Row * 135 / 64
-		LINE (76 - (GridY - FloorY) * 54 / 135, GridY)-(564 + (GridY - FloorY) * 54 / 135, GridY), 13
+		LeftX = 76 - (GridY - FloorY) * 54 / 135
+		RightX = 564 + (GridY - FloorY) * 54 / 135
+		LINE (LeftX, GridY)-(RightX, GridY), 11
+		LINE (LeftX, GridY + 1)-(RightX, GridY + 1), 11
 	NEXT Row
 END SUB
 
-SUB RestoreBallArea(OldX, OldY, Radius, FloorY)
-	LINE (OldX - Radius - 4, OldY - Radius - 4)-(OldX + Radius + 50, OldY + Radius + 21), 7, BF
+SUB RestoreBallArea(OldX, OldY, Radius, FloorY, ContactY)
+	HeightAboveFloor = ContactY - (OldY + Radius)
+	IF HeightAboveFloor < 0 THEN HeightAboveFloor = 0
+	ShadowRadius = 32 + HeightAboveFloor * .1
+	ShadowOffsetX = 18 + HeightAboveFloor * .1
+	ShadowRight = OldX + ShadowOffsetX + ShadowRadius + 4
+	IF ShadowRight < OldX + Radius + 4 THEN ShadowRight = OldX + Radius + 4
+	RestoreBottom = ContactY + ShadowRadius + 4
+	IF RestoreBottom < OldY + Radius + 40 THEN RestoreBottom = OldY + Radius + 40
+	LINE (OldX - Radius - 4, OldY - Radius - 4)-(ShadowRight, RestoreBottom), 7, BF
 	CALL DrawBackdrop((FloorY))
 END SUB
 
-SUB DrawBall(BallX, BallY, Radius, Frame, PiValue)
-	CIRCLE (BallX + 45, BallY + 20), Radius - 3, 0, 2, 112
+SUB DrawBall(BallX, BallY, Radius, Frame, PiValue, ContactY)
+	HeightAboveFloor = ContactY - (BallY + Radius)
+	IF HeightAboveFloor < 0 THEN HeightAboveFloor = 0
+	ShadowRadius = 32 + HeightAboveFloor * .1
+	ShadowOffsetX = 18 + HeightAboveFloor * .1
+	ShadowAlpha = 160 - HeightAboveFloor * .35
+	IF ShadowAlpha < 80 THEN ShadowAlpha = 80
+	CIRCLE (BallX + ShadowOffsetX, ContactY), ShadowRadius, 0, 2, ShadowAlpha
 	CIRCLE (BallX, BallY), Radius, 15, 2
 	CALL DrawSphereTexture((BallX), (BallY), (Radius), (Frame), (PiValue))
 	CIRCLE (BallX, BallY), Radius, 8
