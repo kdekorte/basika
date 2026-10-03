@@ -1,87 +1,152 @@
-10 REM BOING BALL - AN AMIGA-STYLE RED AND WHITE CHECKER SPHERE
-20 REM RUN WITH: basika -w demo/boing_ball.bas
-30 SCREEN 12: CLS
-35 _AUTODISPLAY OFF
-40 LINE (0, 0)-(639, 479), 7, BF
-50 R = 60: FLOOR = 330: X = 140: Y = 115: OX = X: OY = Y: VX = 4: VY = 0: FRAME = 0
-55 DIM SIN_ANGLE(64): DIM COS_ANGLE(64)
-60 GOSUB 500
-70 REM ERASE THE LAST SPRITE, THEN RESTORE THE WIRE-FRAME ROOM BEHIND IT
-80 LINE (OX - R - 4, OY - R - 4)-(OX + R + 50, OY + R + 21), 7, BF
-90 GOSUB 500
-105 REM BOUNCE PHYSICS
-110 X = X + VX: Y = Y + VY: VY = VY + .62
-120 IF X < 138 THEN X = 138: VX = -VX
-130 IF X > 502 THEN X = 502: VX = -VX
-140 IF Y > FLOOR - R THEN Y = FLOOR - R: VY = -11.2
-150 REM THE OFFSET DISK IS A CLASSIC CAST SHADOW ON THE BACK WALL
-160 CIRCLE (X + 45, Y + 20), R - 3, 8, 2
-170 REM WHITE SPHERE BASE. THE RED TILES BELOW STAY INSIDE ITS CURVED EDGE.
-180 CIRCLE (X, Y), R, 15, 2
-190 GOSUB 600
-310 REM OUTLINE AND HIGHLIGHT GIVE THE TILES SOME VOLUME
-320 CIRCLE (X, Y), R, 8
-350 CIRCLE (X - 24, Y - 28), 4, 15, 2
-360 OX = X: OY = Y: FRAME = FRAME + 1
-365 _DISPLAY
-370 K$ = INKEY$: IF K$ <> "" THEN END
-380 SLEEP 18
-390 GOTO 80
-500 REM MAGENTA GRID: A FLAT BACK WALL JOINED TO A PERSPECTIVE FLOOR
-510 LINE (76, 20)-(564, FLOOR), 13, B
-520 FOR G = 101 TO 539 STEP 25: LINE (G, 20)-(G, FLOOR), 13: NEXT G
-530 FOR H = 45 TO 305 STEP 25: LINE (76, H)-(564, H), 13: NEXT H
-540 LINE (76, FLOOR)-(22, 465), 13
-550 LINE (564, FLOOR)-(618, 465), 13
-560 FOR G = 76 TO 564 STEP 25: LINE (G, FLOOR)-(22 + (G - 76) * 600 / 488, 465), 13: NEXT G
-570 FOR J = 1 TO 8: H = FLOOR + J * J * 135 / 64: LINE (76 - (H - FLOOR) * 54 / 135, H)-(564 + (H - FLOOR) * 54 / 135, H), 13: NEXT J
-580 RETURN
-600 REM MAP SPANS THROUGH A TILTED, ROTATING SPHERICAL CHECKER TEXTURE
-610 PI = 3.14159: PHASE = (FRAME MOD 64) * PI / 32: TILT = .62: ROLL = .38 + SIN(PHASE) * .12
-620 CP = COS(PHASE): SP = SIN(PHASE): CT = COS(TILT): ST = SIN(TILT): CR = COS(ROLL): SR = SIN(ROLL)
-630 FOR K = 0 TO 64
-640 ANGLE = -PI / 2 + K * PI / 64
-650 SIN_ANGLE(K) = SIN(ANGLE): COS_ANGLE(K) = COS(ANGLE)
-660 NEXT K
-670 FOR DY = -59 TO 59
-680 Q = SQR(R * R - DY * DY): PREV_COLOR = 15
-690 FOR K = 0 TO 63
-700 DX1 = INT(Q * SIN_ANGLE(K)): DX2 = INT(Q * SIN_ANGLE(K + 1))
-710 DX = INT((DX1 + DX2) / 2)
-720 Z = SQR(R * R - DX * DX - DY * DY)
-730 U0 = DX * CP + Z * SP
-740 Z1 = Z * CP - DX * SP
-750 V0 = DY * CT - Z1 * ST
-760 W = DY * ST + Z1 * CT
-765 U = U0 * CR - V0 * SR: V = U0 * SR + V0 * CR
-770 IF ABS(W) < .001 THEN GOTO 810
-780 LONG = ATN(U / W)
-790 IF W < 0 AND U >= 0 THEN LONG = LONG + PI
-800 IF W < 0 AND U < 0 THEN LONG = LONG - PI
-806 GOTO 830
-810 IF U >= 0 THEN LONG = PI / 2 ELSE LONG = -PI / 2
-830 QLAT = SQR(U * U + W * W)
-840 IF QLAT < .001 THEN GOTO 870
-850 LAT = ATN(V / QLAT): GOTO 880
-870 IF V >= 0 THEN LAT = PI / 2 ELSE LAT = -PI / 2
-880 LATROW = INT((LAT + PI / 2) * 12 / PI)
-890 IF LATROW < 0 THEN LATROW = 0
-900 IF LATROW > 11 THEN LATROW = 11
-910 LONCOL = INT((LONG + PI) * 8 / PI)
-920 IF LONCOL < 0 THEN LONCOL = 0
-930 IF LONCOL > 15 THEN LONCOL = 15
-940 PARITY = (LATROW + LONCOL) MOD 2
-950 LIGHT = Z - DX * .28 - DY * .32
-960 TILE_COLOR = 12
-970 IF PARITY = 1 THEN TILE_COLOR = 15
-980 IF LIGHT < 38 AND PARITY = 0 THEN TILE_COLOR = 4
-990 IF LIGHT < 38 AND PARITY = 1 THEN TILE_COLOR = 7
-1000 IF LIGHT < 18 AND PARITY = 0 THEN TILE_COLOR = 4
-1010 IF LIGHT < 18 AND PARITY = 1 THEN TILE_COLOR = 8
-1020 IF K = 0 THEN SEG = DX1: PREV_COLOR = TILE_COLOR
-1030 IF K > 0 AND TILE_COLOR <> PREV_COLOR THEN LINE (X + SEG, Y + DY)-(X + DX1, Y + DY + 1), PREV_COLOR, BF: SEG = DX1
-1040 PREV_COLOR = TILE_COLOR
-1050 IF K = 63 THEN LINE (X + SEG, Y + DY)-(X + DX2, Y + DY + 1), PREV_COLOR, BF
-1060 NEXT K
-1070 NEXT DY
-1080 RETURN
+REM BOING BALL - AN AMIGA-STYLE RED AND WHITE CHECKER SPHERE
+REM Run with: basika -w demo/boing_ball.bas
+SCREEN 12: CLS
+_AUTODISPLAY OFF
+LINE (0, 0)-(639, 479), 7, BF
+
+DIM SIN_ANGLE(96), COS_ANGLE(96)
+PI = 3.14159
+BALL_RADIUS = SphereHalfWidth(60, 0)
+FLOOR_Y = 330
+BALL_X = 140
+BALL_Y = 115
+OLD_X = BALL_X
+OLD_Y = BALL_Y
+VELOCITY_X = 4
+VELOCITY_Y = 0
+FRAME = 0
+
+CALL InitializeTextureAngles(PI)
+CALL DrawBackdrop((FLOOR_Y))
+
+WHILE 1
+	CALL RestoreBallArea((OLD_X), (OLD_Y), (BALL_RADIUS), (FLOOR_Y))
+
+	BALL_X = BALL_X + VELOCITY_X
+	BALL_Y = BALL_Y + VELOCITY_Y
+	VELOCITY_Y = VELOCITY_Y + .62
+
+	IF BALL_X < 138 THEN BALL_X = 138: VELOCITY_X = -VELOCITY_X
+	IF BALL_X > 502 THEN BALL_X = 502: VELOCITY_X = -VELOCITY_X
+	IF BALL_Y > FLOOR_Y - BALL_RADIUS THEN BALL_Y = FLOOR_Y - BALL_RADIUS: VELOCITY_Y = -11.2
+
+	CALL DrawBall((BALL_X), (BALL_Y), (BALL_RADIUS), (FRAME), (PI))
+	OLD_X = BALL_X
+	OLD_Y = BALL_Y
+	FRAME = FRAME + 1
+
+	_DISPLAY
+	IF INKEY$ <> "" THEN END
+	SLEEP 18
+WEND
+END
+
+SUB InitializeTextureAngles(PiValue)
+	SHARED SIN_ANGLE, COS_ANGLE
+	FOR Index = 0 TO 96
+		Angle = -PiValue / 2 + Index * PiValue / 96
+		SIN_ANGLE(Index) = SIN(Angle)
+		COS_ANGLE(Index) = COS(Angle)
+	NEXT Index
+END SUB
+
+SUB DrawBackdrop(FloorY)
+	LINE (76, 20)-(564, FloorY), 13, B
+	FOR GridX = 101 TO 539 STEP 25
+		LINE (GridX, 20)-(GridX, FloorY), 13
+	NEXT GridX
+	FOR GridY = 45 TO 305 STEP 25
+		LINE (76, GridY)-(564, GridY), 13
+	NEXT GridY
+	LINE (76, FloorY)-(22, 465), 13
+	LINE (564, FloorY)-(618, 465), 13
+	FOR GridX = 76 TO 564 STEP 25
+		LINE (GridX, FloorY)-(22 + (GridX - 76) * 600 / 488, 465), 13
+	NEXT GridX
+	FOR Row = 1 TO 8
+		GridY = FloorY + Row * Row * 135 / 64
+		LINE (76 - (GridY - FloorY) * 54 / 135, GridY)-(564 + (GridY - FloorY) * 54 / 135, GridY), 13
+	NEXT Row
+END SUB
+
+SUB RestoreBallArea(OldX, OldY, Radius, FloorY)
+	LINE (OldX - Radius - 4, OldY - Radius - 4)-(OldX + Radius + 50, OldY + Radius + 21), 7, BF
+	CALL DrawBackdrop((FloorY))
+END SUB
+
+SUB DrawBall(BallX, BallY, Radius, Frame, PiValue)
+	CIRCLE (BallX + 45, BallY + 20), Radius - 3, 0, 2, 112
+	CIRCLE (BallX, BallY), Radius, 15, 2
+	CALL DrawSphereTexture((BallX), (BallY), (Radius), (Frame), (PiValue))
+	CIRCLE (BallX, BallY), Radius, 8
+	CIRCLE (BallX - 24, BallY - 28), 4, 15, 2
+END SUB
+
+SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
+	SHARED SIN_ANGLE, COS_ANGLE
+
+	Phase = (Frame MOD 64) * PiValue / 32
+	Tilt = .62
+	Roll = .38 + SIN(Phase) * .12
+	CosPhase = COS(Phase)
+	SinPhase = SIN(Phase)
+	CosTilt = COS(Tilt)
+	SinTilt = SIN(Tilt)
+	CosRoll = COS(Roll)
+	SinRoll = SIN(Roll)
+
+	FOR DeltaY = -59 TO 59 STEP 2
+		HalfWidth = SQR(Radius * Radius - DeltaY * DeltaY)
+		PreviousColor = 15
+
+		FOR Segment = 0 TO 95
+			X1 = INT(HalfWidth * SIN_ANGLE(Segment))
+			X2 = INT(HalfWidth * SIN_ANGLE(Segment + 1))
+			DeltaX = INT((X1 + X2) / 2)
+			Depth = SQR(Radius * Radius - DeltaX * DeltaX - DeltaY * DeltaY)
+
+			U0 = DeltaX * CosPhase + Depth * SinPhase
+			Z1 = Depth * CosPhase - DeltaX * SinPhase
+			V0 = DeltaY * CosTilt - Z1 * SinTilt
+			W = DeltaY * SinTilt + Z1 * CosTilt
+			U = U0 * CosRoll - V0 * SinRoll
+			V = U0 * SinRoll + V0 * CosRoll
+
+			IF ABS(W) < .001 AND W < 0 THEN W = -.001
+			IF ABS(W) < .001 AND W >= 0 THEN W = .001
+			Longitude = ATN(U / W)
+			IF W < 0 AND U >= 0 THEN Longitude = Longitude + PiValue
+			IF W < 0 AND U < 0 THEN Longitude = Longitude - PiValue
+
+			LatitudeRadius = SQR(U * U + W * W)
+			IF LatitudeRadius < .001 AND V >= 0 THEN Latitude = PiValue / 2
+			IF LatitudeRadius < .001 AND V < 0 THEN Latitude = -PiValue / 2
+			IF LatitudeRadius >= .001 THEN Latitude = ATN(V / LatitudeRadius)
+
+			LatitudeRow = INT((Latitude + PiValue / 2) * 12 / PiValue)
+			IF LatitudeRow < 0 THEN LatitudeRow = 0
+			IF LatitudeRow > 11 THEN LatitudeRow = 11
+			LongitudeColumn = INT((Longitude + PiValue) * 8 / PiValue)
+			IF LongitudeColumn < 0 THEN LongitudeColumn = 0
+			IF LongitudeColumn > 15 THEN LongitudeColumn = 15
+
+			Parity = (LatitudeRow + LongitudeColumn) MOD 2
+			Light = Depth - DeltaX * .28 - DeltaY * .32
+			TileColor = 12
+			IF Parity = 1 THEN TileColor = 15
+			IF Light < 38 AND Parity = 0 THEN TileColor = 4
+			IF Light < 38 AND Parity = 1 THEN TileColor = 7
+			IF Light < 18 AND Parity = 0 THEN TileColor = 4
+			IF Light < 18 AND Parity = 1 THEN TileColor = 8
+
+			IF Segment = 0 THEN RunStart = X1: PreviousColor = TileColor
+			IF Segment > 0 AND TileColor <> PreviousColor THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X1, CenterY + DeltaY + 2), PreviousColor, BF: RunStart = X1
+			IF Segment > 0 THEN PreviousColor = TileColor
+			IF Segment = 95 THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X2, CenterY + DeltaY + 2), PreviousColor, BF
+		NEXT Segment
+	NEXT DeltaY
+END SUB
+
+FUNCTION SphereHalfWidth(Radius, RowValue)
+	SphereHalfWidth = SQR(Radius * Radius - RowValue * RowValue)
+END FUNCTION
