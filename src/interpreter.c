@@ -40,6 +40,7 @@ static int var_hash_initialized = 0;
 typedef struct {
     Token *tokens;
     int pos;
+    Statement *statement;
 } TokenStream;
 
 static int print_col = 0;
@@ -744,7 +745,7 @@ static int is_string_var(const char *name) {
 }
 
 // Forward declaration for is_string_token (used in parse_string_expression_tok)
-static int is_string_token(Token t);
+static int is_string_token(const Token *t);
 
 typedef struct BasicStringPoolSlot {
     BasicString value;
@@ -1051,10 +1052,7 @@ static int find_variable_index(const char *normalized) {
 static int resolve_token_variable(Token *token) {
     if (!token || token->type != TOKEN_IDENTIFIER) return -1;
 
-    size_t len = strlen(token->text);
-    char last = len ? token->text[len - 1] : '\0';
-    int explicit_type = last == '$' || last == '%' || last == '!' || last == '#';
-    if (token->var_idx != -1 && (explicit_type || token->type_generation == default_type_generation)) {
+    if (token->var_idx != -1 && token->type_generation == default_type_generation) {
         return token->var_idx;
     }
 
@@ -1276,7 +1274,7 @@ static void compile_user_function_expression(UserFunction *function) {
     function->compiled_node_count = 0;
     function->compiled_root = -1;
     function->has_compiled_expression = 0;
-    TokenStream ts = {tokens, 0};
+    TokenStream ts = {tokens, 0, NULL};
     int root = compile_or(&ts, function);
     if (root >= 0 && ts.tokens[ts.pos].type == TOKEN_EOF) {
         function->compiled_root = root;
@@ -1834,7 +1832,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             char c = ' ';
             BasicString arg_buf = {0};
-            if (is_string_token(ts->tokens[ts->pos])) {
+            if (is_string_token(&ts->tokens[ts->pos])) {
                 if (!parse_string_expression_tok_heap(ts, &arg_buf)) return 0;
                 if (arg_buf.length > 0) c = arg_buf.data[0];
             } else {
@@ -1964,7 +1962,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             ts->pos++;
             ts->pos++;
             BasicString arg_val = {0};
-            int is_str = is_string_token(ts->tokens[ts->pos]);
+            int is_str = is_string_token(&ts->tokens[ts->pos]);
             if (is_str) {
                 if (!parse_string_expression_tok_heap(ts, &arg_val)) return 0;
                 char *ev = getenv((const char *)arg_val.data);
@@ -2527,19 +2525,243 @@ void basic_output(const char *text) { // Made non-static
 double evaluate_expression(const char **input);
 static double primary(const char **input);
 
-static int is_string_token(Token t) {
-    if (t.type == TOKEN_STRING) return 1;
-    if (t.type == TOKEN_IDENTIFIER && is_string_var(t.text)) return 1;
-    if (t.text[0] != '\0' && t.text[strlen(t.text)-1] == '$') return 1;
-    return (t.type == TOKEN_CHR || t.type == TOKEN_LEFT || t.type == TOKEN_RIGHT ||
-            t.type == TOKEN_MID || t.type == TOKEN_UCASE || t.type == TOKEN_LCASE ||
-            t.type == TOKEN_TRIM || t.type == TOKEN_LTRIM || t.type == TOKEN_RTRIM ||
-            t.type == TOKEN_STR || t.type == TOKEN_HEX || t.type == TOKEN_OCT ||
-            t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD ||
-            t.type == TOKEN_STRING_FUNC || t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE || t.type == TOKEN_INKEY || t.type == TOKEN_GETS || t.type == TOKEN_ENVIRON ||
-            t.type == TOKEN_TIME || t.type == TOKEN_DATE || t.type == TOKEN_TAB ||
-            t.type == TOKEN_SPACE || t.type == TOKEN_SPC ||
-            t.type == TOKEN_ARGVS || t.type == TOKEN_COMMANDS);
+static int is_string_token(const Token *t) {
+    if (t->type == TOKEN_STRING) return 1;
+    if (t->type == TOKEN_IDENTIFIER && is_string_var(t->text)) return 1;
+    return (t->type == TOKEN_CHR || t->type == TOKEN_LEFT || t->type == TOKEN_RIGHT ||
+            t->type == TOKEN_MID || t->type == TOKEN_UCASE || t->type == TOKEN_LCASE ||
+            t->type == TOKEN_TRIM || t->type == TOKEN_LTRIM || t->type == TOKEN_RTRIM ||
+            t->type == TOKEN_STR || t->type == TOKEN_HEX || t->type == TOKEN_OCT ||
+            t->type == TOKEN_MKI || t->type == TOKEN_MKS || t->type == TOKEN_MKD ||
+            t->type == TOKEN_STRING_FUNC || t->type == TOKEN_DEFLATE || t->type == TOKEN_INFLATE || t->type == TOKEN_INKEY || t->type == TOKEN_GETS || t->type == TOKEN_ENVIRON ||
+            t->type == TOKEN_TIME || t->type == TOKEN_DATE || t->type == TOKEN_TAB ||
+            t->type == TOKEN_SPACE || t->type == TOKEN_SPC ||
+            t->type == TOKEN_ARGVS || t->type == TOKEN_COMMANDS);
+}
+
+#define MAX_CACHED_EXPRESSION_INSTRUCTIONS 256
+
+enum {
+    CEXPR_NUMBER,
+    CEXPR_VARIABLE,
+    CEXPR_NEGATE,
+    CEXPR_ADD,
+    CEXPR_SUBTRACT,
+    CEXPR_MULTIPLY,
+    CEXPR_DIVIDE,
+    CEXPR_MOD,
+    CEXPR_IDIV,
+    CEXPR_EQUAL,
+    CEXPR_NOT_EQUAL,
+    CEXPR_LESS,
+    CEXPR_LESS_EQUAL,
+    CEXPR_GREATER,
+    CEXPR_GREATER_EQUAL
+};
+
+typedef struct {
+    Statement *statement;
+    int pos;
+    int instruction_count;
+    int failed;
+    CompiledExpressionInstruction instructions[MAX_CACHED_EXPRESSION_INSTRUCTIONS];
+} CachedExpressionParser;
+
+static int emit_cached_expression(CachedExpressionParser *parser, unsigned char opcode, int token_index, double number) {
+    if (parser->instruction_count >= MAX_CACHED_EXPRESSION_INSTRUCTIONS) {
+        parser->failed = 1;
+        return 0;
+    }
+    parser->instructions[parser->instruction_count++] = (CompiledExpressionInstruction){
+        .opcode = opcode,
+        .token_index = token_index,
+        .number = number
+    };
+    return 1;
+}
+
+static int parse_cached_relational(CachedExpressionParser *parser);
+
+static int parse_cached_primary(CachedExpressionParser *parser) {
+    Token *token = &parser->statement->tokens[parser->pos];
+    if (token->type == TOKEN_NUMBER) {
+        int token_index = parser->pos++;
+        return emit_cached_expression(parser, CEXPR_NUMBER, token_index, token->double_val);
+    }
+    if (token->type == TOKEN_IDENTIFIER) {
+        if (is_string_var(token->text) ||
+            strcasecmp(token->text, "ERR") == 0 ||
+            strcasecmp(token->text, "ERL") == 0 ||
+            ((token->text[0] == 'F' || token->text[0] == 'f') &&
+             (token->text[1] == 'N' || token->text[1] == 'n')) ||
+            parser->statement->tokens[parser->pos + 1].type == TOKEN_LPAREN) {
+            parser->failed = 1;
+            return 0;
+        }
+        int token_index = parser->pos++;
+        return emit_cached_expression(parser, CEXPR_VARIABLE, token_index, 0.0);
+    }
+    if (token->type == TOKEN_LPAREN) {
+        parser->pos++;
+        if (!parse_cached_relational(parser) ||
+            parser->statement->tokens[parser->pos].type != TOKEN_RPAREN) {
+            parser->failed = 1;
+            return 0;
+        }
+        parser->pos++;
+        return 1;
+    }
+    parser->failed = 1;
+    return 0;
+}
+
+static int parse_cached_unary(CachedExpressionParser *parser) {
+    TokenType type = parser->statement->tokens[parser->pos].type;
+    if (type == TOKEN_PLUS) {
+        parser->pos++;
+        return parse_cached_unary(parser);
+    }
+    if (type == TOKEN_MINUS) {
+        parser->pos++;
+        if (!parse_cached_unary(parser)) return 0;
+        return emit_cached_expression(parser, CEXPR_NEGATE, -1, 0.0);
+    }
+    return parse_cached_primary(parser);
+}
+
+static int parse_cached_term(CachedExpressionParser *parser) {
+    if (!parse_cached_unary(parser)) return 0;
+    while (!parser->failed) {
+        TokenType type = parser->statement->tokens[parser->pos].type;
+        unsigned char opcode;
+        if (type == TOKEN_STAR) opcode = CEXPR_MULTIPLY;
+        else if (type == TOKEN_SLASH) opcode = CEXPR_DIVIDE;
+        else if (type == TOKEN_MOD) opcode = CEXPR_MOD;
+        else if (type == TOKEN_IDIV) opcode = CEXPR_IDIV;
+        else break;
+
+        parser->pos++;
+        if (!parse_cached_unary(parser) || !emit_cached_expression(parser, opcode, -1, 0.0)) return 0;
+    }
+    return !parser->failed;
+}
+
+static int parse_cached_arithmetic(CachedExpressionParser *parser) {
+    if (!parse_cached_term(parser)) return 0;
+    while (!parser->failed) {
+        TokenType type = parser->statement->tokens[parser->pos].type;
+        if (type != TOKEN_PLUS && type != TOKEN_MINUS) break;
+        parser->pos++;
+        if (!parse_cached_term(parser) ||
+            !emit_cached_expression(parser, type == TOKEN_PLUS ? CEXPR_ADD : CEXPR_SUBTRACT, -1, 0.0)) return 0;
+    }
+    return !parser->failed;
+}
+
+static int parse_cached_relational(CachedExpressionParser *parser) {
+    if (!parse_cached_arithmetic(parser)) return 0;
+    while (!parser->failed) {
+        TokenType type = parser->statement->tokens[parser->pos].type;
+        unsigned char opcode;
+        if (type == TOKEN_EQUALS) {
+            opcode = CEXPR_EQUAL;
+            parser->pos++;
+        } else if (type == TOKEN_LESS) {
+            parser->pos++;
+            TokenType modifier = parser->statement->tokens[parser->pos].type;
+            if (modifier == TOKEN_GREATER) {
+                parser->pos++;
+                opcode = CEXPR_NOT_EQUAL;
+            } else if (modifier == TOKEN_EQUALS) {
+                parser->pos++;
+                opcode = CEXPR_LESS_EQUAL;
+            } else {
+                opcode = CEXPR_LESS;
+            }
+        } else if (type == TOKEN_GREATER) {
+            parser->pos++;
+            if (parser->statement->tokens[parser->pos].type == TOKEN_EQUALS) {
+                parser->pos++;
+                opcode = CEXPR_GREATER_EQUAL;
+            } else {
+                opcode = CEXPR_GREATER;
+            }
+        } else {
+            break;
+        }
+
+        if (!parse_cached_arithmetic(parser) || !emit_cached_expression(parser, opcode, -1, 0.0)) return 0;
+    }
+    return !parser->failed;
+}
+
+static int cached_expression_start(const Statement *statement, int pos) {
+    if (pos == 0) return 1;
+    switch (statement->tokens[pos - 1].type) {
+        case TOKEN_EQUALS:
+        case TOKEN_IF:
+        case TOKEN_WHILE:
+        case TOKEN_TO:
+        case TOKEN_STEP:
+        case TOKEN_THEN:
+        case TOKEN_ELSE:
+        case TOKEN_COMMA:
+        case TOKEN_SEMICOLON:
+        case TOKEN_COLON:
+        case TOKEN_LPAREN:
+        case TOKEN_PRINT:
+        case TOKEN_SLEEP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+void compile_statement_expressions(Statement *statement) {
+    if (!statement || !statement->tokens || statement->token_count <= 0) return;
+    statement->compiled_expressions = calloc((size_t)statement->token_count, sizeof(*statement->compiled_expressions));
+    if (!statement->compiled_expressions) {
+        fprintf(stderr, "Unable to allocate expression cache for BASIC line %d\n", statement->line_number);
+        return;
+    }
+
+    for (int start = 0; start < statement->token_count; start++) {
+        if (!cached_expression_start(statement, start)) continue;
+
+        CachedExpressionParser parser = {
+            .statement = statement,
+            .pos = start
+        };
+        if (!parse_cached_relational(&parser) || parser.failed ||
+            parser.instruction_count < 3) {
+            continue;
+        }
+
+        TokenType end_type = statement->tokens[parser.pos].type;
+        if (end_type != TOKEN_EOF && end_type != TOKEN_COLON && end_type != TOKEN_THEN &&
+            end_type != TOKEN_ELSE && end_type != TOKEN_TO && end_type != TOKEN_STEP &&
+            end_type != TOKEN_COMMA && end_type != TOKEN_SEMICOLON && end_type != TOKEN_RPAREN) {
+            continue;
+        }
+
+        CompiledExpression *expression = malloc(sizeof(*expression));
+        CompiledExpressionInstruction *instructions =
+            malloc((size_t)parser.instruction_count * sizeof(*instructions));
+        if (!expression || !instructions) {
+            free(expression);
+            free(instructions);
+            fprintf(stderr, "Unable to compile expression on BASIC line %d\n", statement->line_number);
+            return;
+        }
+        memcpy(instructions, parser.instructions, (size_t)parser.instruction_count * sizeof(*instructions));
+        *expression = (CompiledExpression){
+            .end_pos = parser.pos,
+            .instruction_count = parser.instruction_count,
+            .instructions = instructions
+        };
+        memcpy(expression->default_type_map, default_type_map, sizeof(expression->default_type_map));
+        statement->compiled_expressions[start] = expression;
+    }
 }
 
 static void scan_procedures(void) {
@@ -2708,7 +2930,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
         current_source_line_number = exec_stmt->source_line_number;
         current_has_explicit_line_number = exec_stmt->has_explicit_line_number;
 
-        TokenStream ts = {exec_stmt->tokens, 0};
+        TokenStream ts = {exec_stmt->tokens, 0, exec_stmt};
         int jumped = 0;
 
         while (ts.pos < exec_stmt->token_count && !stop_running && !jumped) {
@@ -3629,11 +3851,11 @@ static double unary_tok(TokenStream *ts) {
 static double term_tok(TokenStream *ts) {
     double val = unary_tok(ts);
     while (1) {
-        Token t = ts->tokens[ts->pos];
-        if (t.type == TOKEN_STAR) { ts->pos++; val *= unary_tok(ts); }
-        else if (t.type == TOKEN_SLASH) { ts->pos++; double d = unary_tok(ts); if (d != 0) val /= d; }
-        else if (t.type == TOKEN_IDIV) { ts->pos++; double d = unary_tok(ts); if (d != 0) val = (long)(val / d); }
-        else if (t.type == TOKEN_MOD) { ts->pos++; double d = unary_tok(ts); if (d != 0) val = (long)val % (long)d; }
+        TokenType type = ts->tokens[ts->pos].type;
+        if (type == TOKEN_STAR) { ts->pos++; val *= unary_tok(ts); }
+        else if (type == TOKEN_SLASH) { ts->pos++; double d = unary_tok(ts); if (d != 0) val /= d; }
+        else if (type == TOKEN_IDIV) { ts->pos++; double d = unary_tok(ts); if (d != 0) val = (long)(val / d); }
+        else if (type == TOKEN_MOD) { ts->pos++; double d = unary_tok(ts); if (d != 0) val = (long)val % (long)d; }
         else break;
     }
     return val;
@@ -3642,9 +3864,9 @@ static double term_tok(TokenStream *ts) {
 static double arithmetic_expression_tok(TokenStream *ts) {
     double val = term_tok(ts);
     while (1) {
-        Token t = ts->tokens[ts->pos];
-        if (t.type == TOKEN_PLUS) { ts->pos++; val += term_tok(ts); }
-        else if (t.type == TOKEN_MINUS) { ts->pos++; val -= term_tok(ts); }
+        TokenType type = ts->tokens[ts->pos].type;
+        if (type == TOKEN_PLUS) { ts->pos++; val += term_tok(ts); }
+        else if (type == TOKEN_MINUS) { ts->pos++; val -= term_tok(ts); }
         else break;
     }
     return val;
@@ -3653,12 +3875,12 @@ static double arithmetic_expression_tok(TokenStream *ts) {
 static double relational_expression_tok(TokenStream *ts) {
     double val = arithmetic_expression_tok(ts);
     while (1) {
-        Token t = ts->tokens[ts->pos];
-        if (t.type == TOKEN_EQUALS) {
+        TokenType type = ts->tokens[ts->pos].type;
+        if (type == TOKEN_EQUALS) {
             ts->pos++;
             val = (val == arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
         }
-        else if (t.type == TOKEN_LESS) {
+        else if (type == TOKEN_LESS) {
             ts->pos++;
             if (ts->tokens[ts->pos].type == TOKEN_GREATER) {
                 ts->pos++;
@@ -3670,7 +3892,7 @@ static double relational_expression_tok(TokenStream *ts) {
                 val = (val < arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
             }
         }
-        else if (t.type == TOKEN_GREATER) {
+        else if (type == TOKEN_GREATER) {
             ts->pos++;
             if (ts->tokens[ts->pos].type == TOKEN_EQUALS) {
                 ts->pos++;
@@ -3696,7 +3918,7 @@ static double bitwise_and_tok(TokenStream *ts) {
     double val = logical_not_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_AND) {
         ts->pos++;
-        double right = is_string_token(ts->tokens[ts->pos])
+        double right = is_string_token(&ts->tokens[ts->pos])
             ? evaluate_expression_tok(ts) : logical_not_tok(ts);
         val = (double)((short)val & (short)right);
     }
@@ -3712,8 +3934,73 @@ static double bitwise_or_tok(TokenStream *ts) {
     return val;
 }
 
+static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expression, double *result) {
+    double values[MAX_CACHED_EXPRESSION_INSTRUCTIONS];
+    int stack_size = 0;
+
+    for (int i = 0; i < expression->instruction_count; i++) {
+        CompiledExpressionInstruction *instruction = &expression->instructions[i];
+        if (instruction->opcode == CEXPR_NUMBER) {
+            Token *token = &ts->tokens[instruction->token_index];
+            if (token->is_double) last_expression_is_double = 1;
+            values[stack_size++] = instruction->number;
+            continue;
+        }
+        if (instruction->opcode == CEXPR_VARIABLE) {
+            Token *token = &ts->tokens[instruction->token_index];
+            int variable_index = resolve_token_variable(token);
+            Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
+            if (variable && variable->name[strlen(variable->name) - 1] == '#') last_expression_is_double = 1;
+            values[stack_size++] = variable ? variable->value : 0.0;
+            continue;
+        }
+        if (instruction->opcode == CEXPR_NEGATE) {
+            if (stack_size < 1) return 0;
+            values[stack_size - 1] = -values[stack_size - 1];
+            continue;
+        }
+        if (stack_size < 2) return 0;
+
+        double right = values[--stack_size];
+        double left = values[stack_size - 1];
+        switch (instruction->opcode) {
+            case CEXPR_ADD: values[stack_size - 1] = left + right; break;
+            case CEXPR_SUBTRACT: values[stack_size - 1] = left - right; break;
+            case CEXPR_MULTIPLY: values[stack_size - 1] = left * right; break;
+            case CEXPR_DIVIDE: if (right != 0.0) values[stack_size - 1] = left / right; break;
+            case CEXPR_MOD: if (right != 0.0) values[stack_size - 1] = (long)left % (long)right; break;
+            case CEXPR_IDIV: if (right != 0.0) values[stack_size - 1] = (long)(left / right); break;
+            case CEXPR_EQUAL: values[stack_size - 1] = left == right ? -1.0 : 0.0; break;
+            case CEXPR_NOT_EQUAL: values[stack_size - 1] = left != right ? -1.0 : 0.0; break;
+            case CEXPR_LESS: values[stack_size - 1] = left < right ? -1.0 : 0.0; break;
+            case CEXPR_LESS_EQUAL: values[stack_size - 1] = left <= right ? -1.0 : 0.0; break;
+            case CEXPR_GREATER: values[stack_size - 1] = left > right ? -1.0 : 0.0; break;
+            case CEXPR_GREATER_EQUAL: values[stack_size - 1] = left >= right ? -1.0 : 0.0; break;
+            default: return 0;
+        }
+    }
+
+    if (stack_size != 1) return 0;
+    *result = values[0];
+    ts->pos = expression->end_pos;
+    return 1;
+}
+
 double evaluate_expression_tok(TokenStream *ts) {
-    if (ts->tokens[ts->pos].type != TOKEN_EOF && is_string_token(ts->tokens[ts->pos])) {
+    Statement *statement = ts->statement;
+    if (statement && ts->tokens == statement->tokens &&
+        ts->pos >= 0 && ts->pos < statement->token_count &&
+        statement->compiled_expressions) {
+        CompiledExpression *expression = statement->compiled_expressions[ts->pos];
+        if (expression &&
+            memcmp(expression->default_type_map, default_type_map, sizeof(expression->default_type_map)) == 0 &&
+            !fixed_string_declarations_present && proc_count == 0) {
+            double result;
+            if (evaluate_cached_expression(ts, expression, &result)) return result;
+        }
+    }
+
+    if (ts->tokens[ts->pos].type != TOKEN_EOF && is_string_token(&ts->tokens[ts->pos])) {
         BasicString left = {0};
         BasicString right = {0};
         if (!parse_string_expression_tok_heap(ts, &left)) {
@@ -4183,7 +4470,7 @@ static double bitwise_or_expression(const char **input) {
 double evaluate_expression(const char **input) {
     const char *peek_ptr = *input;
     Token peek_tok = get_next_token(&peek_ptr);
-    if (is_string_token(peek_tok)) {
+    if (is_string_token(&peek_tok)) {
         char s1[BASIC_STRING_MAX], s2[BASIC_STRING_MAX];
         parse_string_expression(input, s1, sizeof(s1));
         const char *op_saved = *input;
@@ -4430,7 +4717,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 has_args = 1;
                 char val_buf[512] = "";
-                if (is_string_token(next)) {
+                if (is_string_token(&next)) {
                     ptr = item_saved;
                     char value[BASIC_STRING_MAX] = "";
                     parse_string_expression(&ptr, value, sizeof(value));
@@ -4477,7 +4764,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     } else if (last_was_numeric && !using_mode) {
                         const char *peek_ptr = ptr;
                         Token peek = get_next_token(&peek_ptr);
-                        if (peek.type != TOKEN_EOF && peek.type != TOKEN_COLON && !is_string_token(peek)) {
+                        if (peek.type != TOKEN_EOF && peek.type != TOKEN_COLON && !is_string_token(&peek)) {
                             if (fnum != -1 && file_handles[fnum]) {
                                 fprintf(file_handles[fnum], " ");
                                 print_col++;
@@ -5986,7 +6273,7 @@ void run_program() {
                 }
             }
         }
-        TokenStream ts = {exec_stmt->tokens, start_pos};
+        TokenStream ts = {exec_stmt->tokens, start_pos, exec_stmt};
         resume_ptr = NULL;
         resume_ts_pos = -1;
         

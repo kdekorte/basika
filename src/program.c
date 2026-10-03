@@ -10,6 +10,19 @@ static Statement **line_index = NULL;
 static int line_index_count = 0;
 static int index_dirty = 1;
 
+static void free_statement_expressions(Statement *stmt) {
+    if (!stmt->compiled_expressions) return;
+    for (int i = 0; i < stmt->token_count; i++) {
+        CompiledExpression *expression = stmt->compiled_expressions[i];
+        if (expression) {
+            free(expression->instructions);
+            free(expression);
+        }
+    }
+    free(stmt->compiled_expressions);
+    stmt->compiled_expressions = NULL;
+}
+
 /* update_line_index - Rebuild the sorted array of Statement pointers used
  * for binary search in find_line(). Only rebuilds when the index has been
  * marked dirty by an add/delete/clear operation */
@@ -53,21 +66,28 @@ void add_line(int line_num, const char *text, int source_line_number, int has_ex
 
     Statement *stmt = NULL;
     if (*curr && (*curr)->line_number == line_num) {
+        free_statement_expressions(*curr);
+        free((*curr)->tokens);
+        (*curr)->tokens = NULL;
         strncpy((*curr)->raw_command, text, 255);
+        (*curr)->raw_command[255] = '\0';
         (*curr)->source_line_number = source_line_number;
         (*curr)->has_explicit_line_number = has_explicit_line_number;
         tokenize_line(*curr);
+        compile_statement_expressions(*curr);
         stmt = *curr;
     } else {
-        Statement *new_stmt = malloc(sizeof(Statement));
+        Statement *new_stmt = calloc(1, sizeof(Statement));
         if (!new_stmt) return;
         new_stmt->line_number = line_num;
         new_stmt->source_line_number = source_line_number;
         new_stmt->has_explicit_line_number = has_explicit_line_number;
         strncpy(new_stmt->raw_command, text, 255);
+        new_stmt->raw_command[255] = '\0';
         new_stmt->next = *curr;
         *curr = new_stmt;
         tokenize_line(new_stmt);
+        compile_statement_expressions(new_stmt);
         stmt = new_stmt;
     }
 
@@ -144,6 +164,7 @@ void clear_program() {
     Statement *curr = head;
     while (curr) {
         Statement *next = curr->next;
+        free_statement_expressions(curr);
         if (curr->tokens) free(curr->tokens);
         free(curr);
         curr = next;
@@ -160,6 +181,7 @@ void delete_line(int line_num) {
         if ((*curr)->line_number == line_num) {
             Statement *to_remove = *curr;
             *curr = to_remove->next;
+            free_statement_expressions(to_remove);
             if (to_remove->tokens) free(to_remove->tokens);
             free(to_remove);
             return;

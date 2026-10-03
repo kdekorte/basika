@@ -57,6 +57,19 @@ typedef struct {
     unsigned int type_generation;
 } Token;
 
+typedef struct {
+    unsigned char opcode;
+    int token_index;
+    double number;
+} CompiledExpressionInstruction;
+
+typedef struct {
+    int end_pos;
+    int instruction_count;
+    char default_type_map[26];
+    CompiledExpressionInstruction *instructions;
+} CompiledExpression;
+
 typedef struct Statement {
     int line_number;
     int source_line_number;
@@ -65,6 +78,7 @@ typedef struct Statement {
     char raw_command[256];
     Token *tokens;
     int token_count;
+    CompiledExpression **compiled_expressions;
     struct Statement *next;
 } Statement;
 
