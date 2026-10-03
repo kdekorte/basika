@@ -21,7 +21,7 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
-`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
+`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DISPLAY`, `_FONT`,
 `_FREEFONT`, `_FREEIMAGE`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
 `_DEFLATE$`, `_INFLATE$`.
@@ -31,6 +31,14 @@ Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume au
 
 `PSET`, `LINE`, `CIRCLE`, and `PAINT` accept an optional final alpha value from
 0 (transparent) to 255 (opaque). Omitting alpha preserves opaque drawing.
+
+## User-defined types
+
+`TYPE name ... END TYPE` defines a record type. Fields use `field AS typeName`,
+where `typeName` can be `STRING`, `INTEGER`, `SINGLE`, `DOUBLE`, or another
+user-defined type. Declare an instance with `DIM variable AS typeName`, then
+read or assign fields with chained member notation such as
+`variable.location.x = 10` or `PRINT variable.label.text`.
 
 ## Line Numbers and Labels
 

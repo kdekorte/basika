@@ -129,6 +129,7 @@ TESTS=(
   "tests/qbasic_function"
   "tests/qbasic_scope"
   "tests/qbasic_nested_calls"
+  "tests/user_types"
 )
 
 for t in "${TESTS[@]}"; do

@@ -9,6 +9,7 @@ All notable changes to this project are recorded in this file.
 - **Graphics Showcase**: Added a high-resolution 1280x1024 demo featuring alpha-blended drawing primitives, palette swatches, a layered planet, and animation. Added graphics regression coverage for alpha blending.
 - **Interpreter and Demo Performance**: Compiled eligible numeric expressions when programs load and cached procedure variable lookups. The `basica.bas` 10-million-iteration benchmark improved from about 1.17 s to 0.64-0.67 s, with the expected result unchanged. Also optimized translucent filled-circle rendering; the `boing_ball.bas` demo benefits from faster drawing and variable access.
 - **Boing Ball Demo**: Improved floor-grid visibility with brighter, thicker lines; moved the ball's bounce point forward onto the floor grid; and made its alpha shadow scale and fade with its height above the floor.
+- **User-Defined Types**: Added `TYPE ... END TYPE` declarations with nested `STRING`, `INTEGER`, `SINGLE`, `DOUBLE`, and user-defined fields, plus chained member access and assignment. Added nested field regression coverage.
 
 ## 0.99.5 — 2026-10-02
 

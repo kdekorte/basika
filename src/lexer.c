@@ -145,6 +145,7 @@ static const KeywordMap keyword_table[] = {
     {"TIME$", TOKEN_TIME},
     {"TIMER", TOKEN_TIMER},
     {"TO", TOKEN_TO},
+    {"TYPE", TOKEN_TYPE},
     {"TRIM$", TOKEN_TRIM},
     {"UCASE$", TOKEN_UCASE},
     {"USING", TOKEN_USING},
@@ -308,8 +309,16 @@ Token get_next_token(const char **input) {
 
     char buffer[BASIC_TOKEN_TEXT_MAX];
     int i = 0;
-    // Accept alphanumeric, type suffixes ($, %, !, #), and underscore in identifiers
-    while ((isalnum(**input) || **input == '$' || **input == '%' || **input == '!' || **input == '#' || **input == '_') && i < BASIC_TOKEN_TEXT_MAX - 1) buffer[i++] = *(*input)++;
+    // Dots followed by an identifier character are member-chain separators.
+    while (i < BASIC_TOKEN_TEXT_MAX - 1) {
+        if (isalnum(**input) || **input == '$' || **input == '%' || **input == '!' || **input == '#' || **input == '_') {
+            buffer[i++] = *(*input)++;
+        } else if (**input == '.' && (isalpha((unsigned char)(*input)[1]) || (*input)[1] == '_')) {
+            buffer[i++] = *(*input)++;
+        } else {
+            break;
+        }
+    }
     buffer[i] = '\0';
 
     const KeywordMap *res = find_keyword(buffer);

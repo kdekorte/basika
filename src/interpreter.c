@@ -31,6 +31,22 @@ volatile sig_atomic_t stop_running = 0;
 
 static Variable vars[1024]; 
 static int var_count = 0;
+
+#define MAX_USER_TYPES 64
+#define MAX_TYPE_FIELDS 64
+typedef struct {
+    char name[32];
+    char type_name[32];
+} TypeField;
+
+typedef struct {
+    char name[32];
+    TypeField fields[MAX_TYPE_FIELDS];
+    int field_count;
+} UserType;
+
+static UserType user_types[MAX_USER_TYPES];
+static int user_type_count = 0;
 #define VAR_HASH_CAPACITY 2048
 #define VAR_HASH_MASK (VAR_HASH_CAPACITY - 1)
 /* Open-addressed table; load stays at or below 50% (1024 variables). */
@@ -728,6 +744,12 @@ static int is_string_var(const char *name) {
     if (len == 0) return 0;
     char last = name[len - 1];
     if (last == '$') return 1;
+    if (strchr(name, '.') && last != '%' && last != '!' && last != '#') {
+        char string_member[64];
+        int written = snprintf(string_member, sizeof(string_member), "%s$", name);
+        if (written > 0 && (size_t)written < sizeof(string_member) &&
+            find_variable_index(string_member) >= 0) return 1;
+    }
     if (fixed_string_declarations_present && last != '%' && last != '!' && last != '#') {
         char normalized[64];
         snprintf(normalized, sizeof(normalized), "%s!", name);
@@ -1082,7 +1104,20 @@ int find_variable(const char *name) {
     normalized[i] = '\0';
     int len = i;
 
-    if (len > 0) {
+    if (len > 0 && strchr(normalized, '.') && normalized[len - 1] != '$' &&
+        normalized[len - 1] != '%' && normalized[len - 1] != '!' && normalized[len - 1] != '#') {
+        const char suffixes[] = {'$', '%', '!', '#'};
+        for (size_t suffix_index = 0; suffix_index < sizeof(suffixes); suffix_index++) {
+            char member_name[64];
+            int written = snprintf(member_name, sizeof(member_name), "%s%c", normalized, suffixes[suffix_index]);
+            if (written > 0 && (size_t)written < sizeof(member_name)) {
+                int member_idx = find_variable_index(member_name);
+                if (member_idx >= 0) return member_idx;
+            }
+        }
+    }
+
+    if (len > 0 && strchr(normalized, '.') == NULL) {
         char last = normalized[len - 1];
         if (last != '$' && last != '%' && last != '!' && last != '#') {
             char suffix = default_type_map[normalized[0] - 'A'];
@@ -1090,6 +1125,7 @@ int find_variable(const char *name) {
                 normalized[len] = suffix;
                 normalized[len+1] = '\0';
             }
+
         }
     }
 
@@ -1105,6 +1141,96 @@ int find_variable(const char *name) {
         return idx;
     }
     return -1;
+}
+
+static UserType *find_user_type(const char *name) {
+    for (int i = 0; i < user_type_count; i++) {
+        if (strcasecmp(user_types[i].name, name) == 0) return &user_types[i];
+    }
+    return NULL;
+}
+
+static void scan_user_types(void) {
+    user_type_count = 0;
+    for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
+        if (stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_TYPE ||
+            stmt->tokens[1].type != TOKEN_IDENTIFIER || user_type_count >= MAX_USER_TYPES) continue;
+        UserType *type = &user_types[user_type_count++];
+        memset(type, 0, sizeof(*type));
+        strncpy(type->name, stmt->tokens[1].text, sizeof(type->name) - 1);
+    }
+
+    UserType *current = NULL;
+    for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
+        if (stmt->token_count >= 2 && stmt->tokens[0].type == TOKEN_TYPE) {
+            current = find_user_type(stmt->tokens[1].text);
+            continue;
+        }
+        if (stmt->token_count >= 2 && stmt->tokens[0].type == TOKEN_END &&
+            stmt->tokens[1].type == TOKEN_TYPE) {
+            current = NULL;
+            continue;
+        }
+        if (!current || stmt->token_count < 3 ||
+            stmt->tokens[0].type != TOKEN_IDENTIFIER ||
+            stmt->tokens[1].type != TOKEN_AS ||
+            stmt->tokens[2].type != TOKEN_IDENTIFIER ||
+            current->field_count >= MAX_TYPE_FIELDS) continue;
+
+        TypeField *field = &current->fields[current->field_count++];
+        strncpy(field->name, stmt->tokens[0].text, sizeof(field->name) - 1);
+        strncpy(field->type_name, stmt->tokens[2].text, sizeof(field->type_name) - 1);
+    }
+}
+
+static int instantiate_user_type(const char *prefix, UserType *type, int depth) {
+    if (!type) return 0;
+    if (depth >= MAX_USER_TYPES) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return 0;
+    }
+    for (int i = 0; i < type->field_count; i++) {
+        TypeField *field = &type->fields[i];
+        char member_name[64];
+        int written = snprintf(member_name, sizeof(member_name), "%s.%s", prefix, field->name);
+        if (written < 0 || (size_t)written >= sizeof(member_name) || written >= 31) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+
+        UserType *nested = find_user_type(field->type_name);
+        if (nested) {
+            if (!instantiate_user_type(member_name, nested, depth + 1)) return 0;
+        } else {
+            int is_primitive = strcasecmp(field->type_name, "STRING") == 0 ||
+                strcasecmp(field->type_name, "INTEGER") == 0 ||
+                strcasecmp(field->type_name, "SINGLE") == 0 ||
+                strcasecmp(field->type_name, "DOUBLE") == 0;
+            if (!is_primitive) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return 0;
+            }
+            char variable_name[64];
+            size_t field_len = strlen(field->name);
+            char suffix_char = field_len > 0 ? field->name[field_len - 1] : '\0';
+            if (suffix_char != '$' && suffix_char != '%' && suffix_char != '!' && suffix_char != '#') {
+                if (strcasecmp(field->type_name, "STRING") == 0) suffix_char = '$';
+                else if (strcasecmp(field->type_name, "INTEGER") == 0) suffix_char = '%';
+                else if (strcasecmp(field->type_name, "SINGLE") == 0) suffix_char = '!';
+                else if (strcasecmp(field->type_name, "DOUBLE") == 0) suffix_char = '#';
+                else suffix_char = '\0';
+            }
+            char suffix[2] = {suffix_char, '\0'};
+            if (!suffix_char) suffix[0] = '\0';
+            written = snprintf(variable_name, sizeof(variable_name), "%s%s", member_name, suffix);
+            if (written < 0 || (size_t)written >= sizeof(variable_name) || written >= 32) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return 0;
+            }
+            find_variable(variable_name);
+        }
+    }
+    return 1;
 }
 
 /*
@@ -2434,7 +2560,7 @@ static void apply_basika_using_str(const char *fmt, const char *val, char *out, 
 }
 
 static void execute_assignment(const char **input, Token var_token) {
-    int idx = var_token.var_idx;
+    int idx = strchr(var_token.text, '.') ? find_variable(var_token.text) : var_token.var_idx;
     if (idx == -1) idx = find_variable(var_token.text);
     int array_idx = parse_array_index(input, idx);
     const char *saved = *input;
@@ -5453,6 +5579,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 Token lparen = get_next_token(&ptr);
                 if (lparen.type == TOKEN_AS) {
                     Token type = get_next_token(&ptr);
+                    UserType *user_type = find_user_type(type.text);
+                    if (user_type) {
+                        find_variable(var.text);
+                        if (!instantiate_user_type(var.text, user_type, 0)) break;
+                        const char *comma_saved = ptr;
+                        if (get_next_token(&ptr).type != TOKEN_COMMA) ptr = comma_saved;
+                        continue;
+                    }
                     Token star = get_next_token(&ptr);
                     Token length_token = get_next_token(&ptr);
                     if (strcasecmp(type.text, "STRING") != 0 || star.type != TOKEN_STAR ||
@@ -6235,6 +6369,7 @@ void interpret_line(const char *input, int is_direct, int *last_line_num, int so
 
 void run_program() {
     clear_variables(1); // Keep registry for RUN to maintain pre-tokenized indices
+    scan_user_types();
     stop_running = 0;
     runtime_error_occurred = 0;
     gosub_ptr = 0;
@@ -6267,7 +6402,20 @@ void run_program() {
 
     int poll_counter = 0;
     while (curr && !stop_running) {
-        
+
+        if (curr->token_count >= 2 && curr->tokens[0].type == TOKEN_TYPE) {
+            Statement *end_type = curr->next;
+            while (end_type && !(end_type->token_count >= 2 &&
+                   end_type->tokens[0].type == TOKEN_END &&
+                   end_type->tokens[1].type == TOKEN_TYPE)) {
+                end_type = end_type->next;
+            }
+            curr = end_type ? end_type->next : NULL;
+            resume_ptr = NULL;
+            resume_ts_pos = -1;
+            continue;
+        }
+
         if (call_stack_depth == 0 && curr->token_count > 0) {
             if (curr->tokens[0].type == TOKEN_SUB || curr->tokens[0].type == TOKEN_FUNCTION) {
                 ProcedureDef *p = find_procedure_by_header(curr);
