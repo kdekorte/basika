@@ -50,7 +50,7 @@ package: clean
 	cp -r fonts/* $(PACKAGE_NAME)/fonts/
 	cp -r demo/* $(PACKAGE_NAME)/demo/
 	cp -r tests/* $(PACKAGE_NAME)/tests/
-	cp makefile README.md CHANGELOG.md ERROR_CODES.md KEYWORDS.md $(PACKAGE_NAME)/
+	cp makefile README.md CHANGELOG.md ERROR_CODES.md KEYWORDS.md LICENSE $(PACKAGE_NAME)/
 	zip -r $(PACKAGE_NAME).zip $(PACKAGE_NAME)
 	rm -rf $(PACKAGE_NAME)
 	@echo "Created $(PACKAGE_NAME).zip"

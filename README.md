@@ -41,6 +41,10 @@ Build with:
 make
 ```
 
+## License
+
+Basika is distributed under the [MIT License](LICENSE).
+
 ## Run
 
 Run a BASIC program:
