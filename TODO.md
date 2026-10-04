@@ -4,6 +4,27 @@
 
 - Add `TRON` and `TROFF` for program tracing and debugging.
 
+## Unimplemented QBASIC language features
+
+- `CONST name = expression`: Named constants.
+- `LINE INPUT [#n,] var$`: Reads an entire line of input (including commas) into a string variable.
+- `INPUT$(n[, #file])`: Reads `n` characters from the keyboard or a file without echoing/delimiters.
+- `WRITE [#n,] expr1[, expr2...]`: Writes comma-delimited, quoted output to the screen or a file.
+- `LOCK #n [, record | record1 TO record2]` / `UNLOCK #n [...]`: File/record locking for shared access.
+- `PALETTE` / `PALETTE USING`: Remaps screen color palette entries.
+- `POINT(x,y)` / `POINT(n)`: Returns the color of a pixel or the last graphics cursor coordinate.
+- `CSRLIN` / `POS(n)`: Returns the current cursor row/column.
+- `PEN(n)` / `ON PEN GOSUB`: Light pen input and trapping.
+- `STICK(n)`: Joystick position (note: `STRIG` is already supported for joystick/trigger buttons).
+- `WIDTH [#n,] columns[, rows]`: Sets screen or file text width.
+- `PCOPY page1, page2`: Copies one graphics page to another.
+- `CHAIN "program"` / `COMMON var1[, var2...]`: Chains to another program, optionally passing shared variables.
+- `CLEAR [, memory]`: Resets all variables and closes files.
+- `OUT port, value` / `INP(port)`: Hardware I/O port access.
+- `DEF SEG` / `VARSEG` / `VARPTR$` / `FRE` / `BLOAD` / `BSAVE`: Legacy memory-segment operations (low priority).
+- `ERDEV` / `ERDEV$`: Device-error code and name from the last device I/O error.
+- IDE-only commands, if a REPL/editing mode is ever desired: `AUTO`, `RENUM`, `EDIT`, `SAVE`, `LOAD`, `MERGE`.
+
 ## Interpreter correctness
 
 - Add support for `CONT`, `STOP`, and better direct-mode behavior.
