@@ -1,0 +1,23 @@
+REM Nested SELECT CASE blocks
+FOR OUTER = 1 TO 2
+  SELECT CASE OUTER
+  CASE 1
+    FOR INNER = 1 TO 2
+      SELECT CASE INNER
+      CASE 1
+        PRINT "O1-I1"
+      CASE ELSE
+        PRINT "O1-I2"
+      END SELECT
+    NEXT INNER
+  CASE ELSE
+    SELECT CASE OUTER * 10
+    CASE 20
+      PRINT "O2-nested-20"
+    CASE ELSE
+      PRINT "O2-nested-other"
+    END SELECT
+  END SELECT
+NEXT OUTER
+PRINT "DONE"
+END
