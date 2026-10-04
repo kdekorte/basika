@@ -497,6 +497,45 @@ static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int fo
     return NULL;
 }
 
+// Helper to skip tokens until a matching LOOP token for a DO block is found.
+// Behaves like skip_to_matching_token(TOKEN_DO, TOKEN_LOOP), except it ignores
+// the DO keyword that follows EXIT (i.e. "EXIT DO"), which must not be treated
+// as the start of a nested DO block.
+static Statement* skip_do_block(Statement *start_stmt, int start_ts_pos, int *out_ts_pos) {
+    Statement *current_stmt = start_stmt;
+    int current_ts_pos = start_ts_pos;
+    int nest_depth = 1;
+
+    while (nest_depth > 0 && current_stmt) {
+        while (current_ts_pos < current_stmt->token_count) {
+            Token t = current_stmt->tokens[current_ts_pos++];
+            if (t.type == TOKEN_EXIT) {
+                if (current_ts_pos < current_stmt->token_count && current_stmt->tokens[current_ts_pos].type == TOKEN_DO) {
+                    current_ts_pos++; // Skip the DO in "EXIT DO"; not a nested loop start
+                }
+                continue;
+            }
+            if (t.type == TOKEN_DO) nest_depth++;
+            else if (t.type == TOKEN_LOOP) nest_depth--;
+            if (nest_depth == 0) {
+                if (current_ts_pos < current_stmt->token_count) {
+                    *out_ts_pos = current_ts_pos;
+                    return current_stmt;
+                } else {
+                    current_stmt = current_stmt->next;
+                    *out_ts_pos = 0;
+                    return current_stmt;
+                }
+            }
+        }
+        current_stmt = current_stmt->next;
+        if (current_stmt) {
+            current_ts_pos = 0;
+        }
+    }
+    return NULL;
+}
+
 static const char* get_error_message(RuntimeError code) {
     switch (code) {
         case ERR_NEXT_WITHOUT_FOR: return "NEXT without FOR";
@@ -517,6 +556,8 @@ static const char* get_error_message(RuntimeError code) {
         case ERR_FOR_WITHOUT_NEXT: return "FOR without NEXT";
         case ERR_WHILE_WITHOUT_WEND: return "WHILE without WEND";
         case ERR_WEND_WITHOUT_WHILE: return "WEND without WHILE";
+        case ERR_DO_WITHOUT_LOOP: return "DO without LOOP";
+        case ERR_LOOP_WITHOUT_DO: return "LOOP without DO";
         case ERR_FIELD_OVERFLOW: return "FIELD overflow";
         case ERR_INTERNAL_ERROR: return "Internal error";
         case ERR_BAD_FILE_NUMBER: return "Bad file number";
@@ -2305,6 +2346,13 @@ typedef struct {
 } WhileLoop;
 static WhileLoop while_stack[16];
 static int while_ptr = 0;
+
+typedef struct {
+    Statement *stmt;
+    const char *ptr;
+} DoLoop;
+static DoLoop do_stack[16];
+static int do_ptr = 0;
 
 #define MAX_BLOCK_IF_DEPTH 128
 typedef struct {
@@ -4263,6 +4311,7 @@ static int cached_expression_start(const Statement *statement, int pos) {
         case TOKEN_EQUALS:
         case TOKEN_IF:
         case TOKEN_WHILE:
+        case TOKEN_UNTIL:
         case TOKEN_TO:
         case TOKEN_STEP:
         case TOKEN_THEN:
@@ -4754,12 +4803,87 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     ts.pos++;
                     continue;
                 }
+                if (t.type == TOKEN_EXIT && ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_DO) {
+                    ts.pos++;
+                    if (do_ptr > 0) do_ptr--;
+                    int end_ts_pos = ts.pos;
+                    Statement *target_stmt = skip_do_block(exec_stmt, end_ts_pos, &end_ts_pos);
+                    if (target_stmt) {
+                        curr_proc_stmt = target_stmt;
+                        jumped = 1;
+                        break;
+                    } else {
+                        report_runtime_error(ERR_LOOP_WITHOUT_DO);
+                        break;
+                    }
+                }
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
                     current_executing_line = saved_line;
                     return;
                 }
                 if (t.type == TOKEN_END) stop_running = 1;
                 break;
+
+            case TOKEN_DO: {
+                const char *command_start_ptr = t.start_ptr;
+                int has_top_cond = (ts.pos < exec_stmt->token_count &&
+                                     (ts.tokens[ts.pos].type == TOKEN_WHILE || ts.tokens[ts.pos].type == TOKEN_UNTIL));
+                int should_continue = 1;
+                if (has_top_cond) {
+                    TokenType cond_type = ts.tokens[ts.pos++].type;
+                    double cond_val = evaluate_expression_tok(&ts);
+                    should_continue = (cond_type == TOKEN_WHILE) ? (cond_val != 0) : (cond_val == 0);
+                }
+                if (should_continue) {
+                    if (do_ptr == 0 || do_stack[do_ptr-1].stmt != exec_stmt || do_stack[do_ptr-1].ptr != command_start_ptr) {
+                        if (do_ptr < 16) {
+                            do_stack[do_ptr].stmt = exec_stmt;
+                            do_stack[do_ptr].ptr = command_start_ptr;
+                            do_ptr++;
+                        } else {
+                            report_runtime_error(ERR_OUT_OF_MEMORY);
+                        }
+                    }
+                } else {
+                    if (do_ptr > 0 && do_stack[do_ptr-1].stmt == exec_stmt && do_stack[do_ptr-1].ptr == command_start_ptr) {
+                        do_ptr--;
+                    }
+                    int end_ts_pos = ts.pos;
+                    Statement *target_stmt = skip_do_block(exec_stmt, end_ts_pos, &end_ts_pos);
+                    if (target_stmt) {
+                        curr_proc_stmt = target_stmt;
+                        jumped = 1;
+                        break;
+                    } else {
+                        report_runtime_error(ERR_LOOP_WITHOUT_DO);
+                    }
+                }
+                continue;
+            }
+
+            case TOKEN_LOOP: {
+                if (do_ptr > 0) {
+                    int has_bottom_cond = (ts.pos < exec_stmt->token_count &&
+                                            (ts.tokens[ts.pos].type == TOKEN_WHILE || ts.tokens[ts.pos].type == TOKEN_UNTIL));
+                    int should_repeat = 1;
+                    if (has_bottom_cond) {
+                        TokenType cond_type = ts.tokens[ts.pos++].type;
+                        double cond_val = evaluate_expression_tok(&ts);
+                        should_repeat = (cond_type == TOKEN_WHILE) ? (cond_val != 0) : (cond_val == 0);
+                    }
+                    if (should_repeat) {
+                        curr_proc_stmt = do_stack[do_ptr-1].stmt;
+                        jumped = 1;
+                        break;
+                    } else {
+                        do_ptr--;
+                        continue;
+                    }
+                } else {
+                    report_runtime_error(ERR_LOOP_WITHOUT_DO);
+                    break;
+                }
+            }
 
             case TOKEN_WHILE: {
                 const char *command_start_ptr = t.start_ptr;
@@ -8125,6 +8249,7 @@ void run_program() {
     gosub_ptr = 0;
     while_ptr = 0;
     for_ptr = 0;
+    do_ptr = 0;
     call_stack_depth = 0;
     scan_procedures();
     print_col = 0;
@@ -8428,6 +8553,78 @@ void run_program() {
                     break;
                 }
 
+            // Handle DO [WHILE|UNTIL cond] ... LOOP [WHILE|UNTIL cond]
+            case TOKEN_DO: {
+                const char *command_start_ptr = t.start_ptr;
+                int has_top_cond = (ts.pos < exec_stmt->token_count &&
+                                     (ts.tokens[ts.pos].type == TOKEN_WHILE || ts.tokens[ts.pos].type == TOKEN_UNTIL));
+                int should_continue = 1;
+                if (has_top_cond) {
+                    TokenType cond_type = ts.tokens[ts.pos++].type;
+                    double cond_val = evaluate_expression_tok(&ts);
+                    should_continue = (cond_type == TOKEN_WHILE) ? (cond_val != 0) : (cond_val == 0);
+                }
+                if (should_continue) {
+                    // Push only if this DO is not already the current active loop
+                    if (do_ptr == 0 || do_stack[do_ptr-1].stmt != exec_stmt || do_stack[do_ptr-1].ptr != command_start_ptr) {
+                        if (do_ptr < 16) {
+                            do_stack[do_ptr].stmt = exec_stmt;
+                            do_stack[do_ptr].ptr = command_start_ptr;
+                            do_ptr++;
+                        } else {
+                            report_runtime_error(ERR_OUT_OF_MEMORY);
+                        }
+                    }
+                } else {
+                    // Top condition is false; pop the loop from stack if we were in it
+                    if (do_ptr > 0 && do_stack[do_ptr-1].stmt == exec_stmt && do_stack[do_ptr-1].ptr == command_start_ptr) {
+                        do_ptr--;
+                    }
+                    int end_ts_pos = ts.pos; // Start searching from current position
+                    Statement *target_stmt = skip_do_block(exec_stmt, end_ts_pos, &end_ts_pos);
+
+                    if (target_stmt) {
+                        curr = target_stmt;
+                        if (end_ts_pos < curr->token_count) {
+                            resume_ptr = curr->tokens[end_ts_pos].start_ptr;
+                        } else {
+                            resume_ptr = NULL; // LOOP was last token on line, advance to next line
+                        }
+                    } else {
+                        report_runtime_error(ERR_LOOP_WITHOUT_DO);
+                    }
+                    jumped = 1;
+                    break; // Exit command loop for the DO line
+                }
+                continue;
+            }
+
+            // Handle LOOP [WHILE|UNTIL cond]
+            case TOKEN_LOOP: {
+                if (do_ptr > 0) {
+                    int has_bottom_cond = (ts.pos < exec_stmt->token_count &&
+                                            (ts.tokens[ts.pos].type == TOKEN_WHILE || ts.tokens[ts.pos].type == TOKEN_UNTIL));
+                    int should_repeat = 1;
+                    if (has_bottom_cond) {
+                        TokenType cond_type = ts.tokens[ts.pos++].type;
+                        double cond_val = evaluate_expression_tok(&ts);
+                        should_repeat = (cond_type == TOKEN_WHILE) ? (cond_val != 0) : (cond_val == 0);
+                    }
+                    if (should_repeat) {
+                        curr = do_stack[do_ptr-1].stmt;
+                        resume_ptr = do_stack[do_ptr-1].ptr;
+                        jumped = 1;
+                        break;
+                    } else {
+                        do_ptr--;
+                        continue;
+                    }
+                } else {
+                    report_runtime_error(ERR_LOOP_WITHOUT_DO);
+                    break;
+                }
+            }
+
             // Handle ON GOTO/GOSUB
             case TOKEN_ON: {
                 const char *command_start_ptr = t.start_ptr;
@@ -8689,6 +8886,23 @@ void run_program() {
             case TOKEN_EXIT: {
                 if (ts.pos < exec_stmt->token_count) {
                     Token exit_type = ts.tokens[ts.pos++];
+                    if (exit_type.type == TOKEN_DO) {
+                        if (do_ptr > 0) do_ptr--;
+                        int end_ts_pos = ts.pos;
+                        Statement *target_stmt = skip_do_block(exec_stmt, end_ts_pos, &end_ts_pos);
+                        if (target_stmt) {
+                            curr = target_stmt;
+                            if (end_ts_pos < curr->token_count) {
+                                resume_ptr = curr->tokens[end_ts_pos].start_ptr;
+                            } else {
+                                resume_ptr = NULL;
+                            }
+                        } else {
+                            report_runtime_error(ERR_LOOP_WITHOUT_DO);
+                        }
+                        jumped = 1;
+                        break;
+                    }
                     if (exit_type.type == TOKEN_SUB || exit_type.type == TOKEN_FUNCTION) {
                         if (call_stack_depth > 0) {
                             CallFrame *frame = &call_stack[call_stack_depth - 1];

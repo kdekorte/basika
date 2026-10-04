@@ -11,17 +11,17 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
-`DELETE`, `DIM`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
+`DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
 `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
 `HEX$`, `IF`, `INKEY$`, `INPUT`, `INSTR`, `INT`, `KEY`, `KILL`, `LCASE$`,
-`LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LSET`,
+`LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LOOP`, `LSET`,
 `LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
 `NOT`, `OCT$`, `OFF`, `ON`, `OPEN`, `OPTION`, `OR`, `PAINT`, `PEEK`, `PLAY`,
 `POKE`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
-`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `USING`, `VAL`, `VARPTR`,
+`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DISPLAY`, `_FONT`,
 `_FREEFONT`, `_FREEIMAGE`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
 `_DEFLATE$`, `_INFLATE$`.
@@ -83,6 +83,12 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `RESUME [0 | NEXT | line]`: Error recovery.
 - `STOP`: Halts execution (can be resumed with `CONT`).
 - `WHILE condition ... WEND`: Conditional loop.
+- `DO ... LOOP`: Infinite loop; exit with `EXIT DO` or a `GOTO`.
+- `DO WHILE condition ... LOOP`: Pre-test loop that repeats while `condition` is true, checked before each iteration.
+- `DO UNTIL condition ... LOOP`: Pre-test loop that repeats until `condition` becomes true, checked before each iteration.
+- `DO ... LOOP WHILE condition`: Post-test loop; the body always runs at least once, then repeats while `condition` is true.
+- `DO ... LOOP UNTIL condition`: Post-test loop; the body always runs at least once, then repeats until `condition` becomes true.
+- `EXIT DO`: Exits the innermost active `DO...LOOP` prematurely.
 
 ## Variables and Data
 - `DATA constant1[, constant2...]`: Internal data storage.
