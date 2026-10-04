@@ -144,7 +144,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `GET (x1,y1)-(x2,y2), array`: Captures a screen area into a numeric array.
 - `LINE [(x1,y1)]-(x2,y2)[, [color][, [B|BF][, alpha]]]`: Draws lines or boxes. Alpha may follow color directly when no box mode is specified.
 - `PAINT (x,y)[, color[, border[, alpha]]]`: Area fill.
-- `PLAY "mml"`: Plays Music Macro Language. Supports tempo (`T`), octave (`O`, `<`, `>`), default note length (`L`), sharps/flats, numeric notes (`N0`-`N84`), rests (`P`/`R`), dotted notes, and normal/legato/staccato articulation (`MN`/`ML`/`MS`). `MB` plays in the background; `MF` waits for playback to finish.
+- `PLAY "mml"`: Plays Music Macro Language. Supports tempo (`T`), octave (`O`, `<`, `>`), default note length (`L`), volume (`V0`-`V15`), sharps/flats, numeric notes (`N0`-`N84`), rests (`P`/`R`), dotted notes, and normal/legato/staccato articulation (`MN`/`ML`/`MS`). `MB` plays in the background; `MF` waits for playback to finish.
 - `PSET (x,y)[, color[, alpha]]`: Sets a pixel.
 - `PUT (x,y), array[, action]`: Places a captured area on the screen. Actions: `PSET`, `PRESET`, `AND`, `OR`, `XOR` (default).
 - `SCREEN mode`: Sets graphics mode.

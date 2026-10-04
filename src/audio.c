@@ -105,7 +105,7 @@ static int buffer_append_silence(AudioBuffer *buffer, size_t samples) {
     return 1;
 }
 
-static int buffer_append_tone(AudioBuffer *buffer, double frequency, int ms) {
+static int buffer_append_tone(AudioBuffer *buffer, double frequency, int ms, int volume) {
     if (ms <= 0) return 1;
     size_t samples = ((size_t)AUDIO_RATE * (size_t)ms) / 1000;
     if (samples == 0) samples = 1;
@@ -114,8 +114,18 @@ static int buffer_append_tone(AudioBuffer *buffer, double frequency, int ms) {
 
     double phase = 0.0;
     double step = frequency / AUDIO_RATE;
+    size_t fade_samples = (size_t)AUDIO_RATE * 3 / 1000;
+    if (fade_samples > samples / 2) fade_samples = samples / 2;
+    int amplitude = AUDIO_AMPLITUDE * volume / 15;
     for (size_t i = 0; i < samples; i++) {
-        buffer->samples[start + i] = (phase < 0.5) ? AUDIO_AMPLITUDE : -AUDIO_AMPLITUDE;
+        double envelope = 1.0;
+        if (fade_samples > 1 && i < fade_samples) {
+            envelope = (double)i / (fade_samples - 1);
+        } else if (fade_samples > 1 && samples - i <= fade_samples) {
+            envelope = (double)(samples - 1 - i) / (fade_samples - 1);
+        }
+        int sample = (int)(amplitude * envelope);
+        buffer->samples[start + i] = (Sint16)((phase < 0.5) ? sample : -sample);
         phase += step;
         phase -= floor(phase);
     }
@@ -146,7 +156,7 @@ void audio_sound(double frequency, double duration_ticks) {
 
     if (audio_init()) {
         AudioBuffer buffer = {0};
-        if (buffer_append_tone(&buffer, frequency, ms)) {
+        if (buffer_append_tone(&buffer, frequency, ms, 15)) {
             MIX_Audio *audio = make_buffer_audio(&buffer);
             if (audio && MIX_PlayAudio(mixer, audio)) {
                 MIX_DestroyAudio(audio);
@@ -193,12 +203,12 @@ static int append_rest(AudioBuffer *buffer, int ms) {
     return buffer_append_silence(buffer, samples);
 }
 
-static int append_note(AudioBuffer *buffer, double frequency, int duration_ms, Articulation articulation) {
+static int append_note(AudioBuffer *buffer, double frequency, int duration_ms, Articulation articulation, int volume) {
     int sound_ms = duration_ms;
     if (articulation == ARTICULATION_NORMAL) sound_ms = (duration_ms * 7 + 4) / 8;
     else if (articulation == ARTICULATION_STACCATO) sound_ms = (duration_ms * 3 + 2) / 4;
 
-    if (!buffer_append_tone(buffer, frequency, sound_ms)) return 0;
+    if (!buffer_append_tone(buffer, frequency, sound_ms, volume)) return 0;
     return append_rest(buffer, duration_ms - sound_ms);
 }
 
@@ -206,6 +216,7 @@ void audio_play(const char *mml) {
     int tempo = 120;
     int octave = 4;
     int default_length = 4;
+    int volume = 15;
     Articulation articulation = ARTICULATION_NORMAL;
     int total_ms = 0;
     int buffer_ok = 1;
@@ -226,6 +237,9 @@ void audio_play(const char *mml) {
         } else if (cmd == 'L') {
             int value = read_number(&p);
             if (value >= 1 && value <= 64) default_length = value;
+        } else if (cmd == 'V') {
+            int value = read_number(&p);
+            if (value >= 0 && value <= 15) volume = value;
         } else if (cmd == 'M') {
             char mode = (char)toupper((unsigned char)*p);
             if (mode == 'B' || mode == 'F' || mode == 'N' || mode == 'L' || mode == 'S') {
@@ -260,7 +274,7 @@ void audio_play(const char *mml) {
             if (buffer_ok) {
                 if (number == 0) buffer_ok = append_rest(&buffer, ms);
                 else if (number >= 1 && number <= 84) {
-                    buffer_ok = append_note(&buffer, note_frequency(number - 1, 0), ms, articulation);
+                    buffer_ok = append_note(&buffer, note_frequency(number - 1, 0), ms, articulation, volume);
                 }
             }
         } else if (cmd >= 'A' && cmd <= 'G') {
@@ -285,7 +299,7 @@ void audio_play(const char *mml) {
             if (ms <= INT_MAX - total_ms) total_ms += ms;
             else total_ms = INT_MAX;
             if (buffer_ok) {
-                buffer_ok = append_note(&buffer, note_frequency(semitone, octave), ms, articulation);
+                buffer_ok = append_note(&buffer, note_frequency(semitone, octave), ms, articulation, volume);
             }
         }
     }
