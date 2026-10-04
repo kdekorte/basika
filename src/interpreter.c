@@ -6476,13 +6476,19 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             clear_data_pointer();
             print_col = 0;
         } else if (t.type == TOKEN_BEEP) {
-            basic_output("\a");
+            if (audio_is_enabled()) basic_output("\a");
         } else if (t.type == TOKEN_SOUND) {
             double frequency = evaluate_expression(&ptr);
             Token sep = get_next_token(&ptr);
             if (sep.type == TOKEN_COMMA) {
                 double duration = evaluate_expression(&ptr);
-                audio_sound(frequency, duration);
+                if (!isfinite(frequency) || !isfinite(duration) ||
+                    frequency < 37 || frequency > 32767 ||
+                    duration < 0 || duration > 65535) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                } else {
+                    audio_sound(frequency, duration);
+                }
             }
         } else if (t.type == TOKEN_PLAY) {
             char mml[256] = "";

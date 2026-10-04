@@ -54,6 +54,13 @@ TESTS=(
   "tests/file_io/dir_ops_ext"
   "tests/file_io/shell_test"
   "tests/audio/sound_play"
+  "tests/audio/no_audio"
+  "tests/audio/mml_coverage"
+  "tests/audio/sound_range"
+  "tests/audio/sound_frequency_low"
+  "tests/audio/sound_frequency_high"
+  "tests/audio/sound_duration_low"
+  "tests/audio/sound_duration_high"
   "tests/audio/asc_chr_beep"
   "tests/strings/print_using"
   "tests/strings/print_using_ext"
@@ -184,6 +191,10 @@ for t in "${TESTS[@]}"; do
     fi
     rm -f tests/drawing_alpha.png
     rm -f tests/drawing_alpha.result
+  elif [ "$t" = "tests/audio/asc_chr_beep" ]; then
+    OUT=$(./basika "$t.bas" 2>&1)
+  elif [[ "$t" == tests/audio/* ]]; then
+    OUT=$(./basika --no-audio "$t.bas" 2>&1)
   else
     OUT=$(./basika "$t.bas" 2>&1)
   fi

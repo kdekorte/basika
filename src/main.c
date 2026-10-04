@@ -7,6 +7,7 @@
 #include "interpreter.h"
 #include "graphics.h"
 #include "program.h"
+#include "audio.h"
 
 static int quiet_mode = 0;
 static int exit_on_finish = 0;
@@ -18,6 +19,7 @@ static void print_usage(const char *prog) {
     printf("  -w, --window     enable graphics window\n");
     printf("  --headless       enable headless graphics mode (virtual framebuffer without window)\n");
     printf("  -q, --quiet      suppress startup header and REPL prompts\n");
+    printf("  --no-audio       disable sound output and audio delays\n");
     printf("  -x, --exit-on-finish exit immediately after program finishes (only with -w)\n");
     printf("  -v, --version    show version information\n");
     printf("  -h, --help       show this help message\n");
@@ -101,6 +103,7 @@ void run_file(const char *filename) {
 int main(int argc, char **argv) {
     int use_window = 0;
     int headless = 0;
+    int no_audio = 0;
     const char *filename = NULL;
 
     // Handle Ctrl+C in terminal
@@ -117,6 +120,8 @@ int main(int argc, char **argv) {
             exit_on_finish = 1;
         } else if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             quiet_mode = 1;
+        } else if (strcmp(argv[i], "--no-audio") == 0) {
+            no_audio = 1;
         } else if (strcmp(argv[i], "-x") == 0 || strcmp(argv[i], "--exit-on-finish") == 0) {
             exit_on_finish = 1;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -132,6 +137,8 @@ int main(int argc, char **argv) {
             break; // Remaining arguments are passed to the script
         }
     }
+
+    if (no_audio) audio_set_enabled(0);
 
     if (use_window) {
         if (headless) {

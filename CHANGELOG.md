@@ -12,6 +12,8 @@ All notable changes to this project are recorded in this file.
 - **User-Defined Types**: Expanded `TYPE ... END TYPE` with fixed-length string and array fields, arrays of records, chained indexed member access, same-type record assignment, and typed `SUB`/`FUNCTION` parameters with by-reference and scalar by-value behavior. Added declaration validation and packed little-endian random-record `GET`/`PUT` for supported fixed-layout records.
 - **TYPE Regression Coverage**: Added tests for nested records, arrays, assignment, procedure scope and parameters, random-record I/O, and invalid declarations. Organized the test suite into topic-based subdirectories.
 - **Performance Regression Guard**: Added an opt-out timing check during iterative debugging and an enabled pre-commit hook that runs the optimized BASICA 10-million-iteration benchmark against a per-machine baseline stored outside the repository. Skipped UDT resolution on programs without `TYPE` declarations; the BASICA demo remains around its prior 0.64-0.67-second range.
+- **Audio Compatibility**: Expanded `PLAY` with foreground/background playback, articulation modes, numeric notes, and MML tempo, octave, accidental, rest, and dotted-note coverage. `SOUND` now validates BASICA frequency and duration ranges. Added `--no-audio` for delay-free audio tests and automation.
+- **Sound Demo**: Added `demo/sound_demo.bas` to demonstrate `SOUND`, `BEEP`, `PLAY` note controls and articulation, numeric notes, rests, and background/foreground playback.
 
 ## 0.99.5 — 2026-10-02
 

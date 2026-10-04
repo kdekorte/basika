@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3_mixer/SDL_mixer.h>
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,14 +11,26 @@
 #define AUDIO_AMPLITUDE 9000
 #define BASIKA_TICKS_PER_SECOND 18.2
 
+typedef struct {
+    Sint16 *samples;
+    size_t length;
+    size_t capacity;
+} AudioBuffer;
+
+typedef enum {
+    ARTICULATION_NORMAL,
+    ARTICULATION_LEGATO,
+    ARTICULATION_STACCATO
+} Articulation;
+
 static MIX_Mixer *mixer = NULL;
 static int audio_attempted = 0;
 static int audio_ready = 0;
 static int mixer_initialized = 0;
 static int shutdown_registered = 0;
+static int audio_enabled = 1;
+static int music_foreground = 1;
 
-/* audio_shutdown - Clean up SDL_mixer resources. Registered with atexit()
- * so audio is properly torn down on program exit */
 static void audio_shutdown(void) {
     if (mixer) {
         MIX_DestroyMixer(mixer);
@@ -29,9 +42,6 @@ static void audio_shutdown(void) {
     }
 }
 
-/* audio_init - Lazy-initialize the SDL_mixer audio subsystem and create
- * a mono 44.1kHz mixer device. Only runs once; subsequent calls return
- * the cached result */
 static int audio_init(void) {
     if (audio_attempted) return audio_ready;
     audio_attempted = 1;
@@ -55,92 +65,120 @@ static int audio_init(void) {
     return 1;
 }
 
-/* ticks_to_ms - Convert BASIKA timer ticks (18.2 ticks/sec) to
- * milliseconds, rounding to the nearest integer */
+void audio_set_enabled(int enabled) {
+    audio_enabled = enabled != 0;
+}
+
+int audio_is_enabled(void) {
+    return audio_enabled;
+}
+
 static int ticks_to_ms(double ticks) {
     if (ticks <= 0) return 0;
     return (int)((ticks * 1000.0 / BASIKA_TICKS_PER_SECOND) + 0.5);
 }
 
-/* delay_ms - Sleep for the given number of milliseconds using SDL_Delay */
 static void delay_ms(int ms) {
-    if (ms > 0) SDL_Delay(ms);
+    if (ms > 0) SDL_Delay((Uint32)ms);
 }
 
-/* make_square_wave - Generate a square wave MIX_Audio buffer at the given
- * frequency and duration. Returns NULL on failure */
-static MIX_Audio *make_square_wave(double frequency, int ms) {
-    if (frequency <= 0 || ms <= 0) return NULL;
+static int buffer_append_silence(AudioBuffer *buffer, size_t samples) {
+    if (samples > SIZE_MAX - buffer->length) return 0;
+    size_t needed = buffer->length + samples;
+    if (needed > buffer->capacity) {
+        size_t capacity = buffer->capacity ? buffer->capacity : AUDIO_RATE;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / 2) {
+                capacity = needed;
+                break;
+            }
+            capacity *= 2;
+        }
+        if (capacity > SIZE_MAX / sizeof(*buffer->samples)) return 0;
+        Sint16 *resized = (Sint16 *)SDL_realloc(buffer->samples, capacity * sizeof(*buffer->samples));
+        if (!resized) return 0;
+        buffer->samples = resized;
+        buffer->capacity = capacity;
+    }
+    memset(buffer->samples + buffer->length, 0, samples * sizeof(*buffer->samples));
+    buffer->length = needed;
+    return 1;
+}
 
-    int samples = (AUDIO_RATE * ms) / 1000;
-    if (samples <= 0) samples = 1;
-
-    Sint16 *data = (Sint16 *)SDL_malloc((size_t)samples * sizeof(Sint16));
-    if (!data) return NULL;
+static int buffer_append_tone(AudioBuffer *buffer, double frequency, int ms) {
+    if (ms <= 0) return 1;
+    size_t samples = ((size_t)AUDIO_RATE * (size_t)ms) / 1000;
+    if (samples == 0) samples = 1;
+    size_t start = buffer->length;
+    if (!buffer_append_silence(buffer, samples)) return 0;
 
     double phase = 0.0;
     double step = frequency / AUDIO_RATE;
-    for (int i = 0; i < samples; i++) {
-        data[i] = (phase < 0.5) ? AUDIO_AMPLITUDE : -AUDIO_AMPLITUDE;
+    for (size_t i = 0; i < samples; i++) {
+        buffer->samples[start + i] = (phase < 0.5) ? AUDIO_AMPLITUDE : -AUDIO_AMPLITUDE;
         phase += step;
         phase -= floor(phase);
     }
+    return 1;
+}
+
+static MIX_Audio *make_buffer_audio(AudioBuffer *buffer) {
+    if (!buffer->length || buffer->length > SIZE_MAX / sizeof(*buffer->samples)) return NULL;
 
     SDL_AudioSpec spec;
     spec.format = SDL_AUDIO_S16;
     spec.channels = 1;
     spec.freq = AUDIO_RATE;
-
-    MIX_Audio *audio = MIX_LoadRawAudioNoCopy(mixer, data, (size_t)samples * sizeof(Sint16), &spec, true);
-    if (!audio) SDL_free(data);
+    MIX_Audio *audio = MIX_LoadRawAudioNoCopy(
+        mixer,
+        buffer->samples,
+        buffer->length * sizeof(*buffer->samples),
+        &spec,
+        true
+    );
+    if (audio) buffer->samples = NULL;
     return audio;
 }
 
-/* audio_sound - Play a square wave tone at the given frequency (Hz) for
- * the given duration (in BASIKA timer ticks). Implements the SOUND
- * statement. Falls back to a silent delay if audio init fails */
 void audio_sound(double frequency, double duration_ticks) {
     int ms = ticks_to_ms(duration_ticks);
-    if (frequency <= 0 || ms <= 0) return;
+    if (frequency <= 0 || ms <= 0 || !audio_enabled) return;
 
     if (audio_init()) {
-        MIX_Audio *audio = make_square_wave(frequency, ms);
-        if (audio) {
-            MIX_PlayAudio(mixer, audio);
-            delay_ms(ms);
-            MIX_DestroyAudio(audio);
-            return;
+        AudioBuffer buffer = {0};
+        if (buffer_append_tone(&buffer, frequency, ms)) {
+            MIX_Audio *audio = make_buffer_audio(&buffer);
+            if (audio && MIX_PlayAudio(mixer, audio)) {
+                MIX_DestroyAudio(audio);
+                SDL_free(buffer.samples);
+                delay_ms(ms);
+                return;
+            }
+            if (audio) MIX_DestroyAudio(audio);
         }
+        SDL_free(buffer.samples);
     }
 
     delay_ms(ms);
 }
 
-/* read_number - Parse a decimal integer from the MML string, advancing
- * the pointer past the digits. Returns 0 if no digits are found */
 static int read_number(const char **p) {
     int value = 0;
     while (isdigit((unsigned char)**p)) {
-        value = value * 10 + (**p - '0');
+        int digit = **p - '0';
+        if (value > (INT_MAX - digit) / 10) value = INT_MAX;
+        else value = value * 10 + digit;
         (*p)++;
     }
     return value;
 }
 
-/* note_frequency - Convert a semitone (0-11) and octave to a frequency
- * in Hz using the standard A440 tuning formula */
-static double note_frequency(int note, int octave) {
-    int midi = (octave + 1) * 12 + note;
+static double note_frequency(int semitone, int octave) {
+    int midi = (octave + 1) * 12 + semitone;
     return 440.0 * pow(2.0, (midi - 69) / 12.0);
 }
 
-/* note_ms - Calculate the duration of a note in milliseconds given the
- * tempo (BPM), note length (e.g. 4 = quarter note), and number of dots
- * (each dot adds half the remaining duration) */
 static int note_ms(int tempo, int length, int dots) {
-    if (tempo <= 0) tempo = 120;
-    if (length <= 0) length = 4;
-
     double ms = (60000.0 / tempo) * (4.0 / length);
     double add = ms / 2.0;
     for (int i = 0; i < dots; i++) {
@@ -150,14 +188,28 @@ static int note_ms(int tempo, int length, int dots) {
     return (int)(ms + 0.5);
 }
 
-/* audio_play - Parse and play a Music Macro Language (MML) string.
- * Implements the PLAY statement. Supports note letters A-G with sharps/
- * flats, octave (O), tempo (T), length (L), pause (P/R), octave
- * shift (< >), and dotted notes */
+static int append_rest(AudioBuffer *buffer, int ms) {
+    size_t samples = ((size_t)AUDIO_RATE * (size_t)ms) / 1000;
+    return buffer_append_silence(buffer, samples);
+}
+
+static int append_note(AudioBuffer *buffer, double frequency, int duration_ms, Articulation articulation) {
+    int sound_ms = duration_ms;
+    if (articulation == ARTICULATION_NORMAL) sound_ms = (duration_ms * 7 + 4) / 8;
+    else if (articulation == ARTICULATION_STACCATO) sound_ms = (duration_ms * 3 + 2) / 4;
+
+    if (!buffer_append_tone(buffer, frequency, sound_ms)) return 0;
+    return append_rest(buffer, duration_ms - sound_ms);
+}
+
 void audio_play(const char *mml) {
     int tempo = 120;
     int octave = 4;
     int default_length = 4;
+    Articulation articulation = ARTICULATION_NORMAL;
+    int total_ms = 0;
+    int buffer_ok = 1;
+    AudioBuffer buffer = {0};
     const char *p = mml ? mml : "";
 
     while (*p) {
@@ -167,15 +219,25 @@ void audio_play(const char *mml) {
 
         if (cmd == 'T') {
             int value = read_number(&p);
-            if (value > 0) tempo = value;
+            if (value >= 32 && value <= 255) tempo = value;
         } else if (cmd == 'O') {
             int value = read_number(&p);
-            if (value >= 0 && value <= 8) octave = value;
+            if (value >= 0 && value <= 6) octave = value;
         } else if (cmd == 'L') {
             int value = read_number(&p);
-            if (value > 0) default_length = value;
+            if (value >= 1 && value <= 64) default_length = value;
+        } else if (cmd == 'M') {
+            char mode = (char)toupper((unsigned char)*p);
+            if (mode == 'B' || mode == 'F' || mode == 'N' || mode == 'L' || mode == 'S') {
+                p++;
+                if (mode == 'B') music_foreground = 0;
+                else if (mode == 'F') music_foreground = 1;
+                else if (mode == 'N') articulation = ARTICULATION_NORMAL;
+                else if (mode == 'L') articulation = ARTICULATION_LEGATO;
+                else articulation = ARTICULATION_STACCATO;
+            }
         } else if (cmd == '>') {
-            if (octave < 8) octave++;
+            if (octave < 6) octave++;
         } else if (cmd == '<') {
             if (octave > 0) octave--;
         } else if (cmd == 'P' || cmd == 'R') {
@@ -186,21 +248,31 @@ void audio_play(const char *mml) {
                 dots++;
                 p++;
             }
-            delay_ms(note_ms(tempo, length, dots));
+            int ms = note_ms(tempo, length, dots);
+            if (ms <= INT_MAX - total_ms) total_ms += ms;
+            else total_ms = INT_MAX;
+            if (buffer_ok) buffer_ok = append_rest(&buffer, ms);
+        } else if (cmd == 'N') {
+            int number = read_number(&p);
+            int ms = note_ms(tempo, default_length, 0);
+            if (ms <= INT_MAX - total_ms) total_ms += ms;
+            else total_ms = INT_MAX;
+            if (buffer_ok) {
+                if (number == 0) buffer_ok = append_rest(&buffer, ms);
+                else if (number >= 1 && number <= 84) {
+                    buffer_ok = append_note(&buffer, note_frequency(number - 1, 0), ms, articulation);
+                }
+            }
         } else if (cmd >= 'A' && cmd <= 'G') {
-            static const int notes[] = {
-                9, 11, 0, 2, 4, 5, 7
-            };
-            int note = notes[cmd - 'A'];
+            static const int notes[] = {9, 11, 0, 2, 4, 5, 7};
+            int semitone = notes[cmd - 'A'];
             if (*p == '#' || *p == '+') {
-                note++;
+                semitone++;
                 p++;
             } else if (*p == '-') {
-                note--;
+                semitone--;
                 p++;
             }
-            if (note < 0) note += 12;
-            if (note > 11) note -= 12;
 
             int length = read_number(&p);
             if (length <= 0) length = default_length;
@@ -209,9 +281,28 @@ void audio_play(const char *mml) {
                 dots++;
                 p++;
             }
-
             int ms = note_ms(tempo, length, dots);
-            audio_sound(note_frequency(note, octave), ms * BASIKA_TICKS_PER_SECOND / 1000.0);
+            if (ms <= INT_MAX - total_ms) total_ms += ms;
+            else total_ms = INT_MAX;
+            if (buffer_ok) {
+                buffer_ok = append_note(&buffer, note_frequency(semitone, octave), ms, articulation);
+            }
         }
     }
+
+    if (audio_enabled && buffer_ok && buffer.length && audio_init()) {
+        MIX_Audio *audio = make_buffer_audio(&buffer);
+        if (audio) {
+            if (MIX_PlayAudio(mixer, audio)) {
+                MIX_DestroyAudio(audio);
+                SDL_free(buffer.samples);
+                buffer.samples = NULL;
+            } else {
+                MIX_DestroyAudio(audio);
+            }
+        }
+    }
+    SDL_free(buffer.samples);
+
+    if (audio_enabled && music_foreground) delay_ms(total_ms);
 }

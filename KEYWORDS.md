@@ -144,7 +144,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `GET (x1,y1)-(x2,y2), array`: Captures a screen area into a numeric array.
 - `LINE [(x1,y1)]-(x2,y2)[, [color][, [B|BF][, alpha]]]`: Draws lines or boxes. Alpha may follow color directly when no box mode is specified.
 - `PAINT (x,y)[, color[, border[, alpha]]]`: Area fill.
-- `PLAY "mml"`: Plays Music Macro Language.
+- `PLAY "mml"`: Plays Music Macro Language. Supports tempo (`T`), octave (`O`, `<`, `>`), default note length (`L`), sharps/flats, numeric notes (`N0`-`N84`), rests (`P`/`R`), dotted notes, and normal/legato/staccato articulation (`MN`/`ML`/`MS`). `MB` plays in the background; `MF` waits for playback to finish.
 - `PSET (x,y)[, color[, alpha]]`: Sets a pixel.
 - `PUT (x,y), array[, action]`: Places a captured area on the screen. Actions: `PSET`, `PRESET`, `AND`, `OR`, `XOR` (default).
 - `SCREEN mode`: Sets graphics mode.
@@ -155,7 +155,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `_PRINTSTRING (x, y), text$`: Draws `text$` at pixel coordinates `(x, y)` using the current `COLOR`. Does not move the text cursor or scroll. Works like QB64's `_PRINTSTRING`.
 - `_PRINTWIDTH(text$)`: Returns the pixel width that `text$` would occupy when rendered with the current font. Useful for centering text or layout calculations.
 - `SLEEP ms`: Pauses for a specified number of milliseconds.
-- `SOUND freq, duration`: Produces a tone.
+- `SOUND freq, duration`: Produces a tone for a duration in 18.2-Hz timer ticks. Frequency must be 37-32767 and duration 0-65535.
 - `VIEW [(x1,y1)-(x2,y2)[, [fillcolor][, border]]]`: Defines a physical viewport (in screen pixels). All subsequent graphics commands are clipped to this region. Coordinates are relative to the viewport origin unless `VIEW SCREEN` is used (absolute). Omit coordinates to reset.
 - `WINDOW [(x1,y1)-(x2,y2)]`: Maps a custom logical coordinate system onto the current viewport. After this call, all graphics commands accept logical coordinates. `(x1,y1)` is the bottom-left and `(x2,y2)` is the top-right by default (Y increases upward, like math). Use `WINDOW SCREEN` to keep Y increasing downward. Omit coordinates to reset to screen coordinates.
 - `_LOADIMAGE("filename", mode)`: Loads an image file and returns a numeric image handle. The optional mode is accepted for QB64 compatibility.

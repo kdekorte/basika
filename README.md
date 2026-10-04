@@ -73,6 +73,12 @@ Run in headless graphics mode (virtual framebuffer without showing a window, e.g
 ./basika --headless demo/hello.bas
 ```
 
+Run programs without producing sound or waiting for audio commands:
+
+```sh
+./basika --no-audio demo/hello.bas
+```
+
 Graphics demos can be run with a visible window using `-w`:
 
 ```sh
@@ -80,6 +86,12 @@ Graphics demos can be run with a visible window using `-w`:
 ./basika -w demo/printstring.bas
 ./basika -w demo/randomtext.bas
 ./basika -w demo/boing_ball.bas
+```
+
+Try the sound and `PLAY` Music Macro Language demo:
+
+```sh
+./basika demo/sound_demo.bas
 ```
 
 Image demos require `SDL3_image` and load the repository fixture from  
