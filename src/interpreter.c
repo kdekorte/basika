@@ -2414,6 +2414,189 @@ static Statement *find_block_if_end(Statement *start, Statement *limit) {
     return NULL;
 }
 
+#define MAX_SELECT_CASE_DEPTH 32
+typedef struct {
+    int branch_taken;
+    int is_string;
+    double num_val;
+    BasicString str_val; // Only used when is_string is true; owns heap data.
+} SelectCaseFrame;
+
+static int is_select_case_header(const Statement *stmt) {
+    return stmt && stmt->token_count >= 3 &&
+        stmt->tokens[0].type == TOKEN_SELECT && stmt->tokens[1].type == TOKEN_CASE;
+}
+
+static int is_case_else(const Statement *stmt) {
+    return stmt && stmt->token_count == 2 &&
+        stmt->tokens[0].type == TOKEN_CASE && stmt->tokens[1].type == TOKEN_ELSE;
+}
+
+static int is_case_clause(const Statement *stmt) {
+    return stmt && stmt->token_count >= 2 &&
+        stmt->tokens[0].type == TOKEN_CASE && !is_case_else(stmt);
+}
+
+static int is_end_select(const Statement *stmt) {
+    return stmt && stmt->token_count >= 2 &&
+        stmt->tokens[0].type == TOKEN_END && stmt->tokens[1].type == TOKEN_SELECT;
+}
+
+// Returns the next CASE/CASE ELSE clause at the same nesting depth, or the
+// matching END SELECT statement if no further clause exists before it.
+static Statement *find_next_case_clause(Statement *start, Statement *limit) {
+    int depth = 1;
+    for (Statement *stmt = start ? start->next : NULL;
+         stmt && stmt != limit;
+         stmt = stmt->next) {
+        if (is_end_select(stmt)) {
+            if (--depth == 0) return stmt;
+        } else if (is_select_case_header(stmt)) {
+            depth++;
+        } else if (depth == 1 && (is_case_clause(stmt) || is_case_else(stmt))) {
+            return stmt;
+        }
+    }
+    return NULL;
+}
+
+static Statement *find_select_case_end(Statement *start, Statement *limit) {
+    int depth = 1;
+    for (Statement *stmt = start ? start->next : NULL;
+         stmt && stmt != limit;
+         stmt = stmt->next) {
+        if (is_end_select(stmt)) {
+            if (--depth == 0) return stmt;
+        } else if (is_select_case_header(stmt)) {
+            depth++;
+        }
+    }
+    return NULL;
+}
+
+// Checks a single relational comparison (used by CASE IS) given the matched
+// operator token and optional second-character modifier token, following the
+// same combination rules used elsewhere for <>, <=, and >=.
+static int case_is_matches_numeric(double lhs, TokenType op, TokenType modifier, double rhs) {
+    switch (op) {
+        case TOKEN_EQUALS: return lhs == rhs;
+        case TOKEN_LESS:
+            if (modifier == TOKEN_GREATER) return lhs != rhs;
+            if (modifier == TOKEN_EQUALS) return lhs <= rhs;
+            return lhs < rhs;
+        case TOKEN_GREATER:
+            if (modifier == TOKEN_EQUALS) return lhs >= rhs;
+            return lhs > rhs;
+        default: return 0;
+    }
+}
+
+static int case_is_matches_string(int cmp, TokenType op, TokenType modifier) {
+    switch (op) {
+        case TOKEN_EQUALS: return cmp == 0;
+        case TOKEN_LESS:
+            if (modifier == TOKEN_GREATER) return cmp != 0;
+            if (modifier == TOKEN_EQUALS) return cmp <= 0;
+            return cmp < 0;
+        case TOKEN_GREATER:
+            if (modifier == TOKEN_EQUALS) return cmp >= 0;
+            return cmp > 0;
+        default: return 0;
+    }
+}
+
+// Parses a comparison operator (=, <>, <, >, <=, >=) following CASE IS.
+static void parse_case_is_operator(TokenStream *ts, TokenType *op, TokenType *modifier) {
+    *op = ts->tokens[ts->pos++].type;
+    *modifier = TOKEN_EOF;
+    if ((*op == TOKEN_LESS && (ts->tokens[ts->pos].type == TOKEN_GREATER || ts->tokens[ts->pos].type == TOKEN_EQUALS)) ||
+        (*op == TOKEN_GREATER && ts->tokens[ts->pos].type == TOKEN_EQUALS)) {
+        *modifier = ts->tokens[ts->pos++].type;
+    }
+}
+
+// Evaluates a CASE clause's comma-separated item list (values, TO ranges, and
+// IS comparisons) against the SELECT CASE frame's stored selector value.
+// Advances ts->pos to the end of the statement. "IS" is recognized
+// contextually here (as an identifier) rather than as a global keyword, so it
+// never collides with user variables named IS elsewhere in a program.
+static int evaluate_case_clause_tok(TokenStream *ts, Statement *exec_stmt, SelectCaseFrame *frame) {
+    int matched = 0;
+    while (ts->pos < exec_stmt->token_count && ts->tokens[ts->pos].type != TOKEN_EOF) {
+        int item_match = 0;
+        int is_is_clause = ts->tokens[ts->pos].type == TOKEN_IDENTIFIER &&
+            strcasecmp(ts->tokens[ts->pos].text, "IS") == 0;
+
+        if (is_is_clause) {
+            ts->pos++;
+            TokenType op, modifier;
+            parse_case_is_operator(ts, &op, &modifier);
+            if (frame->is_string) {
+                BasicString rhs = {0};
+                if (!parse_string_expression_tok_heap(ts, &rhs)) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    basic_string_release(&rhs);
+                    return 0;
+                }
+                int cmp = strcmp((const char *)(frame->str_val.data ? frame->str_val.data : (const unsigned char *)""),
+                                  (const char *)(rhs.data ? rhs.data : (const unsigned char *)""));
+                basic_string_release(&rhs);
+                item_match = case_is_matches_string(cmp, op, modifier);
+            } else {
+                double rhs = evaluate_expression_tok(ts);
+                item_match = case_is_matches_numeric(frame->num_val, op, modifier, rhs);
+            }
+        } else if (frame->is_string) {
+            BasicString v1 = {0};
+            if (!parse_string_expression_tok_heap(ts, &v1)) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                basic_string_release(&v1);
+                return 0;
+            }
+            if (ts->tokens[ts->pos].type == TOKEN_TO) {
+                ts->pos++;
+                BasicString v2 = {0};
+                if (!parse_string_expression_tok_heap(ts, &v2)) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    basic_string_release(&v2);
+                    basic_string_release(&v1);
+                    return 0;
+                }
+                const char *selector = (const char *)(frame->str_val.data ? frame->str_val.data : (const unsigned char *)"");
+                const char *lo = (const char *)(v1.data ? v1.data : (const unsigned char *)"");
+                const char *hi = (const char *)(v2.data ? v2.data : (const unsigned char *)"");
+                if (strcmp(lo, hi) > 0) { const char *tmp = lo; lo = hi; hi = tmp; }
+                item_match = strcmp(selector, lo) >= 0 && strcmp(selector, hi) <= 0;
+                basic_string_release(&v2);
+            } else {
+                const char *selector = (const char *)(frame->str_val.data ? frame->str_val.data : (const unsigned char *)"");
+                const char *val = (const char *)(v1.data ? v1.data : (const unsigned char *)"");
+                item_match = strcmp(selector, val) == 0;
+            }
+            basic_string_release(&v1);
+        } else {
+            double v1 = evaluate_expression_tok(ts);
+            if (ts->tokens[ts->pos].type == TOKEN_TO) {
+                ts->pos++;
+                double v2 = evaluate_expression_tok(ts);
+                double lo = v1 < v2 ? v1 : v2;
+                double hi = v1 < v2 ? v2 : v1;
+                item_match = frame->num_val >= lo && frame->num_val <= hi;
+            } else {
+                item_match = frame->num_val == v1;
+            }
+        }
+
+        if (item_match) matched = 1;
+        if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+            ts->pos++;
+        } else {
+            break;
+        }
+    }
+    return matched;
+}
+
 // Helper function to convert multi-dimensional indices to linear index
 static int calc_linear_index(Variable *var, int *indices, int num_indices) {
     if (var->num_dims == 0 || var->num_dims != num_indices) {
@@ -4617,6 +4800,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
     int target_depth = call_stack_depth - 1;
     BlockIfFrame block_if_stack[MAX_BLOCK_IF_DEPTH];
     int block_if_depth = 0;
+    SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
+    int select_case_depth = 0;
 
     while (curr_proc_stmt && curr_proc_stmt != proc->end_stmt && call_stack_depth > target_depth && !stop_running) {
         Statement *exec_stmt = curr_proc_stmt;
@@ -4792,6 +4977,68 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 continue;
             }
 
+            case TOKEN_SELECT: {
+                if (!is_select_case_header(exec_stmt) || ts.pos >= exec_stmt->token_count ||
+                    ts.tokens[ts.pos].type != TOKEN_CASE) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                ts.pos++; // consume CASE
+                if (select_case_depth >= MAX_SELECT_CASE_DEPTH) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    break;
+                }
+                SelectCaseFrame *frame = &select_case_stack[select_case_depth++];
+                frame->branch_taken = 0;
+                frame->is_string = is_string_token(&ts.tokens[ts.pos]);
+                if (frame->is_string) {
+                    frame->str_val = (BasicString){0};
+                    if (!parse_string_expression_tok_heap(&ts, &frame->str_val)) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                } else {
+                    frame->num_val = evaluate_expression_tok(&ts);
+                }
+                continue;
+            }
+
+            case TOKEN_CASE: {
+                if (select_case_depth == 0) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                SelectCaseFrame *frame = &select_case_stack[select_case_depth - 1];
+                if (frame->branch_taken) {
+                    Statement *end_sel = find_select_case_end(exec_stmt, proc->end_stmt);
+                    if (!end_sel) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    curr_proc_stmt = end_sel;
+                    jumped = 1;
+                    break;
+                }
+                if (is_case_else(exec_stmt)) {
+                    frame->branch_taken = 1;
+                    ts.pos = exec_stmt->token_count;
+                    continue;
+                }
+                int matched = evaluate_case_clause_tok(&ts, exec_stmt, frame);
+                if (matched) {
+                    frame->branch_taken = 1;
+                    continue;
+                }
+                Statement *branch = find_next_case_clause(exec_stmt, proc->end_stmt);
+                if (!branch) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                curr_proc_stmt = branch;
+                jumped = 1;
+                break;
+            }
+
             case TOKEN_EXIT:
             case TOKEN_END:
                 if (is_end_if(exec_stmt) && t.type == TOKEN_END) {
@@ -4800,6 +5047,18 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         break;
                     }
                     block_if_depth--;
+                    ts.pos++;
+                    continue;
+                }
+                if (is_end_select(exec_stmt) && t.type == TOKEN_END) {
+                    if (select_case_depth == 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    select_case_depth--;
+                    if (select_case_stack[select_case_depth].is_string) {
+                        basic_string_release(&select_case_stack[select_case_depth].str_val);
+                    }
                     ts.pos++;
                     continue;
                 }
@@ -8278,6 +8537,8 @@ void run_program() {
     int poll_counter = 0;
     BlockIfFrame block_if_stack[MAX_BLOCK_IF_DEPTH];
     int block_if_depth = 0;
+    SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
+    int select_case_depth = 0;
     while (curr && !stop_running) {
 
         if (curr->token_count >= 2 && curr->tokens[0].type == TOKEN_TYPE) {
@@ -8444,6 +8705,70 @@ void run_program() {
                 frame->branch_taken = 1;
                 frame->else_seen = 1;
                 continue;
+            }
+
+            case TOKEN_SELECT: {
+                if (!is_select_case_header(exec_stmt) || ts.pos >= exec_stmt->token_count ||
+                    ts.tokens[ts.pos].type != TOKEN_CASE) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                ts.pos++; // consume CASE
+                if (select_case_depth >= MAX_SELECT_CASE_DEPTH) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    break;
+                }
+                SelectCaseFrame *frame = &select_case_stack[select_case_depth++];
+                frame->branch_taken = 0;
+                frame->is_string = is_string_token(&ts.tokens[ts.pos]);
+                if (frame->is_string) {
+                    frame->str_val = (BasicString){0};
+                    if (!parse_string_expression_tok_heap(&ts, &frame->str_val)) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                } else {
+                    frame->num_val = evaluate_expression_tok(&ts);
+                }
+                continue;
+            }
+
+            case TOKEN_CASE: {
+                if (select_case_depth == 0) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                SelectCaseFrame *frame = &select_case_stack[select_case_depth - 1];
+                if (frame->branch_taken) {
+                    Statement *end_sel = find_select_case_end(exec_stmt, NULL);
+                    if (!end_sel) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    curr = end_sel;
+                    resume_ts_pos = 0;
+                    jumped = 1;
+                    break;
+                }
+                if (is_case_else(exec_stmt)) {
+                    frame->branch_taken = 1;
+                    ts.pos = exec_stmt->token_count;
+                    continue;
+                }
+                int matched = evaluate_case_clause_tok(&ts, exec_stmt, frame);
+                if (matched) {
+                    frame->branch_taken = 1;
+                    continue;
+                }
+                Statement *branch = find_next_case_clause(exec_stmt, NULL);
+                if (!branch) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                curr = branch;
+                resume_ts_pos = 0;
+                jumped = 1;
+                break;
             }
 
             // Handle FOR loop
@@ -8930,6 +9255,18 @@ void run_program() {
                         break;
                     }
                     block_if_depth--;
+                    ts.pos++;
+                    continue;
+                }
+                if (is_end_select(exec_stmt) && ts.pos == 1) {
+                    if (select_case_depth == 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    select_case_depth--;
+                    if (select_case_stack[select_case_depth].is_string) {
+                        basic_string_release(&select_case_stack[select_case_depth].str_val);
+                    }
                     ts.pos++;
                     continue;
                 }
