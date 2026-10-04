@@ -40,3 +40,5 @@ This document lists the runtime error codes supported by Basika. These codes can
 | 71 | Disk not ready | The storage device is not accessible. |
 | 75 | Path/File access error | An error occurred while accessing a path or file. |
 | 76 | Path not found | The specified directory path does not exist. |
+| 90 | DO without LOOP | A `DO` loop was started but no matching `LOOP` was found. |
+| 91 | LOOP without DO | A `LOOP` statement was encountered without a matching `DO`. |

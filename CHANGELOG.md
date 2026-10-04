@@ -2,6 +2,11 @@
 
 All notable changes to this project are recorded in this file.
 
+## 0.99.7 — 2026-10-04
+
+- **QBASIC `DO...LOOP`**: Added the full `DO...LOOP` block construct, including the infinite `DO ... LOOP` form, pre-test `DO WHILE`/`DO UNTIL` conditions, and post-test `LOOP WHILE`/`LOOP UNTIL` conditions. Supports `EXIT DO` to break out of the innermost loop, arbitrary nesting (including within `IF`, `FOR`, `WHILE`, and other `DO` blocks), and use inside `SUB`/`FUNCTION` procedures.
+- **DO...LOOP Regression Coverage**: Added tests covering every loop variant, nested `DO` loops, `EXIT DO` scoping to the innermost loop, and `DO...LOOP` inside procedures.
+
 ## 0.99.6 — 2026-10-03
 
 - **Alpha Drawing Primitives**: Added optional alpha values to `PSET`, `LINE`, and `PAINT`, complementing `CIRCLE`. `PAINT` composites against existing pixels, and `GET` now reports the nearest palette color for blended pixels.
