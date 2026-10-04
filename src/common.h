@@ -1,7 +1,7 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#define BASIKA_VERSION "0.99.5"
+#define BASIKA_VERSION "0.99.6"
 #define BASIC_STRING_MAX (64 * 1024) // Legacy temporary-buffer limit; runtime strings grow dynamically.
 #define BASIC_TOKEN_TEXT_MAX 256
 
