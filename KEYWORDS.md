@@ -8,18 +8,18 @@ String values use length-aware heap-backed storage and grow dynamically as
 needed. Dynamic strings are the default; fixed-length declarations are available
 with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 
-`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CHDIR`,
+`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
 `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
-`HEX$`, `IF`, `INKEY$`, `INPUT`, `INSTR`, `INT`, `KEY`, `KILL`, `LCASE$`,
+`HEX$`, `IF`, `INKEY$`, `INPUT`, `INSTR`, `INT`, `IS`, `KEY`, `KILL`, `LCASE$`,
 `LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LOOP`, `LSET`,
 `LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
 `NOT`, `OCT$`, `OFF`, `ON`, `OPEN`, `OPTION`, `OR`, `PAINT`, `PEEK`, `PLAY`,
 `POKE`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
-`SCREEN`, `SCREENSHOT`, `SEEK`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
+`SCREEN`, `SCREENSHOT`, `SEEK`, `SELECT`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DISPLAY`, `_FONT`,
@@ -89,6 +89,12 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DO ... LOOP WHILE condition`: Post-test loop; the body always runs at least once, then repeats while `condition` is true.
 - `DO ... LOOP UNTIL condition`: Post-test loop; the body always runs at least once, then repeats until `condition` becomes true.
 - `EXIT DO`: Exits the innermost active `DO...LOOP` prematurely.
+- `SELECT CASE expression ... END SELECT`: Multi-way branch. Evaluates `expression` once, then dispatches to the first matching `CASE` clause; only that branch executes (no fallthrough). Works with both numeric and string expressions. Supports nesting, and use inside `IF`, loop, and `SUB`/`FUNCTION` bodies.
+  - `CASE value1[, value2...]`: Matches if `expression` equals any listed value.
+  - `CASE value1 TO value2`: Matches if `expression` falls within the inclusive range `value1` to `value2`.
+  - `CASE IS comparison-op value`: Matches if `expression comparison-op value` is true, where `comparison-op` is one of `=`, `<>`, `<`, `>`, `<=`, `>=`. `IS` is only recognized as this special comparison marker at the start of a `CASE` item and otherwise remains usable as an ordinary variable name.
+  - Multiple comma-separated items (values, `TO` ranges, and `IS` comparisons) may be combined within a single `CASE` clause.
+  - `CASE ELSE`: Catch-all branch matched when no preceding `CASE` clause matches.
 
 ## Variables and Data
 - `DATA constant1[, constant2...]`: Internal data storage.
