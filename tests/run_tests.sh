@@ -100,6 +100,7 @@ TESTS=(
   "tests/control_flow/if_else_multiple_statements"
   "tests/control_flow/if_else_nested"
   "tests/control_flow/if_else_string_vars"
+  "tests/control_flow/block_if"
   "tests/errors/syntax_error"
   "tests/errors/unnumbered_syntax_error"
   "tests/errors/return_error"

@@ -2306,6 +2306,66 @@ typedef struct {
 static WhileLoop while_stack[16];
 static int while_ptr = 0;
 
+#define MAX_BLOCK_IF_DEPTH 128
+typedef struct {
+    int branch_taken;
+    int else_seen;
+} BlockIfFrame;
+
+static int is_block_if_header(const Statement *stmt) {
+    if (!stmt || stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_IF) {
+        return 0;
+    }
+    return stmt->tokens[stmt->token_count - 1].type == TOKEN_THEN;
+}
+
+static int is_block_elseif_header(const Statement *stmt) {
+    if (!stmt || stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_ELSEIF) {
+        return 0;
+    }
+    return stmt->tokens[stmt->token_count - 1].type == TOKEN_THEN;
+}
+
+static int is_block_else(const Statement *stmt) {
+    return stmt && stmt->token_count == 1 && stmt->tokens[0].type == TOKEN_ELSE;
+}
+
+static int is_end_if(const Statement *stmt) {
+    return stmt && stmt->token_count >= 2 &&
+        stmt->tokens[0].type == TOKEN_END && stmt->tokens[1].type == TOKEN_IF;
+}
+
+static Statement *find_next_block_if_clause(Statement *start, Statement *limit) {
+    int depth = 1;
+    for (Statement *stmt = start ? start->next : NULL;
+         stmt && stmt != limit;
+         stmt = stmt->next) {
+        if (is_end_if(stmt)) {
+            if (--depth == 0) return stmt;
+        } else if (is_block_if_header(stmt)) {
+            depth++;
+        } else if (depth == 1 &&
+                   (is_block_else(stmt) || is_block_elseif_header(stmt))) {
+            return stmt;
+        }
+    }
+    return NULL;
+}
+
+static Statement *find_block_if_end(Statement *start, Statement *limit) {
+    int depth = 1;
+    for (Statement *stmt = start ? start->next : NULL;
+         stmt && stmt != limit;
+         stmt = stmt->next) {
+        if (is_end_if(stmt)) {
+            if (--depth == 0) return stmt;
+        } else if (is_block_if_header(stmt)) {
+            depth++;
+        }
+    }
+    return NULL;
+}
+
 // Helper function to convert multi-dimensional indices to linear index
 static int calc_linear_index(Variable *var, int *indices, int num_indices) {
     if (var->num_dims == 0 || var->num_dims != num_indices) {
@@ -4207,6 +4267,7 @@ static int cached_expression_start(const Statement *statement, int pos) {
         case TOKEN_STEP:
         case TOKEN_THEN:
         case TOKEN_ELSE:
+        case TOKEN_ELSEIF:
         case TOKEN_COMMA:
         case TOKEN_SEMICOLON:
         case TOKEN_COLON:
@@ -4505,6 +4566,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
     int saved_has_explicit_line_number = current_has_explicit_line_number;
     Statement *curr_proc_stmt = proc->start_stmt;
     int target_depth = call_stack_depth - 1;
+    BlockIfFrame block_if_stack[MAX_BLOCK_IF_DEPTH];
+    int block_if_depth = 0;
 
     while (curr_proc_stmt && curr_proc_stmt != proc->end_stmt && call_stack_depth > target_depth && !stop_running) {
         Statement *exec_stmt = curr_proc_stmt;
@@ -4529,6 +4592,29 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_THEN || ts.tokens[ts.pos].type == TOKEN_GOTO)) {
                     ts.pos++;
                 }
+
+                if (is_block_if_header(exec_stmt)) {
+                    if (block_if_depth >= MAX_BLOCK_IF_DEPTH) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        break;
+                    }
+                    block_if_stack[block_if_depth++] = (BlockIfFrame){
+                        .branch_taken = cond != 0,
+                        .else_seen = 0
+                    };
+                    if (cond == 0) {
+                        Statement *branch = find_next_block_if_clause(exec_stmt, proc->end_stmt);
+                        if (!branch) {
+                            report_runtime_error(ERR_SYNTAX_ERROR);
+                            break;
+                        }
+                        curr_proc_stmt = branch;
+                        jumped = 1;
+                        break;
+                    }
+                    continue;
+                }
+
                 if (cond != 0) continue;
 
                 int has_remaining_tokens = 0;
@@ -4582,7 +4668,59 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 continue;
             }
 
+            case TOKEN_ELSEIF: {
+                if (!is_block_elseif_header(exec_stmt) || block_if_depth == 0) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                BlockIfFrame *frame = &block_if_stack[block_if_depth - 1];
+                if (frame->branch_taken || frame->else_seen) {
+                    Statement *end_if = find_block_if_end(exec_stmt, proc->end_stmt);
+                    if (!end_if) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    curr_proc_stmt = end_if;
+                    jumped = 1;
+                    break;
+                }
+                double cond = evaluate_expression_tok(&ts);
+                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_THEN) ts.pos++;
+                if (cond != 0) {
+                    frame->branch_taken = 1;
+                    continue;
+                }
+                Statement *branch = find_next_block_if_clause(exec_stmt, proc->end_stmt);
+                if (!branch) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                curr_proc_stmt = branch;
+                jumped = 1;
+                break;
+            }
+
             case TOKEN_ELSE: {
+                if (is_block_else(exec_stmt)) {
+                    if (block_if_depth == 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    BlockIfFrame *frame = &block_if_stack[block_if_depth - 1];
+                    if (frame->branch_taken || frame->else_seen) {
+                        Statement *end_if = find_block_if_end(exec_stmt, proc->end_stmt);
+                        if (!end_if) {
+                            report_runtime_error(ERR_SYNTAX_ERROR);
+                            break;
+                        }
+                        curr_proc_stmt = end_if;
+                        jumped = 1;
+                        break;
+                    }
+                    frame->branch_taken = 1;
+                    frame->else_seen = 1;
+                    continue;
+                }
                 int depth = 1;
                 Statement *s = exec_stmt->next;
                 while (s && s != proc->end_stmt && depth > 0) {
@@ -4607,6 +4745,15 @@ static void execute_procedure_statements(ProcedureDef *proc) {
 
             case TOKEN_EXIT:
             case TOKEN_END:
+                if (is_end_if(exec_stmt) && t.type == TOKEN_END) {
+                    if (block_if_depth == 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    block_if_depth--;
+                    ts.pos++;
+                    continue;
+                }
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
                     current_executing_line = saved_line;
                     return;
@@ -8004,6 +8151,8 @@ void run_program() {
     }
 
     int poll_counter = 0;
+    BlockIfFrame block_if_stack[MAX_BLOCK_IF_DEPTH];
+    int block_if_depth = 0;
     while (curr && !stop_running) {
 
         if (curr->token_count >= 2 && curr->tokens[0].type == TOKEN_TYPE) {
@@ -8072,7 +8221,30 @@ void run_program() {
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_THEN || ts.tokens[ts.pos].type == TOKEN_GOTO)) {
                     ts.pos++;
                 }
-                
+
+                if (is_block_if_header(exec_stmt)) {
+                    if (block_if_depth >= MAX_BLOCK_IF_DEPTH) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                        break;
+                    }
+                    block_if_stack[block_if_depth++] = (BlockIfFrame){
+                        .branch_taken = cond != 0,
+                        .else_seen = 0
+                    };
+                    if (cond == 0) {
+                        Statement *branch = find_next_block_if_clause(exec_stmt, NULL);
+                        if (!branch) {
+                            report_runtime_error(ERR_SYNTAX_ERROR);
+                            break;
+                        }
+                        curr = branch;
+                        resume_ts_pos = 0;
+                        jumped = 1;
+                        break;
+                    }
+                    continue;
+                }
+
                 if (cond != 0) continue;
                 
                 // Find ELSE or end of line
@@ -8088,7 +8260,67 @@ void run_program() {
                 }
                 continue;
             }
-            
+
+            case TOKEN_ELSEIF: {
+                if (!is_block_elseif_header(exec_stmt) || block_if_depth == 0) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                BlockIfFrame *frame = &block_if_stack[block_if_depth - 1];
+                if (frame->branch_taken || frame->else_seen) {
+                    Statement *end_if = find_block_if_end(exec_stmt, NULL);
+                    if (!end_if) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    curr = end_if;
+                    resume_ts_pos = 0;
+                    jumped = 1;
+                    break;
+                }
+                double cond = evaluate_expression_tok(&ts);
+                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_THEN) ts.pos++;
+                if (cond != 0) {
+                    frame->branch_taken = 1;
+                    continue;
+                }
+                Statement *branch = find_next_block_if_clause(exec_stmt, NULL);
+                if (!branch) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                curr = branch;
+                resume_ts_pos = 0;
+                jumped = 1;
+                break;
+            }
+
+            case TOKEN_ELSE: {
+                if (!is_block_else(exec_stmt)) {
+                    ts.pos = exec_stmt->token_count;
+                    continue;
+                }
+                if (block_if_depth == 0) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                BlockIfFrame *frame = &block_if_stack[block_if_depth - 1];
+                if (frame->branch_taken || frame->else_seen) {
+                    Statement *end_if = find_block_if_end(exec_stmt, NULL);
+                    if (!end_if) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    curr = end_if;
+                    resume_ts_pos = 0;
+                    jumped = 1;
+                    break;
+                }
+                frame->branch_taken = 1;
+                frame->else_seen = 1;
+                continue;
+            }
+
             // Handle FOR loop
             case TOKEN_FOR: {
                 Token *var_token = &ts.tokens[ts.pos++];
@@ -8478,6 +8710,15 @@ void run_program() {
             }
 
             case TOKEN_END:
+                if (is_end_if(exec_stmt) && ts.pos == 1) {
+                    if (block_if_depth == 0) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    block_if_depth--;
+                    ts.pos++;
+                    continue;
+                }
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
                     if (call_stack_depth > 0) {
                         CallFrame *frame = &call_stack[call_stack_depth - 1];
@@ -8498,12 +8739,6 @@ void run_program() {
                 }
                 stop_running = 1;
                 break;
-
-            // Handle stray ELSE token (should not execute if we got here)
-            case TOKEN_ELSE:
-                // Skip this ELSE clause - it means condition was true or we just finished THEN part
-                ts.pos = exec_stmt->token_count;
-                continue;
 
             case TOKEN_RESUME: {
                 Token rt = (ts.pos < exec_stmt->token_count)

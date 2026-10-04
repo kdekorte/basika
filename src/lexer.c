@@ -45,6 +45,7 @@ static const KeywordMap keyword_table[] = {
     {"DIM", TOKEN_DIM},
     {"DRAW", TOKEN_DRAW},
     {"ELSE", TOKEN_ELSE},
+    {"ELSEIF", TOKEN_ELSEIF},
     {"END", TOKEN_END},
     {"ENVIRON", TOKEN_ENVIRON},
     {"ENVIRON$", TOKEN_ENVIRON},

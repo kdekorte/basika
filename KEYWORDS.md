@@ -11,7 +11,7 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
-`DELETE`, `DIM`, `DRAW`, `ELSE`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
+`DELETE`, `DIM`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
 `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
 `HEX$`, `IF`, `INKEY$`, `INPUT`, `INSTR`, `INT`, `KEY`, `KILL`, `LCASE$`,
 `LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LSET`,
@@ -75,7 +75,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `FOR var = start TO end [STEP step] ... NEXT [var]`: Standard loop.
 - `GOSUB line|label ... RETURN`: Subroutine call and return.
 - `GOTO line|label`: Unconditional jump.
-- `IF condition THEN [line | label | statement] [ELSE statement]`: Conditional execution.
+- `IF condition THEN [line | label | statement] [ELSE statement]`: Conditional execution. Multiline `IF...THEN` blocks support `ELSEIF`, `ELSE`, and `END IF`, including nesting and use in procedures.
 - `ON expression {GOTO | GOSUB} line1|label1[, line2|label2...]`: Computed jump.
 - `ON KEY(n) GOSUB line`: Enables a key trap for key `n`.
 - `ON TIMER(n) GOSUB line`: Enables a periodic timer trap.

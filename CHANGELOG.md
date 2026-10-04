@@ -15,6 +15,7 @@ All notable changes to this project are recorded in this file.
 - **Audio Compatibility**: Expanded `PLAY` with foreground/background playback, articulation modes, volume control, numeric notes, and MML tempo, octave, accidental, rest, and dotted-note coverage. Faded note edges to reduce clicks. `SOUND` now validates BASICA frequency and duration ranges. Added `--no-audio` for delay-free audio tests and automation.
 - **Sound Demo**: Added `demo/sound_demo.bas` to demonstrate `SOUND`, `BEEP`, `PLAY` note controls and articulation, numeric notes, rests, and background/foreground playback.
 - **Boing Ball Sound**: Added short, deep-pitched, quieter background-played retro boing cues when the ball bounces off the side walls or floor.
+- **Multiline IF Blocks**: Added QBASIC-style `IF...THEN`, `ELSEIF`, `ELSE`, and `END IF` blocks with nested conditionals and procedure support, while preserving single-line `IF` behavior.
 
 ## 0.99.5 — 2026-10-02
 
