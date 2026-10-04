@@ -1,0 +1,9 @@
+REM Infinite DO...LOOP with EXIT DO
+I = 1
+DO
+  PRINT I
+  IF I >= 3 THEN EXIT DO
+  I = I + 1
+LOOP
+PRINT "DONE"
+END
