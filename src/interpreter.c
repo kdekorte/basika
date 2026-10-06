@@ -88,6 +88,7 @@ typedef struct {
 } TokenStream;
 
 static int print_col = 0;
+static int print_row = 0;
 static int internal_argc = 0;
 static char **internal_argv = NULL;
 static char internal_command_line[1024] = "";
@@ -4368,6 +4369,7 @@ void basic_output(const char *text) { // Made non-static
     for (int i = 0; text[i]; i++) {
         if (text[i] == '\n' || text[i] == '\r') {
             print_col = 0;
+            print_row++;
         } else {
             print_col++;
         }
@@ -5823,9 +5825,51 @@ static double primary_tok(TokenStream *ts) {
         if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERR") == 0) return (double)last_runtime_error_code;
         if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERL") == 0) return (double)last_runtime_error_line;
 
+        if ((token->text[0] == 'P' || token->text[0] == 'p') &&
+            strcasecmp(token->text, "POINT") == 0) {
+            if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+                ts->pos++;
+                double x = evaluate_expression_tok(ts);
+                if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+                    ts->pos++;
+                    double y = evaluate_expression_tok(ts);
+                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+                    if (!graphics_is_active()) init_graphics();
+                    return (double)get_pixel(x, y);
+                } else {
+                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+                    int n = (int)x;
+                    double cx, cy;
+                    get_graphics_cursor(&cx, &cy);
+                    if (n == 0) return cx;
+                    if (n == 1) return cy;
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
         int const_idx = find_named_constant(token->text);
         if (const_idx >= 0) {
             return named_constants[const_idx].value;
+        }
+
+        if (strcasecmp(token->text, "CSRLIN") == 0) {
+            int row, col;
+            get_text_cursor(&row, &col);
+            if (!graphics_is_active()) row = print_row + 1;
+            return (double)row;
+        }
+        if (strcasecmp(token->text, "POS") == 0) {
+            if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
+            (void)evaluate_expression_tok(ts);
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            int col = print_col + 1;
+            if (graphics_is_active()) {
+                int row;
+                get_text_cursor(&row, &col);
+            }
+            return (double)col;
         }
 
         if ((token->text[0] == 'F' || token->text[0] == 'f') &&
@@ -5920,9 +5964,9 @@ static double primary_tok(TokenStream *ts) {
             if (!graphics_is_active()) init_graphics();
             return (double)graphics_loadimage(buf, mode);
         }
-        return 0;
-    }
-    if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
+         return 0;
+     }
+     if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
         TokenType ft = token->type;
         int has_arg = 0;
         double arg = 0;
@@ -6325,9 +6369,51 @@ static double primary(const char **input) {
         if (strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
         if (strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
 
+        if ((t.text[0] == 'P' || t.text[0] == 'p') &&
+            strcasecmp(t.text, "POINT") == 0) {
+            Token next = get_next_token(input);
+            if (next.type == TOKEN_LPAREN) {
+                double x = evaluate_expression(input);
+                Token sep = get_next_token(input);
+                if (sep.type == TOKEN_COMMA) {
+                    double y = evaluate_expression(input);
+                    get_next_token(input); // consume ')'
+                    if (!graphics_is_active()) init_graphics();
+                    return (double)get_pixel(x, y);
+                } else {
+                    int n = (int)x;
+                    double cx, cy;
+                    get_graphics_cursor(&cx, &cy);
+                    if (n == 0) return cx;
+                    if (n == 1) return cy;
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
         int const_idx = find_named_constant(t.text);
         if (const_idx >= 0) {
             return named_constants[const_idx].value;
+        }
+
+        if (strcasecmp(t.text, "CSRLIN") == 0) {
+            int row, col;
+            get_text_cursor(&row, &col);
+            if (!graphics_is_active()) row = print_row + 1;
+            return (double)row;
+        }
+        if (strcasecmp(t.text, "POS") == 0) {
+            get_next_token(input); // consume '('
+            double n = evaluate_expression(input);
+            get_next_token(input); // consume ')'
+            (void)n;
+            int col = print_col + 1;
+            if (graphics_is_active()) {
+                int row;
+                get_text_cursor(&row, &col);
+            }
+            return (double)col;
         }
 
         if (strncasecmp(t.text, "FN", 2) == 0) {
@@ -6425,9 +6511,9 @@ static double primary(const char **input) {
             return (double)graphics_loadimage(buf, mode);
         }
         return 0;
-    }
-    if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
-        TokenType ft = t.type;
+     }
+     if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
+         TokenType ft = t.type;
         const char *saved = *input;
         Token next = get_next_token(input);
         double arg = 0;
@@ -7027,7 +7113,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (fnum != -1 && file_handles[fnum]) {
                     fprintf(file_handles[fnum], "%s", val_buf);
                     for (int k = 0; val_buf[k]; k++) {
-                        if (val_buf[k] == '\n' || val_buf[k] == '\r') print_col = 0;
+                        if (val_buf[k] == '\n' || val_buf[k] == '\r') { print_col = 0; print_row++; }
                         else print_col++;
                     }
                 } else {
@@ -7065,6 +7151,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     if (fnum != -1 && file_handles[fnum]) {
                         fprintf(file_handles[fnum], "\n");
                         print_col = 0;
+                        print_row++;
                     } else {
                         basic_output("\n");
                     }
@@ -7083,6 +7170,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             clear_variables(0); // Full reset for NEW
             clear_data_pointer();
             print_col = 0;
+            print_row = 0;
         } else if (t.type == TOKEN_BEEP) {
             if (audio_is_enabled()) basic_output("\a");
         } else if (t.type == TOKEN_SOUND) {
@@ -8224,6 +8312,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             graphics_cls();
             if (graphics_is_active()) graphics_present_if_autodisplay();
             print_col = 0;
+            print_row = 0;
         } else if (t.type == TOKEN_SLEEP) {
             int ms = (int)evaluate_expression(&ptr);
             graphics_sleep(ms);
@@ -8611,6 +8700,7 @@ void run_program() {
     call_stack_depth = 0;
     scan_procedures();
     print_col = 0;
+    print_row = 0;
     clear_data_pointer();
     Statement *curr = get_head();
     const char *resume_ptr = NULL;

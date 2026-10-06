@@ -29,6 +29,7 @@ void graphics_reset_window();
 void graphics_set_view(int use_screen, int x1, int y1, int x2, int y2, int color, int boundary);
 void graphics_reset_view();
 void set_text_cursor(int row, int col);
+void get_text_cursor(int *row, int *col);
 void set_text_color(int color);
 void graphics_cls();
 int graphics_is_active();

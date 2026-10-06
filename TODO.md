@@ -11,8 +11,8 @@
 - `WRITE [#n,] expr1[, expr2...]`: Writes comma-delimited, quoted output to the screen or a file.
 - `LOCK #n [, record | record1 TO record2]` / `UNLOCK #n [...]`: File/record locking for shared access.
 - `PALETTE` / `PALETTE USING`: Remaps screen color palette entries.
-- `POINT(x,y)` / `POINT(n)`: Returns the color of a pixel or the last graphics cursor coordinate.
-- `CSRLIN` / `POS(n)`: Returns the current cursor row/column.
+- ~~`POINT(x,y)` / `POINT(n)`: Returns the color of a pixel or the last graphics cursor coordinate.~~
+- ~~`CSRLIN` / `POS(n)`: Returns the current cursor row/column.~~
 - `PEN(n)` / `ON PEN GOSUB`: Light pen input and trapping.
 - `STICK(n)`: Joystick position (note: `STRIG` is already supported for joystick/trigger buttons).
 - `WIDTH [#n,] columns[, rows]`: Sets screen or file text width.

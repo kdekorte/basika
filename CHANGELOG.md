@@ -5,6 +5,9 @@ All notable changes to this project are recorded in this file.
 ## Unreleased
 
 - **QBASIC `CONST`**: Added the `CONST name = expression` statement for declaring named numeric constants. Constants can be used in numeric expressions, array dimensioning, `FOR` loop bounds, and `DEF FN` bodies; they are resolved at runtime so they may reference variables in scope at execution time. Constants are cleared on `RUN` and `NEW`. Added test coverage.
+- **QBASIC `POINT`**: Added `POINT(x, y)` to read the palette color index of a pixel and `POINT(0)`/`POINT(1)` to read the last graphics cursor X/Y coordinate. Implemented as an identifier-level function (not a keyword) to avoid conflicts with identifiers like `Point`. Returns -1 for out-of-bounds coordinates and 0 for `POINT(n)` with n outside 0/1. Added test coverage.
+- **QBASIC `CSRLIN` and `POS(n)`**: Added `CSRLIN` to return the current text cursor row (1-based) and `POS(n)` to return the current text cursor column (1-based). The `n` argument is accepted but ignored per QBASIC specification. Added text cursor row (`print_row`) tracking to the interpreter and `get_text_cursor()` to the graphics subsystem. Added test coverage.
+- **CONST/Point Performance**: Added an early-out guard in the named-constant lookup (`find_named_constant`) that skips string normalization when no constants are defined, keeping the 10-million-iteration BASICA benchmark at its prior ~0.59-second baseline.
 
 ## 0.99.6 — 2026-10-03
 
