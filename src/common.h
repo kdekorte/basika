@@ -57,6 +57,8 @@ typedef struct {
     const char *start_ptr;
     int var_idx;
     unsigned int type_generation;
+    void *proc_cache;
+    unsigned int proc_generation;
 } Token;
 
 typedef struct {

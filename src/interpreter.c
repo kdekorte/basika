@@ -204,6 +204,7 @@ typedef struct {
 
 static ProcedureDef registered_procs[MAX_PROCEDURES];
 static int proc_count = 0;
+static unsigned int proc_generation = 1; /* bumped on each scan_procedures */
 
 #define MAX_CALL_FRAMES 64
 
@@ -244,6 +245,16 @@ static ProcedureDef *find_procedure(const char *name) {
         if (strcasecmp(registered_procs[p].name, norm) == 0) return &registered_procs[p];
     }
     return NULL;
+}
+
+/* find_procedure_tok - Cached find_procedure for hot expression paths; the
+ * result is reused until scan_procedures rebuilds the procedure table */
+static ProcedureDef *find_procedure_tok(Token *token) {
+    if (token->proc_generation != proc_generation) {
+        token->proc_cache = find_procedure(token->text);
+        token->proc_generation = proc_generation;
+    }
+    return (ProcedureDef *)token->proc_cache;
 }
 
 static ProcedureDef *find_procedure_by_header(Statement *header_stmt) {
@@ -4625,6 +4636,7 @@ void compile_statement_expressions(Statement *statement) {
 }
 
 static void scan_procedures(void) {
+    proc_generation++;
     proc_count = 0;
     Statement *stmt = get_head();
     while (stmt) {
@@ -5887,7 +5899,7 @@ static double primary_tok(TokenStream *ts) {
             }
         }
 
-        ProcedureDef *pfunc = proc_count > 0 ? find_procedure(token->text) : NULL;
+        ProcedureDef *pfunc = proc_count > 0 ? find_procedure_tok(token) : NULL;
         if (pfunc && pfunc->is_function) {
             return evaluate_function_call_numeric(pfunc, ts);
         }
@@ -9604,7 +9616,10 @@ void run_program() {
         }
 
         if (!stop_running && !jumped) {
-            curr = find_next_statement(current_executing_line);
+            /* The program list is sorted, so the successor of the statement
+             * just executed is the next line; avoid rescanning from head. */
+            curr = (exec_stmt->line_number == current_executing_line)
+                ? exec_stmt->next : find_next_statement(current_executing_line);
         }
 
         if (runtime_error_occurred && on_error_goto_line > 0) {

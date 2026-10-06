@@ -229,7 +229,9 @@ Token get_next_token(const char **input) {
     token.double_val = 0.0;
     token.var_idx = -1;
     token.type_generation = 0;
-    
+    token.proc_cache = NULL;
+    token.proc_generation = 0;
+
     while (isspace(**input)) (*input)++;
 
     if (**input == '\0') {
