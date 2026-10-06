@@ -2,6 +2,10 @@
 
 All notable changes to this project are recorded in this file.
 
+## Unreleased
+
+- **QBASIC `CONST`**: Added the `CONST name = expression` statement for declaring named numeric constants. Constants can be used in numeric expressions, array dimensioning, `FOR` loop bounds, and `DEF FN` bodies; they are resolved at runtime so they may reference variables in scope at execution time. Constants are cleared on `RUN` and `NEW`. Added test coverage.
+
 ## 0.99.6 — 2026-10-03
 
 - **QBASIC `SELECT CASE`**: Added the full `SELECT CASE ... END SELECT` block construct, supporting `CASE value1[, value2...]` value lists, `CASE value1 TO value2` inclusive ranges, `CASE IS comparison-op value` comparisons (`=`, `<>`, `<`, `>`, `<=`, `>=`), and a catch-all `CASE ELSE`. Multiple comma-separated items may be combined within a single `CASE` clause. Works with both numeric and string expressions, only the first matching branch executes, and it supports arbitrary nesting (including within `IF`, `FOR`, `WHILE`, and `DO` blocks) and use inside `SUB`/`FUNCTION` procedures.

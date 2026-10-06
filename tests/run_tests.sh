@@ -130,6 +130,7 @@ TESTS=(
   "tests/control_flow/on_timer"
   "tests/control_flow/nested_paren"
   "tests/math/def_types"
+  "tests/math/named_constants"
   "tests/graphics/auto_screenshot"
   "tests/graphics/graphics_primitives"
   "tests/graphics/circle_alpha"

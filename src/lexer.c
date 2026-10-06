@@ -29,6 +29,7 @@ static const KeywordMap keyword_table[] = {
     {"CLS", TOKEN_CLS},
     {"COLOR", TOKEN_COLOR},
     {"COMMAND$", TOKEN_COMMANDS},
+    {"CONST", TOKEN_CONST},
     {"COS", TOKEN_COS},
     {"CVD", TOKEN_CVD},
     {"CVI", TOKEN_CVI},

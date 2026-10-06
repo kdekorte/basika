@@ -33,6 +33,14 @@ volatile sig_atomic_t stop_running = 0;
 static Variable vars[1024]; 
 static int var_count = 0;
 
+#define MAX_NAMED_CONSTANTS 256
+typedef struct {
+    char name[64];
+    double value;
+} NamedConstant;
+static NamedConstant named_constants[MAX_NAMED_CONSTANTS];
+static int named_constant_count = 0;
+
 #define MAX_USER_TYPES 64
 #define MAX_TYPE_FIELDS 64
 #define MAX_RECORD_INSTANCES 128
@@ -1200,6 +1208,50 @@ static int find_variable_index(const char *normalized) {
     return -1;
 }
 
+static int add_named_constant(const char *name, double value) {
+    if (!name || !name[0]) return 0;
+    char normalized[64];
+    int len = 0;
+    for (int i = 0; name[i] && len < 63; i++) {
+        char c = (char)toupper((unsigned char)name[i]);
+        if (c == '$' || c == '%' || c == '!' || c == '#') break;
+        normalized[len++] = c;
+    }
+    normalized[len] = '\0';
+    if (len == 0) return 0;
+    for (int i = 0; i < named_constant_count; i++) {
+        if (strcasecmp(named_constants[i].name, normalized) == 0) {
+            named_constants[i].value = value;
+            return 1;
+        }
+    }
+    if (named_constant_count >= MAX_NAMED_CONSTANTS) return 0;
+    int idx = named_constant_count++;
+    strncpy(named_constants[idx].name, normalized, sizeof(named_constants[idx].name) - 1);
+    named_constants[idx].name[sizeof(named_constants[idx].name) - 1] = '\0';
+    named_constants[idx].value = value;
+    return 1;
+}
+
+static int find_named_constant(const char *name) {
+    if (!name || !name[0] || named_constant_count == 0) return -1;
+    char normalized[64];
+    int len = 0;
+    for (int i = 0; name[i] && len < 63; i++) {
+        char c = (char)toupper((unsigned char)name[i]);
+        normalized[len++] = c;
+    }
+    if (len > 0) {
+        char last = normalized[len - 1];
+        if (last == '$' || last == '%' || last == '!' || last == '#') len--;
+    }
+    normalized[len] = '\0';
+    for (int i = 0; i < named_constant_count; i++) {
+        if (strcasecmp(named_constants[i].name, normalized) == 0) return i;
+    }
+    return -1;
+}
+
 static int resolve_token_variable(Token *token) {
     if (!token || token->type != TOKEN_IDENTIFIER) return -1;
 
@@ -2039,6 +2091,11 @@ static int compile_primary(TokenStream *ts, UserFunction *function) {
     Token token = ts->tokens[ts->pos++];
     if (token.type == TOKEN_NUMBER) return compile_expression_node(function, EXPR_NUMBER, -1, -1, token);
     if (token.type == TOKEN_IDENTIFIER) {
+        int const_idx = find_named_constant(token.text);
+        if (const_idx >= 0) {
+            Token num_token = (Token){.type = TOKEN_NUMBER, .double_val = named_constants[const_idx].value};
+            return compile_expression_node(function, EXPR_NUMBER, -1, -1, num_token);
+        }
         size_t length = strlen(token.text);
         if (length && token.text[length - 1] != '$') return compile_expression_node(function, EXPR_VARIABLE, -1, -1, token);
         return -1;
@@ -2080,6 +2137,8 @@ static double evaluate_compiled_expression_node(const UserFunction *function, in
         return node->token.double_val;
     }
     if (node->op == EXPR_VARIABLE) {
+        int const_idx = find_named_constant(node->token.text);
+        if (const_idx >= 0) return named_constants[const_idx].value;
         int variable_index = find_variable(node->token.text);
         Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
         if (variable && variable->name[strlen(variable->name) - 1] == '#') last_expression_is_double = 1;
@@ -4292,6 +4351,7 @@ static void clear_variables(int keep_registry) {
     }
 
     user_function_count = 0;
+    named_constant_count = 0;
     option_base = 0;
     option_base_set = 0;
     arrays_dimensioned = 0;
@@ -4320,7 +4380,10 @@ static double primary(const char **input);
 
 static int is_string_token(const Token *t) {
     if (t->type == TOKEN_STRING) return 1;
-    if (t->type == TOKEN_IDENTIFIER && is_string_var(t->text)) return 1;
+    if (t->type == TOKEN_IDENTIFIER) {
+        if (find_named_constant(t->text) >= 0) return 0;
+        if (is_string_var(t->text)) return 1;
+    }
     return (t->type == TOKEN_CHR || t->type == TOKEN_LEFT || t->type == TOKEN_RIGHT ||
             t->type == TOKEN_MID || t->type == TOKEN_UCASE || t->type == TOKEN_LCASE ||
             t->type == TOKEN_TRIM || t->type == TOKEN_LTRIM || t->type == TOKEN_RTRIM ||
@@ -5760,6 +5823,11 @@ static double primary_tok(TokenStream *ts) {
         if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERR") == 0) return (double)last_runtime_error_code;
         if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERL") == 0) return (double)last_runtime_error_line;
 
+        int const_idx = find_named_constant(token->text);
+        if (const_idx >= 0) {
+            return named_constants[const_idx].value;
+        }
+
         if ((token->text[0] == 'F' || token->text[0] == 'f') &&
             (token->text[1] == 'N' || token->text[1] == 'n')) {
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
@@ -6138,6 +6206,11 @@ static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expre
         }
         if (instruction->opcode == CEXPR_VARIABLE) {
             Token *token = &ts->tokens[instruction->token_index];
+            int const_idx = find_named_constant(token->text);
+            if (const_idx >= 0) {
+                values[stack_size++] = named_constants[const_idx].value;
+                continue;
+            }
             int variable_index = resolve_token_variable(token);
             Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
             if (variable && variable->name[strlen(variable->name) - 1] == '#') last_expression_is_double = 1;
@@ -6251,6 +6324,11 @@ static double primary(const char **input) {
     if (t.type == TOKEN_IDENTIFIER) {
         if (strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
         if (strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
+
+        int const_idx = find_named_constant(t.text);
+        if (const_idx >= 0) {
+            return named_constants[const_idx].value;
+        }
 
         if (strncasecmp(t.text, "FN", 2) == 0) {
             const char *lp_ptr = *input;
@@ -7032,6 +7110,27 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             parse_restore(&ptr);
         } else if (t.type == TOKEN_RANDOMIZE) {
             parse_randomize(&ptr);
+        } else if (t.type == TOKEN_CONST) {
+            Token name_tok = get_next_token(&ptr);
+            if (name_tok.type != TOKEN_IDENTIFIER) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                *ptr_addr = ptr;
+                return;
+            }
+            const char *eq_saved = ptr;
+            Token eq = get_next_token(&ptr);
+            if (eq.type != TOKEN_EQUALS) {
+                ptr = eq_saved;
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                *ptr_addr = ptr;
+                return;
+            }
+            double value = evaluate_expression(&ptr);
+            if (!add_named_constant(name_tok.text, value)) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+            }
+            *ptr_addr = ptr;
+            return;
         } else if (t.type == TOKEN_DEF) {
             Token fn_tok = get_next_token(&ptr);
             if (fn_tok.type == TOKEN_IDENTIFIER && strncasecmp(fn_tok.text, "FN", 2) == 0) {
