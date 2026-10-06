@@ -4,3 +4,4 @@
 40 PRINT GET$(#1,1,5)
 50 PRINT GET$(#1,2,5)
 60 CLOSE #1
+70 KILL "tests/get_dollar.tmp"

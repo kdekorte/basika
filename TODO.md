@@ -6,7 +6,6 @@
 
 ## Unimplemented QBASIC language features
 
-- `CONST name = expression`: Named constants.
 - `LINE INPUT [#n,] var$`: Reads an entire line of input (including commas) into a string variable.
 - `INPUT$(n[, #file])`: Reads `n` characters from the keyboard or a file without echoing/delimiters.
 - `WRITE [#n,] expr1[, expr2...]`: Writes comma-delimited, quoted output to the screen or a file.
