@@ -778,6 +778,16 @@ void set_text_cursor(int row, int col) {
     cursor_y = (row - 1) * current_row_height;
 }
 
+void get_text_cursor(int *row, int *col) {
+    if (!font) {
+        if (row) *row = 1;
+        if (col) *col = 1;
+        return;
+    }
+    if (row) *row = cursor_y / current_row_height + 1;
+    if (col) *col = cursor_x / current_col_width + 1;
+}
+
 static int headless_mode = 0;
 
 void set_graphics_headless(int headless) {

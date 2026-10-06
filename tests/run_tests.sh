@@ -91,6 +91,7 @@ TESTS=(
   "tests/math/swap"
   "tests/math/swap_array"
   "tests/math/variable_suffixes"
+  "tests/math/csrln_pos"
   "tests/control_flow/nested_for"
   "tests/control_flow/nested_while"
   "tests/control_flow/on_goto_nested"
@@ -135,6 +136,7 @@ TESTS=(
   "tests/graphics/graphics_primitives"
   "tests/graphics/circle_alpha"
   "tests/graphics/drawing_alpha"
+  "tests/graphics/point_test"
   "tests/graphics/autodisplay"
   "tests/control_flow/labels_no_lines"
   "tests/procedures/qbasic_sub"
@@ -210,6 +212,21 @@ for t in "${TESTS[@]}"; do
     fi
     rm -f tests/drawing_alpha.png
     rm -f tests/drawing_alpha.result
+  elif [ "$t" = "tests/graphics/point_test" ]; then
+    rm -f tests/point_test.png
+    rm -f tests/point_test.result
+    OUT=$(./basika --headless "$t.bas" 2>&1)
+    if [ ! -f tests/point_test.png ]; then
+      echo "$t FAIL: screenshot file tests/point_test.png not found"
+      exit 2
+    fi
+    if [ ! -f tests/point_test.result ] || [ "$(tr -d '[:space:]' < tests/point_test.result)" != "1" ]; then
+      echo "$t FAIL: point assertions failed"
+      cat tests/point_test.result 2>/dev/null || true
+      exit 2
+    fi
+    rm -f tests/point_test.png
+    rm -f tests/point_test.result
   elif [ "$t" = "tests/audio/asc_chr_beep" ]; then
     OUT=$(./basika "$t.bas" 2>&1)
   elif [[ "$t" == tests/audio/* ]]; then
