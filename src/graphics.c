@@ -50,7 +50,16 @@ static int mode_res_h = 200;
 static int text_columns = 80;
 static int text_rows = 25;
 
-static SDL_Color get_graphics_color(int color_value);
+static SDL_Color get_graphics_color(unsigned int color_value);
+
+/* 32-bit images (_NEWIMAGE(w, h, 32)) take &HAARRGGBB colors; every other
+ * mode uses palette indexes. */
+static int color_mode_32 = 0;
+static int palette_mode_256 = 0;
+static int current_screen_mode = 2;
+static unsigned int fg_color = 15;
+static unsigned int bg_color = 0;
+static void reset_draw_colors(int mode);
 
 static int view_active = 0;
 static int view_screen = 0;
@@ -81,23 +90,6 @@ static void transform_coords(double x, double y, int *px, int *py) {
 }
 
 
-static void apply_clipping() {
-    if (!renderer || !canvas) return;
-    SDL_SetRenderTarget(renderer, canvas);
-    double xs = (double)canvas_width / mode_res_w;
-    double ys = (double)canvas_height / mode_res_h;
-    SDL_Rect r;
-    if (view_active) {
-        r.x = (int)(view_x1 * xs);
-        r.y = (int)(view_y1 * ys);
-        r.w = (int)((view_x2 - view_x1 + 1) * xs + 0.99);
-        r.h = (int)((view_y2 - view_y1 + 1) * ys + 0.99);
-    } else {
-        r.x = 0; r.y = 0; r.w = canvas_width; r.h = canvas_height;
-    }
-    SDL_SetRenderClipRect(renderer, &r);
-}
-
 static void remove_clipping() {
     if (!renderer || !canvas) return;
     SDL_SetRenderTarget(renderer, canvas);
@@ -121,7 +113,8 @@ void graphics_set_window(int use_screen, double x1, double y1, double x2, double
 void graphics_reset_window() {
     window_active = 0;
 }
-void graphics_set_view(int use_screen, int x1, int y1, int x2, int y2, int color, int boundary) {
+void graphics_set_view(int use_screen, int x1, int y1, int x2, int y2,
+                       int has_color, unsigned int color, int has_boundary, unsigned int boundary) {
     if (!renderer || !canvas) return;
     SDL_SetRenderTarget(renderer, canvas);
     view_active = 1;
@@ -131,7 +124,7 @@ void graphics_set_view(int use_screen, int x1, int y1, int x2, int y2, int color
     // But for now, just set viewport
     // If color >= 0, fill viewport
     // If boundary >= 0, draw border
-    if (color >= 0) {
+    if (has_color) {
         if (!renderer || !canvas) return;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_Color draw_color = get_graphics_color(color);
@@ -142,7 +135,7 @@ void graphics_set_view(int use_screen, int x1, int y1, int x2, int y2, int color
         SDL_RenderFillRect(renderer, &r);
         update_graphics();
     }
-    if (boundary >= 0) {
+    if (has_boundary) {
         if (!renderer || !canvas) return;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_Color draw_color = get_graphics_color(boundary);
@@ -234,6 +227,7 @@ static void reload_font(int target_height) {
 }
 
 void set_screen_mode(int mode) {
+    current_screen_mode = mode;
     switch(mode) {
         case 1:  mode_res_w = 320; mode_res_h = 200; break;
         case 2:  mode_res_w = 640; mode_res_h = 200; break;
@@ -248,6 +242,14 @@ void set_screen_mode(int mode) {
 
     canvas_width = mode_res_w * 2;
     canvas_height = mode_res_h * 2;
+    color_mode_32 = 0;
+    palette_mode_256 = (mode == 13);
+    reset_draw_colors(mode);
+    view_active = 0;
+    window_active = 0;
+    view_x1 = 0; view_y1 = 0; view_x2 = mode_res_w - 1; view_y2 = mode_res_h - 1;
+    gfx_cursor_x = mode_res_w / 2;
+    gfx_cursor_y = mode_res_h / 2;
 
     // Determine text layout based on classic BASIC mode documentation
     if (mode_res_w <= 320) text_columns = 40; else text_columns = 80;
@@ -283,8 +285,11 @@ void set_screen_mode(int mode) {
 }
 
 void set_screen_newimage(int width, int height, int colors) {
-    (void)colors;
     if (width <= 0 || height <= 0) return;
+    color_mode_32 = (colors == 32);
+    palette_mode_256 = !color_mode_32;
+    current_screen_mode = -1;
+    reset_draw_colors(-1);
 
     mode_res_w = width;
     mode_res_h = height;
@@ -365,8 +370,11 @@ static void check_scroll() {
 
 void graphics_cls() {
     if (renderer && canvas) {
+        SDL_Color background = get_graphics_color(bg_color);
         SDL_SetRenderTarget(renderer, canvas);
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_SetRenderClipRect(renderer, NULL);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, 255);
         SDL_RenderClear(renderer);
         SDL_SetRenderTarget(renderer, NULL);
         cursor_x = 0;
@@ -381,6 +389,51 @@ void graphics_sleep(int ms) {
         handle_events();
         SDL_Delay(ms);
     }
+}
+
+/* Waits up to ms milliseconds while keeping the window responsive. When
+ * wake_on_key is set, a key press ends the wait early and stays buffered for
+ * INKEY$. A negative ms waits until a key is pressed. */
+static void wait_responsive(double ms, int wake_on_key) {
+    Uint64 start = SDL_GetTicksNS();
+    Uint64 limit = ms < 0 ? 0 : (Uint64)(ms * 1000000.0);
+    while (!stop_running) {
+        handle_events();
+        if (wake_on_key && (last_key_char || last_key_code)) break;
+        Uint64 elapsed = SDL_GetTicksNS() - start;
+        if (ms >= 0 && elapsed >= limit) break;
+        Uint64 remaining = ms >= 0 ? limit - elapsed : 10000000;
+        Uint32 step = (Uint32)(remaining / 1000000);
+        if (step > 10) step = 10;
+        if (step == 0) SDL_DelayPrecise(remaining);
+        else SDL_Delay(step);
+    }
+}
+
+/* SLEEP [seconds]: QBasic waits the given seconds or until a key is pressed;
+ * no argument (or 0) waits for a key. */
+void graphics_sleep_seconds(double seconds) {
+    graphics_present_if_autodisplay();
+    wait_responsive(seconds > 0 ? seconds * 1000.0 : -1, 1);
+}
+
+/* _DELAY seconds: pause without waking on keys. */
+void graphics_delay(double seconds) {
+    graphics_present_if_autodisplay();
+    if (seconds > 0) wait_responsive(seconds * 1000.0, 0);
+    else handle_events();
+}
+
+/* _LIMIT fps: hold a loop to at most fps iterations per second. */
+void graphics_limit(double fps) {
+    static Uint64 next_frame = 0;
+    if (fps <= 0) return;
+    Uint64 period = (Uint64)(1000000000.0 / fps);
+    Uint64 now = SDL_GetTicksNS();
+    if (next_frame == 0 || now > next_frame + period) next_frame = now;
+    if (next_frame > now) wait_responsive((double)(next_frame - now) / 1000000.0, 0);
+    else handle_events();
+    next_frame += period;
 }
 
 static int utf8_char_len(unsigned char c) {
@@ -416,8 +469,10 @@ static int map_key_to_trap_index(SDL_Keycode key) {
 
 static void clear_text_cell(int x, int y) {
     if (!renderer || !canvas) return;
+    SDL_Color background = get_graphics_color(bg_color);
     SDL_SetRenderTarget(renderer, canvas);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, 255);
     SDL_FRect cell = {(float)x, (float)y, (float)current_col_width, (float)current_row_height};
     SDL_RenderFillRect(renderer, &cell);
 }
@@ -928,28 +983,14 @@ void graphics_set_autodisplay(int enabled) {
     if (autodisplay_enabled) graphics_present_now();
 }
 
-void set_text_color(int color_value) {
-    if (color_value < 0) color_value = 0;
-    if (color_value > 15) color_value = 15;
-    switch (color_value) {
-        case 0: current_text_color = (SDL_Color){0, 0, 0, 255}; break;
-        case 1: current_text_color = (SDL_Color){0, 0, 170, 255}; break;
-        case 2: current_text_color = (SDL_Color){0, 170, 0, 255}; break;
-        case 3: current_text_color = (SDL_Color){0, 170, 170, 255}; break;
-        case 4: current_text_color = (SDL_Color){170, 0, 0, 255}; break;
-        case 5: current_text_color = (SDL_Color){170, 0, 170, 255}; break;
-        case 6: current_text_color = (SDL_Color){170, 85, 0, 255}; break;
-        case 7: current_text_color = (SDL_Color){170, 170, 170, 255}; break;
-        case 8: current_text_color = (SDL_Color){85, 85, 85, 255}; break;
-        case 9: current_text_color = (SDL_Color){85, 85, 255, 255}; break;
-        case 10: current_text_color = (SDL_Color){85, 255, 85, 255}; break;
-        case 11: current_text_color = (SDL_Color){85, 255, 255, 255}; break;
-        case 12: current_text_color = (SDL_Color){255, 85, 85, 255}; break;
-        case 13: current_text_color = (SDL_Color){255, 85, 255, 255}; break;
-        case 14: current_text_color = (SDL_Color){255, 255, 85, 255}; break;
-        case 15: current_text_color = (SDL_Color){255, 255, 255, 255}; break;
-        default: current_text_color = (SDL_Color){255, 255, 255, 255}; break;
+void set_text_color(unsigned int color_value) {
+    if (!color_mode_32 && !palette_mode_256) {
+        /* 16-color modes: attributes 16-31 are the blinking variants. */
+        if ((int)color_value < 0) color_value = 0;
+        color_value &= 15;
     }
+    current_text_color = get_graphics_color(color_value);
+    if (current_text_color.a == 0 && !color_mode_32) current_text_color.a = 255;
 }
 
 static SDL_Color palette256[256];
@@ -998,52 +1039,185 @@ static void init_palette256(void) {
     palette_initialized = 1;
 }
 
-static SDL_Color get_graphics_color(int color_value) {
+static SDL_Color get_graphics_color(unsigned int color_value) {
+    if (color_mode_32) {
+        return (SDL_Color){(Uint8)((color_value >> 16) & 0xFF), (Uint8)((color_value >> 8) & 0xFF),
+                           (Uint8)(color_value & 0xFF), (Uint8)((color_value >> 24) & 0xFF)};
+    }
     if (!palette_initialized) init_palette256();
-    color_value = (color_value % 256 + 256) % 256;
-    return palette256[color_value];
+    return palette256[color_value & 0xFF];
 }
 
-void set_pixel_alpha(double user_x, double user_y, int color, int alpha) {
-    if (!renderer || !canvas) return;
-    if (alpha < 0) alpha = 0;
-    if (alpha > 255) alpha = 255;
-    if (alpha == 0) return;
-    SDL_SetRenderTarget(renderer, canvas);
-    int x, y;
-    transform_coords(user_x, user_y, &x, &y);
-    if (!clip_point(x, y)) return;
-    SDL_SetRenderDrawBlendMode(renderer, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
-    SDL_Color draw_color = get_graphics_color(color);
-    draw_color.a = (Uint8)alpha;
-    SDL_SetRenderDrawColor(renderer, draw_color.r, draw_color.g, draw_color.b, draw_color.a);
-    
+static void reset_draw_colors(int mode) {
+    if (color_mode_32) {
+        fg_color = 0xFFFFFFFFu;
+        bg_color = 0xFF000000u;
+    } else {
+        fg_color = (mode == 1) ? 3 : 15;
+        bg_color = 0;
+    }
+    current_text_color = get_graphics_color(fg_color);
+}
+
+int graphics_is_32bit(void) {
+    return color_mode_32;
+}
+
+void graphics_set_draw_colors(int has_fg, unsigned int fg, int has_bg, unsigned int bg) {
+    if (has_fg) fg_color = fg;
+    if (has_bg) bg_color = bg;
+}
+
+unsigned int graphics_get_foreground(void) {
+    return fg_color;
+}
+
+unsigned int graphics_get_background(void) {
+    return bg_color;
+}
+
+int graphics_width(void) {
+    return mode_res_w;
+}
+
+int graphics_height(void) {
+    return mode_res_h;
+}
+
+/* _RGB/_RGBA: a 32-bit color in 32-bit mode, otherwise the nearest palette index. */
+unsigned int graphics_match_color(int r, int g, int b, int a) {
+    if (color_mode_32) {
+        return ((unsigned int)a << 24) | ((unsigned int)r << 16) | ((unsigned int)g << 8) | (unsigned int)b;
+    }
+    if (!palette_initialized) init_palette256();
+    int limit = palette_mode_256 ? 256 : 16;
+    int closest = 0;
+    int closest_distance = 3 * 255 * 255 + 1;
+    for (int i = 0; i < limit; i++) {
+        int dr = (int)palette256[i].r - r;
+        int dg = (int)palette256[i].g - g;
+        int db = (int)palette256[i].b - b;
+        int distance = dr * dr + dg * dg + db * db;
+        if (distance < closest_distance) {
+            closest = i;
+            closest_distance = distance;
+            if (distance == 0) break;
+        }
+    }
+    return (unsigned int)closest;
+}
+
+/* _RED/_GREEN/_BLUE/_ALPHA: components of a color value in the current mode. */
+void graphics_color_components(unsigned int color_value, int *r, int *g, int *b, int *a) {
+    SDL_Color c = get_graphics_color(color_value);
+    if (r) *r = c.r;
+    if (g) *g = c.g;
+    if (b) *b = c.b;
+    if (a) *a = c.a;
+}
+
+/* ---- Logical-pixel rasterization ----
+ * Primitives plot each logical pixel exactly once so translucent colors blend
+ * evenly, and outlines stay 8-connected so PAINT cannot leak through them. */
+
+static SDL_FRect *pixel_batch = NULL;
+static int pixel_batch_count = 0;
+static int pixel_batch_capacity = 0;
+
+static void pixel_rect(int px, int py, SDL_FRect *r) {
     double xs = (double)canvas_width / mode_res_w;
     double ys = (double)canvas_height / mode_res_h;
-    
-    SDL_FRect r = { (float)(x * xs), (float)(y * ys), (float)xs, (float)ys };
-    SDL_RenderFillRect(renderer, &r);
+    int x0 = (int)floor(px * xs), x1 = (int)floor((px + 1) * xs);
+    int y0 = (int)floor(py * ys), y1 = (int)floor((py + 1) * ys);
+    if (x1 <= x0) x1 = x0 + 1;
+    if (y1 <= y0) y1 = y0 + 1;
+    *r = (SDL_FRect){(float)x0, (float)y0, (float)(x1 - x0), (float)(y1 - y0)};
+}
+
+static void batch_flush(void) {
+    if (pixel_batch_count > 0 && renderer) {
+        SDL_RenderFillRects(renderer, pixel_batch, pixel_batch_count);
+    }
+    pixel_batch_count = 0;
+}
+
+static void batch_plot(int px, int py) {
+    if (!clip_point(px, py)) return;
+    if (pixel_batch_count >= pixel_batch_capacity) {
+        if (pixel_batch_count > 0 && pixel_batch_capacity >= 4096) {
+            batch_flush();
+        } else {
+            int capacity = pixel_batch_capacity ? pixel_batch_capacity * 2 : 256;
+            SDL_FRect *grown = realloc(pixel_batch, (size_t)capacity * sizeof(*grown));
+            if (!grown) {
+                batch_flush();
+                if (!pixel_batch_capacity) return;
+            } else {
+                pixel_batch = grown;
+                pixel_batch_capacity = capacity;
+            }
+        }
+    }
+    pixel_rect(px, py, &pixel_batch[pixel_batch_count++]);
+}
+
+/* Selects the draw color; returns 0 when the color is fully transparent. */
+static int begin_draw(unsigned int color) {
+    if (!renderer || !canvas) return 0;
+    SDL_Color c = get_graphics_color(color);
+    if (c.a == 0) return 0;
+    SDL_SetRenderTarget(renderer, canvas);
+    SDL_SetRenderDrawBlendMode(renderer, c.a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
+    pixel_batch_count = 0;
+    return 1;
+}
+
+static void end_draw(void) {
+    batch_flush();
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-    gfx_cursor_x = x;
-    gfx_cursor_y = y;
 }
 
-void set_pixel(double user_x, double user_y, int color) {
-    set_pixel_alpha(user_x, user_y, color, 255);
+/* Bresenham line in logical pixels. style is the QBasic 16-bit mask whose
+ * most significant bit is tested first; *style_bit carries the pattern
+ * position across connected segments. skip_last omits the end point. */
+static void raster_line(int x1, int y1, int x2, int y2, unsigned int style, int *style_bit, int skip_last) {
+    int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+    int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+    int err = dx + dy;
+    while (1) {
+        int last = (x1 == x2 && y1 == y2);
+        if (last && skip_last) break;
+        int bit = *style_bit;
+        *style_bit = (bit + 1) & 15;
+        if (style & (0x8000u >> bit)) batch_plot(x1, y1);
+        if (last) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x1 += sx; }
+        if (e2 <= dx) { err += dx; y1 += sy; }
+    }
 }
 
-int get_pixel(double user_x, double user_y) {
+void set_pixel(double user_x, double user_y, unsigned int color) {
+    gfx_cursor_x = user_x;
+    gfx_cursor_y = user_y;
+    int x, y;
+    transform_coords(user_x, user_y, &x, &y);
+    if (!begin_draw(color)) return;
+    batch_plot(x, y);
+    end_draw();
+}
+
+double get_pixel(double user_x, double user_y) {
     int x, y;
     transform_coords(user_x, user_y, &x, &y);
     if (!clip_point(x, y)) return -1;
     if (!renderer || !canvas) return 0;
-    
-    // Map logical coordinates to canvas resolution
-    double xs = (double)canvas_width / mode_res_w;
-    double ys = (double)canvas_height / mode_res_h;
-    int sx = (int)(x * xs);
-    int sy = (int)(y * ys);
 
+    SDL_FRect cell;
+    pixel_rect(x, y, &cell);
+    int sx = (int)cell.x;
+    int sy = (int)cell.y;
     if (sx < 0 || sx >= canvas_width || sy < 0 || sy >= canvas_height) return 0;
 
     SDL_SetRenderTarget(renderer, canvas);
@@ -1054,11 +1228,15 @@ int get_pixel(double user_x, double user_y) {
     SDL_ReadSurfacePixel(surf, 0, 0, &r, &g, &b, &a);
     SDL_DestroySurface(surf);
 
+    if (color_mode_32) {
+        return (double)(0xFF000000u | ((unsigned int)r << 16) | ((unsigned int)g << 8) | b);
+    }
     // Return the nearest palette entry so blended pixels remain readable.
+    if (!palette_initialized) init_palette256();
     int closest = 0;
     int closest_distance = 3 * 255 * 255 + 1;
     for (int i = 0; i < 256; i++) {
-        SDL_Color c = get_graphics_color(i);
+        SDL_Color c = palette256[i];
         int dr = (int)c.r - r;
         int dg = (int)c.g - g;
         int db = (int)c.b - b;
@@ -1070,6 +1248,335 @@ int get_pixel(double user_x, double user_y) {
         }
     }
     return closest;
+}
+
+void get_graphics_cursor_physical(int *x, int *y) {
+    transform_coords(gfx_cursor_x, gfx_cursor_y, x, y);
+}
+
+void draw_line(double ux1, double uy1, double ux2, double uy2, unsigned int color, int box, unsigned int style) {
+    int x1, y1, x2, y2;
+    transform_coords(ux1, uy1, &x1, &y1);
+    transform_coords(ux2, uy2, &x2, &y2);
+    gfx_cursor_x = ux2;
+    gfx_cursor_y = uy2;
+    if (!begin_draw(color)) return;
+    style &= 0xFFFFu;
+    int style_bit = 0;
+
+    int left = x1 < x2 ? x1 : x2, right = x1 < x2 ? x2 : x1;
+    int top = y1 < y2 ? y1 : y2, bottom = y1 < y2 ? y2 : y1;
+    if (box == 2) {
+        // BF fills the clipped rectangle in one call; the style mask does not apply.
+        int min_x = view_active ? view_x1 : 0, max_x = view_active ? view_x2 : mode_res_w - 1;
+        int min_y = view_active ? view_y1 : 0, max_y = view_active ? view_y2 : mode_res_h - 1;
+        if (left < min_x) left = min_x;
+        if (top < min_y) top = min_y;
+        if (right > max_x) right = max_x;
+        if (bottom > max_y) bottom = max_y;
+        if (left <= right && top <= bottom) {
+            SDL_FRect a, b;
+            pixel_rect(left, top, &a);
+            pixel_rect(right, bottom, &b);
+            SDL_FRect r = {a.x, a.y, b.x + b.w - a.x, b.y + b.h - a.y};
+            SDL_RenderFillRect(renderer, &r);
+        }
+    } else if (box == 1) {
+        raster_line(left, top, right, top, style, &style_bit, 0);
+        if (bottom != top) raster_line(left, bottom, right, bottom, style, &style_bit, 0);
+        if (bottom - top >= 2) {
+            raster_line(left, top + 1, left, bottom - 1, style, &style_bit, 0);
+            if (right != left) raster_line(right, top + 1, right, bottom - 1, style, &style_bit, 0);
+        }
+    } else {
+        raster_line(x1, y1, x2, y2, style, &style_bit, 0);
+    }
+    end_draw();
+    update_graphics();
+}
+
+/* QBasic's default aspect makes circles look round on a 4:3 display. */
+static double default_circle_aspect(void) {
+    if (canvas_width == mode_res_w && canvas_height == mode_res_h) return 1.0;
+    return get_target_aspect_ratio() * (double)mode_res_h / (double)mode_res_w;
+}
+
+typedef struct {
+    int cx, cy;
+    double rx, ry;
+    int is_arc;
+    double start, end;
+} EllipseRaster;
+
+static void ellipse_point(const EllipseRaster *e, int dx, int dy) {
+    if (e->is_arc) {
+        double t = atan2(-(double)dy * (e->rx > 0 ? e->rx : 1), (double)dx * (e->ry > 0 ? e->ry : 1));
+        if (t < 0) t += 2.0 * M_PI;
+        int inside = e->start <= e->end ? (t >= e->start && t <= e->end)
+                                        : (t >= e->start || t <= e->end);
+        if (!inside) return;
+    }
+    batch_plot(e->cx + dx, e->cy + dy);
+}
+
+static void ellipse_point4(const EllipseRaster *e, int x, int y) {
+    ellipse_point(e, x, y);
+    if (x != 0) ellipse_point(e, -x, y);
+    if (y != 0) {
+        ellipse_point(e, x, -y);
+        if (x != 0) ellipse_point(e, -x, -y);
+    }
+}
+
+/* Midpoint ellipse: each outline pixel is produced exactly once. */
+static void raster_ellipse(const EllipseRaster *e) {
+    int rx = (int)lround(e->rx);
+    int ry = (int)lround(e->ry);
+    if (rx <= 0 && ry <= 0) {
+        ellipse_point(e, 0, 0);
+        return;
+    }
+    if (ry <= 0) {
+        for (int x = -rx; x <= rx; x++) ellipse_point(e, x, 0);
+        return;
+    }
+    if (rx <= 0) {
+        for (int y = -ry; y <= ry; y++) ellipse_point(e, 0, y);
+        return;
+    }
+    double rx2 = (double)rx * rx, ry2 = (double)ry * ry;
+    int x = 0, y = ry;
+    double dx = 0, dy = 2.0 * rx2 * y;
+    double d1 = ry2 - rx2 * ry + 0.25 * rx2;
+    while (dx < dy) {
+        ellipse_point4(e, x, y);
+        x++;
+        dx += 2.0 * ry2;
+        if (d1 < 0) {
+            d1 += dx + ry2;
+        } else {
+            y--;
+            dy -= 2.0 * rx2;
+            d1 += dx - dy + ry2;
+        }
+    }
+    double d2 = ry2 * (x + 0.5) * (x + 0.5) + rx2 * (y - 1.0) * (y - 1.0) - rx2 * ry2;
+    while (y >= 0) {
+        ellipse_point4(e, x, y);
+        y--;
+        dy -= 2.0 * rx2;
+        if (d2 > 0) {
+            d2 += rx2 - dy;
+        } else {
+            x++;
+            dx += 2.0 * ry2;
+            d2 += dx - dy + rx2;
+        }
+    }
+}
+
+/* CIRCLE (x,y), radius, color, start, end, aspect. Negative start/end angles
+ * also draw a radius line to that end of the arc, as in QBasic. */
+void draw_circle(double ucx, double ucy, double uradius, unsigned int color,
+                 int has_start, double start, int has_end, double end,
+                 int has_aspect, double aspect) {
+    gfx_cursor_x = ucx;
+    gfx_cursor_y = ucy;
+    int cx, cy, edge_x, edge_y;
+    transform_coords(ucx, ucy, &cx, &cy);
+    transform_coords(ucx + fabs(uradius), ucy, &edge_x, &edge_y);
+    double radius = fabs((double)(edge_x - cx));
+    if (!has_aspect || aspect <= 0) aspect = default_circle_aspect();
+
+    EllipseRaster e = {cx, cy, radius, radius, has_start || has_end, 0, 2.0 * M_PI};
+    if (aspect < 1.0) e.ry = radius * aspect;
+    else e.rx = radius / aspect;
+    int pie_start = has_start && start < 0;
+    int pie_end = has_end && end < 0;
+    if (has_start) e.start = fabs(start);
+    if (has_end) e.end = fabs(end);
+
+    if (!begin_draw(color)) return;
+    raster_ellipse(&e);
+    int style_bit = 0;
+    if (pie_start) {
+        raster_line(cx, cy, cx + (int)lround(e.rx * cos(e.start)), cy - (int)lround(e.ry * sin(e.start)),
+                    0xFFFFu, &style_bit, 0);
+    }
+    if (pie_end) {
+        raster_line(cx, cy, cx + (int)lround(e.rx * cos(e.end)), cy - (int)lround(e.ry * sin(e.end)),
+                    0xFFFFu, &style_bit, 0);
+    }
+    end_draw();
+    update_graphics();
+}
+
+typedef struct {
+    int x, y;
+} Point;
+
+static Uint32 blend_paint_pixel(Uint32 destination, SDL_Color source,
+                                const SDL_PixelFormatDetails *details, SDL_Palette *palette) {
+    if (source.a == 255) return SDL_MapRGBA(details, palette, source.r, source.g, source.b, 255);
+    Uint8 dr, dg, db;
+    SDL_GetRGB(destination, details, palette, &dr, &dg, &db);
+    int alpha = source.a;
+    Uint8 r = (Uint8)((source.r * alpha + dr * (255 - alpha) + 127) / 255);
+    Uint8 g = (Uint8)((source.g * alpha + dg * (255 - alpha) + 127) / 255);
+    Uint8 b = (Uint8)((source.b * alpha + db * (255 - alpha) + 127) / 255);
+    return SDL_MapRGBA(details, palette, r, g, b, 255);
+}
+
+
+/* Color of a PAINT tile at logical pixel (lx, ly). Tile rows use the screen
+ * mode's packing: 1 bit per pixel (SCREEN 2 and 32-bit images), 2 bits
+ * (SCREEN 1), four bit planes (SCREEN 7-12), or a byte per pixel (256 colors). */
+static unsigned int tile_color(const unsigned char *tile, int length, int lx, int ly) {
+    int bytes_per_row;
+    if (color_mode_32 || current_screen_mode == 2 || current_screen_mode == 0) bytes_per_row = 1;
+    else if (current_screen_mode == 1) bytes_per_row = 1;
+    else if (palette_mode_256) bytes_per_row = 8;
+    else bytes_per_row = 4;
+    int rows = length / bytes_per_row;
+    if (rows < 1) rows = 1;
+    const unsigned char *row = tile + (ly % rows) * bytes_per_row;
+    int available = length - (ly % rows) * bytes_per_row;
+
+    if (bytes_per_row == 8) {
+        int column = lx % 8;
+        return column < available ? row[column] : 0;
+    }
+    if (bytes_per_row == 4) {
+        unsigned int c = 0;
+        for (int plane = 0; plane < 4 && plane < available; plane++) {
+            if (row[plane] & (0x80 >> (lx % 8))) c |= 1u << plane;
+        }
+        return c;
+    }
+    if (!color_mode_32 && current_screen_mode == 1) {
+        return (row[0] >> (6 - 2 * (lx % 4))) & 3;
+    }
+    return (row[0] & (0x80 >> (lx % 8))) ? fg_color : bg_color;
+}
+
+/* Flood fill from (ux, uy) up to border_color. With a tile, the fill paints
+ * the tile pattern; otherwise it paints paint_color. */
+static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned int border_color,
+                       const unsigned char *tile, int tile_length) {
+    if (!renderer || !canvas) return;
+    int x, y;
+    transform_coords(ux, uy, &x, &y);
+    gfx_cursor_x = ux;
+    gfx_cursor_y = uy;
+    if (!clip_point(x, y)) return;
+    SDL_Color sc_paint = get_graphics_color(paint_color);
+    if (!tile && sc_paint.a == 0) return;
+
+    // Only the active VIEW can change, so read back just that region.
+    double xs = (double)canvas_width / mode_res_w;
+    double ys = (double)canvas_height / mode_res_h;
+    SDL_Rect region = {0, 0, canvas_width, canvas_height};
+    if (view_active) {
+        SDL_FRect a, b;
+        pixel_rect(view_x1, view_y1, &a);
+        pixel_rect(view_x2, view_y2, &b);
+        int x0 = (int)a.x, y0 = (int)a.y;
+        int x1 = (int)(b.x + b.w), y1 = (int)(b.y + b.h);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > canvas_width) x1 = canvas_width;
+        if (y1 > canvas_height) y1 = canvas_height;
+        if (x1 <= x0 || y1 <= y0) return;
+        region = (SDL_Rect){x0, y0, x1 - x0, y1 - y0};
+    }
+    SDL_FRect start_cell;
+    pixel_rect(x, y, &start_cell);
+    int sx = (int)start_cell.x - region.x;
+    int sy = (int)start_cell.y - region.y;
+    if (sx < 0 || sx >= region.w || sy < 0 || sy >= region.h) return;
+
+    SDL_SetRenderTarget(renderer, canvas);
+    SDL_SetRenderClipRect(renderer, NULL);
+    SDL_Surface *raw_surf = SDL_RenderReadPixels(renderer, &region);
+    if (!raw_surf) return;
+    // Convert to canvas format to ensure color mapping matches the texture
+    SDL_Surface *surf = SDL_ConvertSurface(raw_surf, SDL_PIXELFORMAT_RGBA8888);
+    SDL_DestroySurface(raw_surf);
+    if (!surf) return;
+
+    SDL_Color sc_border = get_graphics_color(border_color);
+    const SDL_PixelFormatDetails *details = SDL_GetPixelFormatDetails(surf->format);
+    SDL_Palette *palette = SDL_GetSurfacePalette(surf);
+    Uint32 u_paint = SDL_MapRGBA(details, palette, sc_paint.r, sc_paint.g, sc_paint.b, 255);
+    Uint32 u_border = SDL_MapRGBA(details, palette, sc_border.r, sc_border.g, sc_border.b, 255);
+    // Mask out the alpha channel to make comparisons robust against driver-specific
+    // variations in how alpha is handled in the render target or ReadPixels.
+    Uint32 mask = ~details->Amask;
+    int min_x = 0, min_y = 0, max_x = surf->w - 1, max_y = surf->h - 1;
+
+    int pitch_pixels = surf->pitch / details->bytes_per_pixel;
+    Uint32 *pixels = (Uint32 *)surf->pixels;
+    Uint32 start_color = pixels[sy * pitch_pixels + sx];
+    // A solid fill also stops at pixels already in the paint color, as in QBasic.
+    int stop_at_paint = !tile && sc_paint.a == 255;
+    if ((start_color & mask) == (u_border & mask) ||
+        (stop_at_paint && (start_color & mask) == (u_paint & mask))) {
+        SDL_DestroySurface(surf);
+        return;
+    }
+
+    size_t capacity = (size_t)surf->w * (size_t)surf->h;
+    Point *queue = malloc(capacity * sizeof(Point));
+    Uint8 *visited = calloc(capacity, sizeof(Uint8));
+    if (!queue || !visited) {
+        free(queue);
+        free(visited);
+        SDL_DestroySurface(surf);
+        return;
+    }
+    size_t head = 0, tail = 0;
+    visited[(size_t)sy * (size_t)surf->w + (size_t)sx] = 1;
+    queue[tail++] = (Point){sx, sy};
+
+    while (head < tail) {
+        Point p = queue[head++];
+        Uint32 *pixel = &pixels[p.y * pitch_pixels + p.x];
+        SDL_Color fill = sc_paint;
+        if (tile) fill = get_graphics_color(tile_color(tile, tile_length, (int)((p.x + region.x) / xs),
+                                                       (int)((p.y + region.y) / ys)));
+        if (fill.a > 0) *pixel = blend_paint_pixel(*pixel, fill, details, palette);
+
+        Point neighbors[4] = {
+            {p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1}
+        };
+        for (int i = 0; i < 4; i++) {
+            int nx = neighbors[i].x;
+            int ny = neighbors[i].y;
+            if (nx < min_x || nx > max_x || ny < min_y || ny > max_y) continue;
+            size_t index = (size_t)ny * (size_t)surf->w + (size_t)nx;
+            if (visited[index]) continue;
+            Uint32 c = pixels[ny * pitch_pixels + nx];
+            if ((c & mask) == (u_border & mask)) continue;
+            if (stop_at_paint && (c & mask) == (u_paint & mask)) continue;
+            visited[index] = 1;
+            queue[tail++] = (Point){nx, ny};
+        }
+    }
+
+    SDL_UpdateTexture(canvas, &region, surf->pixels, surf->pitch);
+    SDL_DestroySurface(surf);
+    free(queue);
+    free(visited);
+    graphics_present_if_autodisplay();
+}
+
+void draw_paint(double ux, double uy, unsigned int paint_color, unsigned int border_color) {
+    flood_fill(ux, uy, paint_color, border_color, NULL, 0);
+}
+
+void draw_paint_tile(double ux, double uy, const unsigned char *tile, int tile_length, unsigned int border_color) {
+    if (!tile || tile_length <= 0) return;
+    flood_fill(ux, uy, fg_color, border_color, tile, tile_length);
 }
 
 int graphics_save_screenshot(const char *filename) {
@@ -1099,280 +1606,6 @@ int graphics_save_screenshot(const char *filename) {
     SDL_SetRenderTarget(renderer, canvas);
 
     return result;
-}
-
-void draw_line_alpha(double ux1, double uy1, double ux2, double uy2, int color, int fill, int alpha) {
-    if (alpha < 0) alpha = 0;
-    if (alpha > 255) alpha = 255;
-    if (alpha == 0) return;
-    int x1, y1, x2, y2;
-    transform_coords(ux1, uy1, &x1, &y1);
-    transform_coords(ux2, uy2, &x2, &y2);
-    gfx_cursor_x = ux2; gfx_cursor_y = uy2;
-    apply_clipping();
-
-    if (!renderer || !canvas) return;
-    SDL_SetRenderDrawBlendMode(renderer, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
-    SDL_Color draw_color = get_graphics_color(color);
-    draw_color.a = (Uint8)alpha;
-    SDL_SetRenderDrawColor(renderer, draw_color.r, draw_color.g, draw_color.b, draw_color.a);
-
-    double xs = (double)canvas_width / mode_res_w;
-    double ys = (double)canvas_height / mode_res_h;
-
-    int sx1 = (int)(x1 * xs + 0.5), sy1 = (int)(y1 * ys + 0.5);
-    int sx2 = (int)(x2 * xs + 0.5), sy2 = (int)(y2 * ys + 0.5);
-    
-    if (fill) {
-        int left = (sx1 < sx2 ? sx1 : sx2);
-        int top = (sy1 < sy2 ? sy1 : sy2);
-        int width = abs(sx1 - sx2) + (int)(xs + 0.5);
-        int height = abs(sy1 - sy2) + (int)(ys + 0.5);
-        SDL_FRect r = {
-            (float)left, (float)top, (float)width, (float)height
-        };
-        if (fill == 2) {
-            SDL_RenderFillRect(renderer, &r);
-        } else {
-            // Draw 4 thick borders matching logical pixel size to prevent PAINT leaks
-            float inner_height = (float)height - 2.0f * (float)ys;
-            if (inner_height < 0.0f) inner_height = 0.0f;
-            SDL_FRect edges[4] = {
-                { (float)left, (float)top, (float)width, (float)ys },
-                { (float)left, (float)(top + height - ys), (float)width, height > ys ? (float)ys : 0.0f },
-                { (float)left, (float)(top + ys), (float)xs, inner_height },
-                { (float)(left + width - xs), (float)(top + ys), (float)xs, inner_height }
-            };
-            for (int i = 0; i < 4; i++) SDL_RenderFillRect(renderer, &edges[i]);
-        }
-    } else {
-        SDL_RenderLine(renderer, (float)sx1, (float)sy1, (float)sx2, (float)sy2);
-    }
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-    remove_clipping();
-    update_graphics();
-}
-
-void draw_line(double ux1, double uy1, double ux2, double uy2, int color, int fill) {
-    draw_line_alpha(ux1, uy1, ux2, uy2, color, fill, 255);
-}
-
-static void draw_circle_with_alpha(double ucx, double ucy, double uradius, int color, int fill, int alpha) {
-    if (!renderer || !canvas) return;
-    if (alpha < 0) alpha = 0;
-    if (alpha > 255) alpha = 255;
-    if (alpha == 0) return;
-
-    int cx, cy;
-    transform_coords(ucx, ucy, &cx, &cy);
-    // Approximate physical radius from x scale
-    int p_cx, p_cy;
-    transform_coords(ucx + uradius, ucy, &p_cx, &p_cy);
-    int radius = abs(p_cx - cx);
-    if (radius == 0 && uradius > 0) radius = 1;
-    if (radius <= 0) return;
-
-    apply_clipping();
-
-    SDL_SetRenderDrawBlendMode(renderer, alpha < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
-    SDL_Color draw_color = get_graphics_color(color);
-    draw_color.a = (Uint8)alpha;
-    SDL_SetRenderDrawColor(renderer, draw_color.r, draw_color.g, draw_color.b, draw_color.a);
-
-    double xs = (double)canvas_width / mode_res_w;
-    double ys = (double)canvas_height / mode_res_h;
-
-    if (fill == 2 && alpha < 255) {
-        for (int row = -radius; row <= radius; row++) {
-            int row_sq = row * row;
-            int row_half = (int)sqrt((double)radius * radius - (double)row_sq);
-            SDL_FRect span = {
-                (float)((cx - row_half) * xs),
-                (float)((cy + row) * ys),
-                (float)((2 * row_half + 1) * xs + 0.5f),
-                (float)(ys + 0.5f)
-            };
-            SDL_RenderFillRect(renderer, &span);
-        }
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-        gfx_cursor_x = cx;
-        gfx_cursor_y = cy;
-        remove_clipping();
-        update_graphics();
-        return;
-    }
-
-    int x = 0;
-    int y = radius;
-    int d = 3 - 2 * radius;
-
-    while (x <= y) {
-        if (fill == 2) {
-            // Filled circle: draw horizontal spans of logical pixels
-            SDL_FRect r1 = { (float)((cx - x) * xs), (float)((cy + y) * ys), (float)((2 * x + 1) * xs), (float)ys };
-            SDL_FRect r2 = { (float)((cx - x) * xs), (float)((cy - y) * ys), (float)((2 * x + 1) * xs), (float)ys };
-            SDL_FRect r3 = { (float)((cx - y) * xs), (float)((cy + x) * ys), (float)((2 * y + 1) * xs), (float)ys };
-            SDL_FRect r4 = { (float)((cx - y) * xs), (float)((cy - x) * ys), (float)((2 * y + 1) * xs), (float)ys };
-            SDL_RenderFillRect(renderer, &r1);
-            SDL_RenderFillRect(renderer, &r2);
-            SDL_RenderFillRect(renderer, &r3);
-            SDL_RenderFillRect(renderer, &r4);
-        } else {
-            // Outline: draw logical pixels as thick blocks to ensure water-tight boundaries
-            int px[8] = {cx + x, cx - x, cx + x, cx - x, cx + y, cx - y, cx + y, cx - y};
-            int py[8] = {cy + y, cy + y, cy - y, cy - y, cy + x, cy + x, cy - x, cy - x};
-            for (int i = 0; i < 8; i++) {
-                // Draw slightly larger blocks (xs+1) to ensure logical pixels
-                // overlap at corners, creating a water-tight border for PAINT
-                // commands in high-resolution modes.
-                SDL_FRect r = { (float)(px[i] * xs), (float)(py[i] * ys), (float)(xs + 1.0f), (float)(ys + 1.0f) };
-                SDL_RenderFillRect(renderer, &r);
-            }
-        }
-
-        if (d < 0) {
-            d = d + 4 * x + 6;
-        } else {
-            d = d + 4 * (x - y) + 10;
-            y--;
-        }
-        x++;
-    }
-    gfx_cursor_x = cx;
-    gfx_cursor_y = cy;
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-    remove_clipping();
-    update_graphics();
-}
-
-void draw_circle(double cx, double cy, double radius, int color, int fill) {
-    draw_circle_with_alpha(cx, cy, radius, color, fill, 255);
-}
-
-void draw_circle_alpha(double cx, double cy, double radius, int color, int fill, int alpha) {
-    draw_circle_with_alpha(cx, cy, radius, color, fill, alpha);
-}
-
-typedef struct {
-    int x, y;
-} Point;
-
-static Uint32 blend_paint_pixel(Uint32 destination, Uint32 source, int alpha,
-                                const SDL_PixelFormatDetails *details, SDL_Palette *palette) {
-    Uint8 dr, dg, db;
-    Uint8 sr, sg, sb;
-    SDL_GetRGB(destination, details, palette, &dr, &dg, &db);
-    SDL_GetRGB(source, details, palette, &sr, &sg, &sb);
-    Uint8 r = (Uint8)((sr * alpha + dr * (255 - alpha) + 127) / 255);
-    Uint8 g = (Uint8)((sg * alpha + dg * (255 - alpha) + 127) / 255);
-    Uint8 b = (Uint8)((sb * alpha + db * (255 - alpha) + 127) / 255);
-    return SDL_MapRGBA(details, palette, r, g, b, 255);
-}
-
-void draw_paint_alpha(double ux, double uy, int paint_color, int border_color, int alpha) {
-    if (!renderer || !canvas) return;
-    if (alpha < 0) alpha = 0;
-    if (alpha > 255) alpha = 255;
-    if (alpha == 0) return;
-    int x, y;
-    transform_coords(ux, uy, &x, &y);
-    if (!clip_point(x, y)) return;
-    apply_clipping();
-    
-    SDL_Surface *raw_surf = SDL_RenderReadPixels(renderer, NULL);
-    remove_clipping();
-    if (!raw_surf) return;
-    // Convert to canvas format to ensure color mapping matches the texture
-    SDL_Surface *surf = SDL_ConvertSurface(raw_surf, SDL_PIXELFORMAT_RGBA8888);
-    SDL_DestroySurface(raw_surf);
-    if (!surf) return;
-
-    SDL_Color sc_paint = get_graphics_color(paint_color);
-    SDL_Color sc_border = get_graphics_color(border_color);
-    
-    const SDL_PixelFormatDetails *details = SDL_GetPixelFormatDetails(surf->format);
-    SDL_Palette *palette = SDL_GetSurfacePalette(surf);
-    Uint32 u_paint = SDL_MapRGBA(details, palette, sc_paint.r, sc_paint.g, sc_paint.b, sc_paint.a);
-    Uint32 u_border = SDL_MapRGBA(details, palette, sc_border.r, sc_border.g, sc_border.b, sc_border.a);
-
-    double xs = (double)canvas_width / mode_res_w;
-    double ys = (double)canvas_height / mode_res_h;
-    int sx = (int)(x * xs);
-    int sy = (int)(y * ys);
-
-    if (sx < 0 || sx >= surf->w || sy < 0 || sy >= surf->h) {
-        SDL_DestroySurface(surf);
-        return;
-    }
-
-    int bpp = details->bytes_per_pixel;
-    int pitch_pixels = surf->pitch / bpp;
-    Uint32 *pixels = (Uint32 *)surf->pixels;
-    Uint32 start_color = pixels[sy * pitch_pixels + sx];
-
-    // Mask out the alpha channel to make comparisons robust against driver-specific
-    // variations in how alpha is handled in the render target or ReadPixels.
-    Uint32 mask = ~details->Amask;
-    if ((start_color & mask) == (u_border & mask) || (start_color & mask) == (u_paint & mask)) {
-        SDL_DestroySurface(surf);
-        return;
-    }
-
-    int capacity = surf->w * surf->h;
-    Point *queue = malloc(capacity * sizeof(Point));
-    Uint8 *visited = alpha < 255 ? calloc((size_t)capacity, sizeof(Uint8)) : NULL;
-    if (!queue || (alpha < 255 && !visited)) {
-        free(queue);
-        free(visited);
-        SDL_DestroySurface(surf);
-        return;
-    }
-    int head = 0, tail = 0;
-
-    pixels[sy * pitch_pixels + sx] = alpha < 255
-        ? blend_paint_pixel(start_color, u_paint, alpha, details, palette)
-        : u_paint;
-    if (visited) visited[(size_t)sy * (size_t)surf->w + (size_t)sx] = 1;
-    queue[tail++] = (Point){sx, sy};
-
-    while (head < tail) {
-        Point p = queue[head++];
-        
-        Point neighbors[4] = {
-            {p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1}
-        };
-
-        for (int i = 0; i < 4; i++) {
-            int nx = neighbors[i].x;
-            int ny = neighbors[i].y;
-
-            if (nx >= 0 && nx < surf->w && ny >= 0 && ny < surf->h) {
-                size_t index = (size_t)ny * (size_t)surf->w + (size_t)nx;
-                if (visited && visited[index]) continue;
-                Uint32 c = pixels[ny * pitch_pixels + nx];
-                if ((c & mask) != (u_border & mask) && (c & mask) != (u_paint & mask)) {
-                    pixels[ny * pitch_pixels + nx] = alpha < 255
-                        ? blend_paint_pixel(c, u_paint, alpha, details, palette)
-                        : u_paint;
-                    if (visited) visited[index] = 1;
-                    queue[tail++] = (Point){nx, ny};
-                }
-            }
-        }
-    }
-
-    SDL_UpdateTexture(canvas, NULL, surf->pixels, surf->pitch);
-    SDL_DestroySurface(surf);
-    free(queue);
-    free(visited);
-    
-    gfx_cursor_x = x;
-    gfx_cursor_y = y;
-    graphics_present_if_autodisplay();
-}
-
-void draw_paint(double ux, double uy, int paint_color, int border_color) {
-    draw_paint_alpha(ux, uy, paint_color, border_color, 255);
 }
 
 void set_window_title(const char *title) {

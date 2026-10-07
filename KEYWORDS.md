@@ -8,6 +8,11 @@ String values use length-aware heap-backed storage and grow dynamically as
 needed. Dynamic strings are the default; fixed-length declarations are available
 with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 
+Numeric literals may be written in hexadecimal, octal or binary: `&HFF`, `&O17`,
+`&B1011`. As in QBasic, a literal of up to 16 significant bits is a signed
+INTEGER (`&HFFFF` is -1), a wider one is a signed LONG, and a trailing `&`
+forces LONG (`&HFFFF&` is 65535). Whole-number decimal literals are exact.
+
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
@@ -17,26 +22,47 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 `LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOF`, `LOG`, `LOOP`, `LSET`,
 `LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
 `NOT`, `OCT$`, `OFF`, `ON`, `OPEN`, `OPTION`, `OR`, `PAINT`, `PEEK`, `PLAY`,
-`POKE`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
+`POKE`, `PRESET`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SELECT`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
-`VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DISPLAY`, `_FONT`,
-`_FREEFONT`, `_FREEIMAGE`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
+`VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DISPLAY`, `_FONT`,
+`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
 `_DEFLATE$`, `_INFLATE$`.
+
+QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
+`_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
+`_PI`, `_WIDTH`, `_HEIGHT`.
 
 `_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
 Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
 
-`PSET`, `LINE`, `CIRCLE`, and `PAINT` accept an optional final alpha value from
-0 (transparent) to 255 (opaque). Omitting alpha preserves opaque drawing.
+### Colors and alpha transparency
+
+Graphics commands take QBasic argument lists. Alpha transparency follows QB64:
+create a 32-bit image with `SCREEN _NEWIMAGE(width, height, 32)` and every
+color is an `&HAARRGGBB` value whose top byte is its alpha. `_RGB32(r, g, b)`
+gives an opaque color and `_RGBA32(r, g, b, a)` a translucent one; drawing with
+an alpha below 255 blends with what is already on screen, and alpha 0 draws
+nothing. Store 32-bit colors in `_UNSIGNED LONG` (or `LONG`) variables, since a
+SINGLE cannot hold every 32-bit value exactly.
+
+In every other screen mode colors are palette indexes. `_RGB`/`_RGBA` return a
+32-bit color in a 32-bit image and the nearest palette index otherwise;
+`_RED`, `_GREEN`, `_BLUE` and `_ALPHA` read the components of a color in the
+current mode, while `_RED32` ... `_ALPHA32` always decode `&HAARRGGBB`.
+
+Commands that omit a color draw in the foreground color set by `COLOR`
+(15 in most palette modes, opaque white in 32-bit images); `PRESET` and `CLS`
+use the background color.
 
 ## User-defined types
 
 `TYPE name ... END TYPE` defines a record type. Fields use `field AS typeName`,
-where `typeName` can be `STRING`, `INTEGER`, `SINGLE`, `DOUBLE`, or another
-user-defined type. Fields may be arrays, and `STRING * n` declares a fixed-width
+where `typeName` can be `STRING`, `INTEGER`, `LONG`, `_UNSIGNED LONG`,
+`SINGLE`, `DOUBLE`, or another user-defined type (LONG fields are stored in
+records as 4 bytes). Fields may be arrays, and `STRING * n` declares a fixed-width
 string field. Declare scalar or array instances with `DIM variable AS typeName`
 or `DIM variable(size) AS typeName`, then read or assign fields with chained
 member notation such as `variable.location.x = 10` or
@@ -62,11 +88,11 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 `IF...THEN`, and `ON ERROR GOTO`.
 
 ## Subroutines and Functions (QBasic Procedures)
-- `SUB subname[(param1[, param2...])] [STATIC] ... END SUB`: Defines a QBasic-style subroutine procedure with isolated local variable scope.
+- `SUB subname[(param1[, param2...])] [STATIC] ... END SUB`: Defines a QBasic-style subroutine procedure with isolated local variable scope. A parameter may be declared `name AS type` with `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING` or a user-defined type; values passed in are converted to that type.
 - `FUNCTION funcname[(param1[, param2...])] [STATIC] ... END FUNCTION`: Defines a QBasic-style function procedure that returns a value by assigning `funcname = expression`. Supports recursion.
 - `CALL subname[(arg1[, arg2...])]` or `subname arg1[, arg2...]`: Invokes a subroutine procedure. Simple variable arguments are passed by reference; parenthesized expressions `((x))` are passed by value.
 - `DECLARE {SUB | FUNCTION} name[(params)]`: Declare procedure signatures (procedures are also pre-scanned automatically).
-- `SHARED var1[, var2...]`: Grants access to main program global variables from within a procedure block.
+- `SHARED var1[()] [AS type][, var2...]`: Grants access to main program global variables from within a procedure block.
 - `STATIC var1[, var2...]`: Declares static local variables preserved across procedure calls.
 - `EXIT {SUB | FUNCTION}`: Exits the active procedure prematurely.
 
@@ -80,7 +106,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `ON KEY(n) GOSUB line`: Enables a key trap for key `n`.
 - `ON TIMER(n) GOSUB line`: Enables a periodic timer trap.
 - `ON ERROR GOTO line`: Error trapping.
-- `RESUME [0 | NEXT | line]`: Error recovery.
+- `RESUME [0 | NEXT | line | label]`: Error recovery.
 - `STOP`: Halts execution (can be resumed with `CONT`).
 - `WHILE condition ... WEND`: Conditional loop.
 - `DO ... LOOP`: Infinite loop; exit with `EXIT DO` or a `GOTO`.
@@ -103,7 +129,10 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DEFSTR letter_range`: Defines variables starting with these letters as strings.
 - `DEFSNG letter_range`: Defines variables starting with these letters as single-precision.
 - `DEFDBL letter_range`: Defines variables starting with these letters as double-precision.
-- `DIM var(dim1[, dim2, dim3])`: Array dimensioning (up to 3D).
+- `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`.
+- `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
+- `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
+- Type suffixes: `%` INTEGER (16-bit), `&` LONG (32-bit), `~&` _UNSIGNED LONG (0 to 4294967295, wraps like QB64), `!` SINGLE, `#` DOUBLE, `$` STRING. INTEGER and LONG assignments round and report Overflow when out of range. `AND`, `OR`, `XOR` and `NOT` keep all 32 bits of LONG values.
 - `DIM name AS STRING * n`: Declares a fixed-width scalar string padded with spaces.
 - `DIM name(size) AS STRING * n`: Declares a fixed-width string array; assignments are padded or truncated to `n` characters.
 - `ERASE var`: Reinitializes variables or arrays.
@@ -121,7 +150,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 ## Input and Output
 - `BEEP`: Sounds the speaker.
 - `CLS`: Clears the screen.
-- `COLOR foreground[, background]`: Sets text or graphics colors.
+- `COLOR [foreground][, background]`: Sets the text color and the default graphics colors. Primitives drawn without a color use the foreground; `CLS` and `PRESET` use the background. In a 32-bit image both are `&HAARRGGBB` colors.
 - `INPUT ["prompt"{,|;}] [#n,] var1[, var2...]`: User input.
 - `KEY(n) ON|OFF|STOP`: Enables, disables, or stops a key trap for key `n`.
 - `LOCATE row, col`: Positions the cursor.
@@ -151,28 +180,43 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `SYSTEM` / `QUIT`: Exits the interpreter.
 
 ## Graphics and Sound
-- `CIRCLE (x,y), radius[, color[, fill[, alpha]]]`: Draws a circle. Use `2` for solid fill.
+Coordinates written `STEP(dx, dy)` are relative to the last point referenced,
+which every graphics command updates (after `SCREEN` it is the screen center).
+Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
+`CIRCLE (50,50), 20, , , , .5`.
+
+- `CIRCLE [STEP](x,y), radius[, [color][, [start][, [end][, aspect]]]]`: Draws a circle, ellipse or arc. `start` and `end` are angles in radians from -2π to 2π, measured counterclockwise from 3 o'clock; a negative angle also draws a radius line to that end of the arc, making a pie wedge. `aspect` is the ratio of vertical to horizontal radius (below 1, `radius` is horizontal; above 1, it is vertical). The default aspect makes circles look round on screen. Fill a shape with `PAINT`.
 - `DRAW "mml"`: String-driven graphics command.
 - `GET (x1,y1)-(x2,y2), array`: Captures a screen area into a numeric array.
-- `LINE [(x1,y1)]-(x2,y2)[, [color][, [B|BF][, alpha]]]`: Draws lines or boxes. Alpha may follow color directly when no box mode is specified.
-- `PAINT (x,y)[, color[, border[, alpha]]]`: Area fill.
+- `LINE [[STEP](x1,y1)]-[STEP](x2,y2)[, [color][, [B|BF][, style]]]`: Draws a line, a box (`B`) or a filled box (`BF`). Without a first point the line starts at the last point referenced. `style` is a 16-bit mask such as `&HF0F0`: each set bit, starting from the most significant, draws a pixel and each clear bit skips one. It applies to lines and `B` boxes.
+- `PAINT [STEP](x,y)[, [color | tile$][, [border][, background$]]]`: Flood-fills the area around the point up to the `border` color (default: the fill color, or the foreground color for tiles). A translucent color in a 32-bit image blends with the pixels it covers. `tile$` paints a pattern of up to 64 bytes: in SCREEN 1 each byte is a row of four 2-bit pixels; in SCREEN 7-12 each row is four bytes, one per bit plane; in 256-color modes each row is eight bytes, one per pixel; in SCREEN 2 and 32-bit images each byte is a row of eight 1-bit pixels drawn in the foreground (set) and background (clear) colors. `background$` is accepted for compatibility; tiled fills track the pixels they visit, so it is not needed.
 - `PLAY "mml"`: Plays Music Macro Language. Supports tempo (`T`), octave (`O`, `<`, `>`), default note length (`L`), volume (`V0`-`V15`), sharps/flats, numeric notes (`N0`-`N84`), rests (`P`/`R`), dotted notes, and normal/legato/staccato articulation (`MN`/`ML`/`MS`). `MB` plays in the background; `MF` waits for playback to finish.
-- `PSET (x,y)[, color[, alpha]]`: Sets a pixel.
+- `POINT(x, y)`: Returns the color of a pixel (a palette index, or `&HFFRRGGBB` in a 32-bit image), or -1 outside the screen or view. `POINT(0)`/`POINT(1)` return the physical x/y and `POINT(2)`/`POINT(3)` the `WINDOW` x/y of the last point referenced.
+- `PRESET [STEP](x,y)[, color]`: Sets a pixel, in the background color when no color is given.
+- `PSET [STEP](x,y)[, color]`: Sets a pixel, in the foreground color when no color is given.
 - `PUT (x,y), array[, action]`: Places a captured area on the screen. Actions: `PSET`, `PRESET`, `AND`, `OR`, `XOR` (default).
 - `SCREEN mode`: Sets graphics mode.
+- `SCREEN _NEWIMAGE(width, height[, mode])`: Creates a graphics screen of any size. `mode` 32 makes a 32-bit image with alpha colors; any other value uses the 256-color palette.
 - `SCREENSHOT "filename.png"`: Saves the current graphics window content to a file. Supports `.png` and `.jpg`/`.jpeg` extensions.
 - `_FONT handle`: Sets the active font to the loaded font specified by `handle` (or `0` to restore default font).
 - `_FREEFONT handle`: Frees a loaded font handle.
 - `_LOADFONT("fontfile.ttf", size)`: Loads a TTF/OTF font file at the specified pixel size and returns a numeric font handle.
 - `_PRINTSTRING (x, y), text$`: Draws `text$` at pixel coordinates `(x, y)` using the current `COLOR`. Does not move the text cursor or scroll. Works like QB64's `_PRINTSTRING`.
 - `_PRINTWIDTH(text$)`: Returns the pixel width that `text$` would occupy when rendered with the current font. Useful for centering text or layout calculations.
-- `SLEEP ms`: Pauses for a specified number of milliseconds.
+- `SLEEP [seconds]`: Pauses for the given number of seconds or until a key is pressed (the key stays available to `INKEY$`). With no argument, or 0, it waits for a key.
+- `_DELAY seconds`: Pauses for a number of seconds, which may be fractional (`_DELAY .05`), without waking on key presses.
+- `_LIMIT fps`: Placed once in a loop, holds the loop to at most `fps` iterations per second, for steady animation frame rates.
 - `SOUND freq, duration`: Produces a tone for a duration in 18.2-Hz timer ticks. Frequency must be 37-32767 and duration 0-65535.
 - `VIEW [(x1,y1)-(x2,y2)[, [fillcolor][, border]]]`: Defines a physical viewport (in screen pixels). All subsequent graphics commands are clipped to this region. Coordinates are relative to the viewport origin unless `VIEW SCREEN` is used (absolute). Omit coordinates to reset.
 - `WINDOW [(x1,y1)-(x2,y2)]`: Maps a custom logical coordinate system onto the current viewport. After this call, all graphics commands accept logical coordinates. `(x1,y1)` is the bottom-left and `(x2,y2)` is the top-right by default (Y increases upward, like math). Use `WINDOW SCREEN` to keep Y increasing downward. Omit coordinates to reset to screen coordinates.
 - `_LOADIMAGE("filename", mode)`: Loads an image file and returns a numeric image handle. The optional mode is accepted for QB64 compatibility.
 - `_PUTIMAGE (x1,y1), handle`: Draws an image at the destination position. A destination rectangle can be supplied as `(x1,y1)-(x2,y2)` to scale the image; source rectangles are supported with the corresponding QB64 syntax.
 - `_FREEIMAGE handle`: Releases a loaded image handle so its texture resources can be reused.
+- `_RGB32(r, g, b[, a])`, `_RGB32(gray[, a])`, `_RGBA32(r, g, b, a)`: Return a 32-bit `&HAARRGGBB` color. Channels are clamped to 0-255.
+- `_RGB(r, g, b)`, `_RGBA(r, g, b, a)`: A 32-bit color in a 32-bit image, otherwise the nearest palette index.
+- `_RED32(c)`, `_GREEN32(c)`, `_BLUE32(c)`, `_ALPHA32(c)`: Channels of a 32-bit color. `_RED(c)`, `_GREEN(c)`, `_BLUE(c)`, `_ALPHA(c)` do the same for a color in the current mode, looking palette indexes up in the palette.
+- `_PI[(multiplier)]`: π in double precision, optionally multiplied (`_PI(2)` is 2π).
+- `_WIDTH`, `_HEIGHT`: Width and height of the graphics screen in pixels.
 - `_DEFLATE$(text$)`: Compresses a dynamic string with zlib and returns a lossless encoded compressed string.
 - `_INFLATE$(data$)`: Decompresses a string returned by `_DEFLATE$`, including multi-megabyte values; invalid input returns an empty string.
 
@@ -189,7 +233,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `INSTR([start,] s1$, s2$)`: String search.
 - `LEN(s$)`: String length.
 - `PEEK(addr)`: Read memory byte.
-- `TIMER`: Seconds since midnight/startup.
+- `TIMER`: Wall-clock seconds since midnight, with fractions.
 - `VAL(s$)`: Numeric value of string.
 - `VARPTR(var)`: Address of a variable.
 
@@ -203,7 +247,7 @@ dynamic strings.
 - `DATE$`: Current system date.
 - `ENVIRON$(name | index)`: Retrieve environment variable.
 - `GET$(#n, record, length)`: Read string from file.
-- `HEX$(n)` / `OCT$(n)`: Hex/Octal representation.
+- `HEX$(n)` / `OCT$(n)`: Hex/Octal representation. Negative values use 16-bit two's complement when they fit an INTEGER (`HEX$(-1)` is `FFFF`) and 32-bit otherwise; positive values up to 32 bits print in full, so `HEX$` shows `&HAARRGGBB` colors.
 - `INKEY$`: Read single keypress.
 - `LCASE$(s$)` / `UCASE$(s$)`: Case conversion.
 - `LEFT$(s$, n)`, `RIGHT$(s$, n)`, `MID$(s$, start[, n])`: Substring.

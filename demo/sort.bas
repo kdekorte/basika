@@ -10,7 +10,7 @@
 60 REM BUBBLE SORT
 70 FOR I = 1 TO 14
 80 FOR J = 1 TO 15 - I
-90 IF A(J) > A(J+1) THEN T = A(J): A(J) = A(J+1): A(J+1) = T: TC = C(J): C(J) = C(J+1): C(J+1) = TC: GOSUB 500: SLEEP 50
+90 IF A(J) > A(J+1) THEN T = A(J): A(J) = A(J+1): A(J+1) = T: TC = C(J): C(J) = C(J+1): C(J+1) = TC: GOSUB 500: _DELAY .05
 100 NEXT J
 110 NEXT I
 120 PRINT "SORTED!"

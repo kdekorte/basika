@@ -10,7 +10,7 @@
 100  LOCATE R, C
 105  COLOR INT(RND * 15) + 1
 110  PRINT "BASICA!";
-120  SLEEP 20 ' Pause for 20 milliseconds
+120  _DELAY .02 ' Pause for 20 milliseconds
 130 NEXT I
 140 COLOR 15: LOCATE 25, 1: PRINT "Demo finished. Press any key to quit."
 150 END
