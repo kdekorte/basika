@@ -248,9 +248,11 @@ Token get_next_token(const char **input) {
         char buffer[32];
         int i = 0;
         int is_double = 0;
+        int single_exponent = 0;
         while (isdigit(**input) || **input == '.' || toupper(**input) == 'E' || toupper(**input) == 'D') {
             char c = **input;
             if (toupper(c) == 'D') is_double = 1;
+            if (toupper(c) == 'E') single_exponent = 1;
             
             // atof expects 'E' for exponents; convert 'D' internally
             buffer[i++] = (toupper(c) == 'D') ? 'E' : c;
@@ -270,10 +272,19 @@ Token get_next_token(const char **input) {
         else if (**input == '%') { (*input)++; }
         else if (**input == '&' && !isalnum((unsigned char)(*input)[1])) { (*input)++; long_suffix = 1; }
         
-        // Rule: numbers with more than 7 digits or a dot are double in some dialects,
-        // but IBM BASICA treats any number with # or D as double. 
-        // Without suffix, if it has a dot or E, it's single.
         buffer[i] = '\0';
+        // As in QBasic, an unsuffixed literal with more than 7 significant
+        // digits is DOUBLE; an E exponent or ! suffix keeps it SINGLE.
+        if (!single_suffix && !single_exponent && !is_double) {
+            int significant = 0, leading = 1;
+            for (const char *d = buffer; *d && toupper((unsigned char)*d) != 'E'; d++) {
+                if (!isdigit((unsigned char)*d)) continue;
+                if (leading && *d == '0') continue;
+                leading = 0;
+                significant++;
+            }
+            if (significant > 7) is_double = 1;
+        }
         token.type = TOKEN_NUMBER;
         token.double_val = atof(buffer);
         token.is_double = is_double;

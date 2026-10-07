@@ -12,6 +12,9 @@ Numeric literals may be written in hexadecimal, octal or binary: `&HFF`, `&O17`,
 `&B1011`. As in QBasic, a literal of up to 16 significant bits is a signed
 INTEGER (`&HFFFF` is -1), a wider one is a signed LONG, and a trailing `&`
 forces LONG (`&HFFFF&` is 65535). Whole-number decimal literals are exact.
+A decimal literal with more than 7 significant digits (`3.14159265358979`) is
+DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
+`!` suffix keeps it SINGLE.
 
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
@@ -132,7 +135,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`.
 - `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
 - `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
-- Type suffixes: `%` INTEGER (16-bit), `&` LONG (32-bit), `~&` _UNSIGNED LONG (0 to 4294967295, wraps like QB64), `!` SINGLE, `#` DOUBLE, `$` STRING. INTEGER and LONG assignments round and report Overflow when out of range. `AND`, `OR`, `XOR` and `NOT` keep all 32 bits of LONG values.
+- Type suffixes: `%` INTEGER (16-bit), `&` LONG (32-bit), `~&` _UNSIGNED LONG (0 to 4294967295, wraps like QB64), `!` SINGLE, `#` DOUBLE, `$` STRING. INTEGER and LONG assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range. `AND`, `OR`, `XOR` and `NOT` keep all 32 bits of LONG values.
 - `DIM name AS STRING * n`: Declares a fixed-width scalar string padded with spaces.
 - `DIM name(size) AS STRING * n`: Declares a fixed-width string array; assignments are padded or truncated to `n` characters.
 - `ERASE var`: Reinitializes variables or arrays.

@@ -32,14 +32,9 @@
 
 ## Interpreter correctness
 
-- A SUB call without `CALL` after `THEN` or `ELSE` on a single-line `IF` (`IF x THEN Foo 1`) is a syntax error; `CALL Foo(1)` works.
-- A string comparison followed by `AND`/`OR` (`IF a$ <> "" AND a$ <> " " THEN`) is a syntax error unless each comparison is parenthesized.
-- `SYSTEM` after `THEN` on a single-line `IF` is a syntax error.
-- `DIM` of an array inside a `SUB`/`FUNCTION` allocates a module-level array, so a second call fails with "Duplicate Definition"; local arrays should be created per call.
-- `PRINT rec.field` for a fixed-length `STRING * n` field of a `TYPE` reports "Type mismatch".
-- The variable table holds 1024 variables and each field of each `TYPE` array element uses one, so arrays of records with more than a few hundred elements run out of memory. Raising the limit needs a cheaper per-call `CallFrame` reset, since every call clears the whole frame.
-- Unsuffixed decimal literals with more than 7 digits (`3.14159265358979`) stay single precision (BASICA behavior); QBasic types them as DOUBLE.
-- `I% = 10.5` rounds half away from zero (11); QBasic rounds half to even (10). `tests/math/variable_suffixes` currently expects 11.
+- `STATIC` procedures and `STATIC` variables are parsed but locals are not preserved between calls.
+- Arrays of records `DIM`med inside a procedure are still module-level (numeric and string arrays are local).
+- Each field of each `TYPE` array element uses one of the 8192 variable-table entries.
 - Add support for `CONT`, `STOP`, and better direct-mode behavior.
 - Implement `WAIT` for port monitoring (or a simulated equivalent).
 - Verify remaining QBASIC random-record binary-layout edge cases.

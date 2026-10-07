@@ -1,6 +1,6 @@
 10 REM Variable suffix tests: %, !, #
 20 I% = 10.5: PRINT "I% (10.5):"; I%
-30 I% = 10.4: PRINT "I% (10.4):"; I%
+30 I% = 10.4: PRINT "I% (10.4):"; I%: I% = 11.5: PRINT "I% (11.5):"; I%
 40 F! = 1.2345678: PRINT "F!:"; F!
 50 D# = 1.234567890123456#: PRINT "D#:"; D#
 60 A = 1 : A% = 2 : A# = 3

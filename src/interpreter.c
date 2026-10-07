@@ -30,7 +30,8 @@ static int resolve_target_line(Token tok) {
 
 volatile sig_atomic_t stop_running = 0;
 
-static Variable vars[1024]; 
+#define MAX_VARIABLES 8192
+static Variable vars[MAX_VARIABLES];
 static int var_count = 0;
 
 #define MAX_NAMED_CONSTANTS 256
@@ -76,9 +77,9 @@ typedef struct {
 
 static UserTypeInstance user_type_instances[MAX_RECORD_INSTANCES];
 static int user_type_instance_count = 0;
-#define VAR_HASH_CAPACITY 2048
+#define VAR_HASH_CAPACITY 16384
 #define VAR_HASH_MASK (VAR_HASH_CAPACITY - 1)
-/* Open-addressed table; load stays at or below 50% (1024 variables). */
+/* Open-addressed table; load stays at or below 50% (MAX_VARIABLES). */
 static int var_hash_table[VAR_HASH_CAPACITY];
 static int var_hash_initialized = 0;
 
@@ -216,7 +217,12 @@ typedef struct {
     
     Variable local_vars[128];
     int local_var_count;
-    Variable *resolved_variables[1024];
+    /* Per-call cache of variable lookups. Clearing all MAX_VARIABLES entries on
+     * every call is costly, so the indexes that were filled are recorded and
+     * only those are cleared (all of them if the list overflowed). */
+    Variable *resolved_variables[MAX_VARIABLES];
+    int resolved_touched[256];
+    int resolved_touched_count;
     
     Variable *byref_caller_variable[MAX_PROC_PARAMS];
     int byref_caller_var_idx[MAX_PROC_PARAMS];
@@ -399,13 +405,33 @@ static void clear_procedure_declared_types(void) {
     declared_type_count = kept;
 }
 
+static void note_resolved_variable(CallFrame *frame, int idx) {
+    if (frame->resolved_touched_count < (int)(sizeof(frame->resolved_touched) / sizeof(frame->resolved_touched[0]))) {
+        frame->resolved_touched[frame->resolved_touched_count] = idx;
+    }
+    frame->resolved_touched_count++;
+}
+
+static void clear_resolved_variables(CallFrame *frame) {
+    int capacity = (int)(sizeof(frame->resolved_touched) / sizeof(frame->resolved_touched[0]));
+    if (frame->resolved_touched_count > capacity) {
+        memset(frame->resolved_variables, 0, sizeof(frame->resolved_variables));
+    } else {
+        for (int i = 0; i < frame->resolved_touched_count; i++) {
+            frame->resolved_variables[frame->resolved_touched[i]] = NULL;
+        }
+    }
+    frame->resolved_touched_count = 0;
+}
+
 static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
-    if (idx < 0 || idx >= 1024) return &vars[0];
+    if (idx < 0 || idx >= MAX_VARIABLES) return &vars[0];
     if (frame_index < 0) return &vars[idx];
     if (frame_index >= call_stack_depth) return &vars[idx];
 
     CallFrame *frame = &call_stack[frame_index];
     if (frame->resolved_variables[idx]) return frame->resolved_variables[idx];
+    note_resolved_variable(frame, idx);
     Variable **resolved = &frame->resolved_variables[idx];
     const char *name = vars[idx].name;
 
@@ -473,8 +499,13 @@ static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
     }
 
     for (int s = 0; s < frame->shared_count; s++) {
-        if (proc_name_match(frame->shared_var_names[s], name) ||
-            has_record_prefix(name, frame->shared_var_names[s])) {
+        const char *shared = frame->shared_var_names[s];
+        // Record fields are named "ROOT.FIELD" or "ROOT@n.FIELD", without the
+        // type suffix the SHARED name was given.
+        size_t root_length = numeric_base_length(shared, strlen(shared));
+        if (proc_name_match(shared, name) ||
+            (strncasecmp(name, shared, root_length) == 0 &&
+             (name[root_length] == '.' || name[root_length] == '@'))) {
             return *resolved = &vars[idx];
         }
     }
@@ -516,7 +547,7 @@ static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
 }
 
 static Variable *get_variable_ptr(int idx) {
-    if (idx < 0 || idx >= 1024) return &vars[0];
+    if (idx < 0 || idx >= MAX_VARIABLES) return &vars[0];
     if (call_stack_depth == 0) return &vars[idx];
     return get_variable_ptr_for_frame(idx, call_stack_depth - 1);
 }
@@ -893,6 +924,7 @@ static int read_next_data_into_variable(const char **input) {
 }
 
 /* Converts val to the numeric type named by the variable's suffix.
+ * INTEGER and LONG round half to even (2.5 -> 2, 3.5 -> 4) like QBasic.
  * Reports Overflow and returns 0 when the value does not fit. */
 static inline __attribute__((always_inline)) int coerce_numeric_value(const char *name, double *val) {
     size_t len = strlen(name);
@@ -905,17 +937,17 @@ static inline __attribute__((always_inline)) int coerce_numeric_value(const char
             report_runtime_error(ERR_OVERFLOW);
             return 0;
         }
-        *val = round(*val);
+        *val = nearbyint(*val);
     } else if (suffix == '&' && len >= 2 && name[len - 2] == '~') {
         // _UNSIGNED LONG wraps modulo 2^32 like QB64.
-        *val = fmod(round(*val), 4294967296.0);
+        *val = fmod(nearbyint(*val), 4294967296.0);
         if (*val < 0) *val += 4294967296.0;
     } else if (suffix == '&') {
         if (*val < -2147483648.5 || *val > 2147483647.5) {
             report_runtime_error(ERR_OVERFLOW);
             return 0;
         }
-        *val = round(*val);
+        *val = nearbyint(*val);
     }
     return 1;
 }
@@ -1031,14 +1063,17 @@ static int is_string_var(const char *name) {
     char last = name[len - 1];
     if (last == '$') return 1;
     if (strchr(name, '.') && last != '%' && last != '!' && last != '#' && last != '&') {
+        // Variable names are stored uppercase.
         char string_member[64];
         int written = snprintf(string_member, sizeof(string_member), "%s$", name);
+        for (int i = 0; string_member[i]; i++) string_member[i] = (char)toupper((unsigned char)string_member[i]);
         if (written > 0 && (size_t)written < sizeof(string_member) &&
             find_variable_index(string_member) >= 0) return 1;
     }
     if (fixed_string_declarations_present && last != '%' && last != '!' && last != '#' && last != '&') {
         char normalized[64];
         snprintf(normalized, sizeof(normalized), "%s!", name);
+        for (int i = 0; normalized[i]; i++) normalized[i] = (char)toupper((unsigned char)normalized[i]);
         int idx = find_variable_index(normalized);
         if (idx >= 0 && vars[idx].string_declared) {
             return 1;
@@ -1322,6 +1357,22 @@ static void release_call_frame_storage(CallFrame *frame) {
     frame->local_var_count = 0;
 }
 
+/* Prepares a call frame slot for a new call without clearing the large
+ * local-variable and lookup-cache arrays wholesale. */
+static void reset_call_frame(CallFrame *frame) {
+    release_call_frame_storage(frame);
+    clear_resolved_variables(frame);
+    frame->proc = NULL;
+    frame->return_stmt = NULL;
+    frame->return_token_idx = 0;
+    memset(frame->byref_caller_variable, 0, sizeof(frame->byref_caller_variable));
+    memset(frame->byref_caller_var_idx, 0, sizeof(frame->byref_caller_var_idx));
+    memset(frame->byref_caller_frame, 0, sizeof(frame->byref_caller_frame));
+    frame->shared_count = 0;
+    frame->func_return_numeric = 0;
+    frame->func_return_string = NULL;
+}
+
 static void basic_string_release(BasicString *value) {
     if (!value) return;
     free(value->data);
@@ -1529,7 +1580,7 @@ int find_variable(const char *name) {
     int idx = find_variable_index(normalized);
     if (idx != -1) return idx;
 
-    if (var_count < 1024) {
+    if (var_count < MAX_VARIABLES) {
         idx = var_count++;
         memset(&vars[idx], 0, sizeof(Variable));
         strncpy(vars[idx].name, normalized, sizeof(vars[idx].name) - 1);
@@ -1550,7 +1601,7 @@ static int find_variable_raw_name(const char *name) {
     normalized[length] = '\0';
     int idx = find_variable_index(normalized);
     if (idx >= 0) return idx;
-    if (var_count >= 1024) return -1;
+    if (var_count >= MAX_VARIABLES) return -1;
     idx = var_count++;
     memset(&vars[idx], 0, sizeof(vars[idx]));
     snprintf(vars[idx].name, sizeof(vars[idx].name), "%s", normalized);
@@ -3792,10 +3843,11 @@ static void apply_basika_using_str(const char *fmt, const char *val, char *out, 
 }
 
 static Variable *get_or_create_frame_variable(CallFrame *frame, int variable_index) {
-    if (variable_index < 0 || variable_index >= 1024) return &vars[0];
+    if (variable_index < 0 || variable_index >= MAX_VARIABLES) return &vars[0];
     if (frame->resolved_variables[variable_index]) {
         return frame->resolved_variables[variable_index];
     }
+    note_resolved_variable(frame, variable_index);
     const char *name = vars[variable_index].name;
     for (int i = 0; i < frame->local_var_count; i++) {
         if (strcasecmp(frame->local_vars[i].name, name) == 0) {
@@ -4994,8 +5046,7 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
     }
 
     CallFrame *frame = &call_stack[call_stack_depth];
-    release_call_frame_storage(frame);
-    memset(frame, 0, sizeof(CallFrame));
+    reset_call_frame(frame);
     frame->proc = proc;
     frame->return_stmt = exec_stmt;
 
@@ -5118,6 +5169,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
     int block_if_depth = 0;
     SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
     int select_case_depth = 0;
+    /* Token position to resume at when a jump lands mid-line (FOR/NEXT on one line). */
+    int resume_proc_pos = 0;
 
     while (curr_proc_stmt && curr_proc_stmt != proc->end_stmt && call_stack_depth > target_depth && !stop_running) {
         Statement *exec_stmt = curr_proc_stmt;
@@ -5125,7 +5178,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
         current_source_line_number = exec_stmt->source_line_number;
         current_has_explicit_line_number = exec_stmt->has_explicit_line_number;
 
-        TokenStream ts = {exec_stmt->tokens, 0, exec_stmt};
+        TokenStream ts = {exec_stmt->tokens, resume_proc_pos, exec_stmt};
+        resume_proc_pos = 0;
         int jumped = 0;
 
         while (ts.pos < exec_stmt->token_count && !stop_running && !jumped) {
@@ -5529,7 +5583,13 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     int end_ts_pos = ts.pos;
                     Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, idx, &end_ts_pos);
                     if (target_stmt) {
-                        curr_proc_stmt = target_stmt;
+                        // Continue after the matching NEXT, which may share this line.
+                        if (end_ts_pos < target_stmt->token_count) {
+                            curr_proc_stmt = target_stmt;
+                            resume_proc_pos = end_ts_pos;
+                        } else {
+                            curr_proc_stmt = target_stmt->next;
+                        }
                         jumped = 1;
                         break;
                     }
@@ -5578,6 +5638,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     } else {
                         for_ptr = for_idx + 1;
                         curr_proc_stmt = for_stack[for_idx].start_stmt;
+                        resume_proc_pos = for_stack[for_idx].start_ts_pos;
                         jumped = 1;
                         break;
                     }
@@ -5672,8 +5733,7 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
     }
 
     CallFrame *frame = &call_stack[call_stack_depth];
-    release_call_frame_storage(frame);
-    memset(frame, 0, sizeof(CallFrame));
+    reset_call_frame(frame);
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -5784,8 +5844,7 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
     }
 
     CallFrame *frame = &call_stack[call_stack_depth];
-    release_call_frame_storage(frame);
-    memset(frame, 0, sizeof(CallFrame));
+    reset_call_frame(frame);
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -5896,8 +5955,7 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
     }
 
     CallFrame *frame = &call_stack[call_stack_depth];
-    release_call_frame_storage(frame);
-    memset(frame, 0, sizeof(CallFrame));
+    reset_call_frame(frame);
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -5991,8 +6049,7 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
     }
 
     CallFrame *frame = &call_stack[call_stack_depth];
-    release_call_frame_storage(frame);
-    memset(frame, 0, sizeof(CallFrame));
+    reset_call_frame(frame);
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -6569,7 +6626,81 @@ static double arithmetic_expression_tok(TokenStream *ts) {
     return val;
 }
 
+/* is_string_token only sees the root of a record element reference such as
+ * items(2).label, so probe the full reference (on a copy of the stream) to
+ * learn whether its final field is a string. */
+static int is_string_member_reference_tok(const TokenStream *ts) {
+    if (user_type_count == 0) return 0;
+    const Token *base = &ts->tokens[ts->pos];
+    if (base->type != TOKEN_IDENTIFIER || ts->tokens[ts->pos + 1].type != TOKEN_LPAREN) return 0;
+    TokenStream probe = *ts;
+    probe.pos++;
+    int member_index = -1, member_array_index = -1;
+    if (resolve_user_type_reference_tok(&probe, base, &member_index, &member_array_index) <= 0) return 0;
+    Variable *member = get_variable_ptr(member_index);
+    return member && is_string_var(member->name);
+}
+
+static int is_string_member_reference_text(const char *input) {
+    if (user_type_count == 0) return 0;
+    Token base = get_next_token(&input);
+    if (base.type != TOKEN_IDENTIFIER || *skip_whitespace_fast(input) != '(') return 0;
+    int member_index = -1, member_array_index = -1;
+    if (resolve_user_type_reference_text(&input, &base, &member_index, &member_array_index) <= 0) return 0;
+    Variable *member = get_variable_ptr(member_index);
+    return member && is_string_var(member->name);
+}
+
+/* A string comparison (a$ = b$, a$ <> b$, ...), evaluated at the relational
+ * level so it combines with AND/OR/NOT like a numeric comparison. */
+static double string_comparison_tok(TokenStream *ts) {
+    BasicString left = {0};
+    BasicString right = {0};
+    if (!parse_string_expression_tok_heap(ts, &left)) {
+        basic_string_release(&left);
+        return 0;
+    }
+
+    TokenType op = ts->tokens[ts->pos].type;
+    if (op != TOKEN_EQUALS && op != TOKEN_LESS && op != TOKEN_GREATER) {
+        basic_string_release(&left);
+        return 0;
+    }
+    ts->pos++;
+
+    TokenType modifier = ts->tokens[ts->pos].type;
+    if ((op == TOKEN_LESS && (modifier == TOKEN_GREATER || modifier == TOKEN_EQUALS)) ||
+        (op == TOKEN_GREATER && modifier == TOKEN_EQUALS)) {
+        ts->pos++;
+    } else {
+        modifier = TOKEN_EOF;
+    }
+
+    if (!parse_string_expression_tok_heap(ts, &right)) {
+        basic_string_release(&right);
+        basic_string_release(&left);
+        return 0;
+    }
+
+    int comparison = strcmp((const char *)left.data, (const char *)right.data);
+    basic_string_release(&right);
+    basic_string_release(&left);
+    if (op == TOKEN_EQUALS) return comparison == 0 ? -1.0 : 0.0;
+    if (op == TOKEN_LESS) {
+        if (modifier == TOKEN_GREATER) return comparison != 0 ? -1.0 : 0.0;
+        if (modifier == TOKEN_EQUALS) return comparison <= 0 ? -1.0 : 0.0;
+        return comparison < 0 ? -1.0 : 0.0;
+    }
+    return modifier == TOKEN_EQUALS
+        ? (comparison >= 0 ? -1.0 : 0.0)
+        : (comparison > 0 ? -1.0 : 0.0);
+}
+
 static double relational_expression_tok(TokenStream *ts) {
+    if (ts->tokens[ts->pos].type != TOKEN_EOF &&
+        (is_string_token(&ts->tokens[ts->pos]) || is_string_member_reference_tok(ts))) {
+        return string_comparison_tok(ts);
+    }
     double val = arithmetic_expression_tok(ts);
     while (1) {
         TokenType type = ts->tokens[ts->pos].type;
@@ -6615,9 +6746,7 @@ static double bitwise_and_tok(TokenStream *ts) {
     double val = logical_not_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_AND) {
         ts->pos++;
-        double right = is_string_token(&ts->tokens[ts->pos])
-            ? evaluate_expression_tok(ts) : logical_not_tok(ts);
-        val = (double)(basic_bit_int(val) & basic_bit_int(right));
+        val = (double)(basic_bit_int(val) & basic_bit_int(logical_not_tok(ts)));
     }
     return val;
 }
@@ -6701,49 +6830,6 @@ double evaluate_expression_tok(TokenStream *ts) {
             double result;
             if (evaluate_cached_expression(ts, expression, &result)) return result;
         }
-    }
-
-    if (ts->tokens[ts->pos].type != TOKEN_EOF && is_string_token(&ts->tokens[ts->pos])) {
-        BasicString left = {0};
-        BasicString right = {0};
-        if (!parse_string_expression_tok_heap(ts, &left)) {
-            basic_string_release(&left);
-            return 0;
-        }
-
-        TokenType op = ts->tokens[ts->pos].type;
-        if (op != TOKEN_EQUALS && op != TOKEN_LESS && op != TOKEN_GREATER) {
-            basic_string_release(&left);
-            return 0;
-        }
-        ts->pos++;
-
-        TokenType modifier = ts->tokens[ts->pos].type;
-        if ((op == TOKEN_LESS && (modifier == TOKEN_GREATER || modifier == TOKEN_EQUALS)) ||
-            (op == TOKEN_GREATER && modifier == TOKEN_EQUALS)) {
-            ts->pos++;
-        } else {
-            modifier = TOKEN_EOF;
-        }
-
-        if (!parse_string_expression_tok_heap(ts, &right)) {
-            basic_string_release(&right);
-            basic_string_release(&left);
-            return 0;
-        }
-
-        int comparison = strcmp((const char *)left.data, (const char *)right.data);
-        basic_string_release(&right);
-        basic_string_release(&left);
-        if (op == TOKEN_EQUALS) return comparison == 0 ? -1.0 : 0.0;
-        if (op == TOKEN_LESS) {
-            if (modifier == TOKEN_GREATER) return comparison != 0 ? -1.0 : 0.0;
-            if (modifier == TOKEN_EQUALS) return comparison <= 0 ? -1.0 : 0.0;
-            return comparison < 0 ? -1.0 : 0.0;
-        }
-        return modifier == TOKEN_EQUALS
-            ? (comparison >= 0 ? -1.0 : 0.0)
-            : (comparison > 0 ? -1.0 : 0.0);
     }
 
     double val = bitwise_or_tok(ts);
@@ -7204,28 +7290,61 @@ static double arithmetic_expression(const char **input) {
     return val;
 }
 
+static double string_comparison(const char **input) {
+    char s1[BASIC_STRING_MAX], s2[BASIC_STRING_MAX];
+    parse_string_expression(input, s1, sizeof(s1));
+    const char *op_saved = *input;
+    Token t = get_next_token(input);
+    if (t.type == TOKEN_EQUALS || t.type == TOKEN_LESS || t.type == TOKEN_GREATER) {
+        int op1 = t.type;
+        const char *saved2 = *input;
+        Token t2 = get_next_token(input);
+        int op2 = -1;
+        if (t2.type == TOKEN_EQUALS || t2.type == TOKEN_GREATER) op2 = t2.type;
+        else *input = saved2;
+
+        parse_string_expression(input, s2, sizeof(s2));
+        int res = strcmp(s1, s2);
+        if (op1 == TOKEN_EQUALS) return res == 0 ? -1.0 : 0.0;
+        if (op1 == TOKEN_LESS) {
+            if (op2 == TOKEN_GREATER) return res != 0 ? -1.0 : 0.0;
+            if (op2 == TOKEN_EQUALS) return res <= 0 ? -1.0 : 0.0;
+            return res < 0 ? -1.0 : 0.0;
+        }
+        if (op1 == TOKEN_GREATER) {
+            if (op2 == TOKEN_EQUALS) return res >= 0 ? -1.0 : 0.0;
+            return res > 0 ? -1.0 : 0.0;
+        }
+    }
+    *input = op_saved;
+    return 0;
+}
+
 static double relational_expression(const char **input) {
+    const char *peek_ptr = *input;
+    Token peek_tok = get_next_token(&peek_ptr);
+    if (is_string_token(&peek_tok) || is_string_member_reference_text(*input)) return string_comparison(input);
     double val = arithmetic_expression(input);
     while (1) {
-        const char *p = skip_whitespace_fast(*input);
-        if (*p != '=' && *p != '<' && *p != '>') break;
-        *input = p;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_EQUALS) val = (val == arithmetic_expression(input)) ? -1.0 : 0.0;
-        else if (t.type == TOKEN_LESS) {
-            const char *s2 = *input;
-            Token t2 = get_next_token(input);
-            if (t2.type == TOKEN_GREATER) val = (val != arithmetic_expression(input)) ? -1.0 : 0.0;
-            else if (t2.type == TOKEN_EQUALS) val = (val <= arithmetic_expression(input)) ? -1.0 : 0.0;
-            else { *input = s2; val = (val < arithmetic_expression(input)) ? -1.0 : 0.0; }
-        }
-        else if (t.type == TOKEN_GREATER) {
-            const char *s2 = *input;
-            Token t2 = get_next_token(input);
-            if (t2.type == TOKEN_EQUALS) val = (val >= arithmetic_expression(input)) ? -1.0 : 0.0;
-            else { *input = s2; val = (val > arithmetic_expression(input)) ? -1.0 : 0.0; }
-        }
-        else break;
+    const char *p = skip_whitespace_fast(*input);
+    if (*p != '=' && *p != '<' && *p != '>') break;
+    *input = p;
+    Token t = get_next_token(input);
+    if (t.type == TOKEN_EQUALS) val = (val == arithmetic_expression(input)) ? -1.0 : 0.0;
+    else if (t.type == TOKEN_LESS) {
+        const char *s2 = *input;
+        Token t2 = get_next_token(input);
+        if (t2.type == TOKEN_GREATER) val = (val != arithmetic_expression(input)) ? -1.0 : 0.0;
+        else if (t2.type == TOKEN_EQUALS) val = (val <= arithmetic_expression(input)) ? -1.0 : 0.0;
+        else { *input = s2; val = (val < arithmetic_expression(input)) ? -1.0 : 0.0; }
+    }
+    else if (t.type == TOKEN_GREATER) {
+        const char *s2 = *input;
+        Token t2 = get_next_token(input);
+        if (t2.type == TOKEN_EQUALS) val = (val >= arithmetic_expression(input)) ? -1.0 : 0.0;
+        else { *input = s2; val = (val > arithmetic_expression(input)) ? -1.0 : 0.0; }
+    }
+    else break;
     }
     return val;
 }
@@ -7262,38 +7381,6 @@ static double bitwise_or_expression(const char **input) {
 }
 
 double evaluate_expression(const char **input) {
-    const char *peek_ptr = *input;
-    Token peek_tok = get_next_token(&peek_ptr);
-    if (is_string_token(&peek_tok)) {
-        char s1[BASIC_STRING_MAX], s2[BASIC_STRING_MAX];
-        parse_string_expression(input, s1, sizeof(s1));
-        const char *op_saved = *input;
-        Token t = get_next_token(input);
-        if (t.type == TOKEN_EQUALS || t.type == TOKEN_LESS || t.type == TOKEN_GREATER) {
-            int op1 = t.type;
-            const char *saved2 = *input;
-            Token t2 = get_next_token(input);
-            int op2 = -1;
-            if (t2.type == TOKEN_EQUALS || t2.type == TOKEN_GREATER) op2 = t2.type;
-            else *input = saved2;
-
-            parse_string_expression(input, s2, sizeof(s2));
-            int res = strcmp(s1, s2);
-            if (op1 == TOKEN_EQUALS) return res == 0 ? -1.0 : 0.0;
-            if (op1 == TOKEN_LESS) {
-                if (op2 == TOKEN_GREATER) return res != 0 ? -1.0 : 0.0;
-                if (op2 == TOKEN_EQUALS) return res <= 0 ? -1.0 : 0.0;
-                return res < 0 ? -1.0 : 0.0;
-            }
-            if (op1 == TOKEN_GREATER) {
-                if (op2 == TOKEN_EQUALS) return res >= 0 ? -1.0 : 0.0;
-                return res > 0 ? -1.0 : 0.0;
-            }
-        }
-        *input = op_saved;
-        return 0;
-    }
-
     double val = bitwise_or_expression(input);
     while (1) {
         const char *p = skip_whitespace_fast(*input);
@@ -7567,7 +7654,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 has_args = 1;
                 char val_buf[512] = "";
-                if (is_string_token(&next)) {
+                if (is_string_token(&next) || is_string_member_reference_text(item_saved)) {
                     ptr = item_saved;
                     char value[BASIC_STRING_MAX] = "";
                     parse_string_expression(&ptr, value, sizeof(value));
@@ -7819,7 +7906,9 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             } else {
                 ptr = saved_comma;
             }
-        } else if ((t.type == TOKEN_SYSTEM || t.type == TOKEN_QUIT) && is_direct) {
+        } else if (t.type == TOKEN_SYSTEM || t.type == TOKEN_QUIT) {
+            // Ends the program and the interpreter, without waiting for a key.
+            fflush(NULL);
             exit(0);
         } else if (t.type == TOKEN_REM || t.type == TOKEN_APOSTROPHE) { // APOSTROPHE is also a comment
             while (*ptr) ptr++;
@@ -8162,38 +8251,39 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (get_next_token(&check_ptr).type == TOKEN_LPAREN) {
                     array_idx = parse_array_index(&ptr, idx);
                 } // No else, array_idx remains -1 if no paren
+                Variable *erased = get_variable_ptr(idx);
                 if (is_string_var(var.text)) {
                     // erase string variable or string array element
-                    if (array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size) {
-                        basic_string_destroy(vars[idx].s_array[array_idx]);
-                        vars[idx].s_array[array_idx] = NULL;
-                    } else if (vars[idx].s_array) {
+                    if (array_idx >= 0 && erased->s_array && array_idx < erased->array_size) {
+                        basic_string_destroy(erased->s_array[array_idx]);
+                        erased->s_array[array_idx] = NULL;
+                    } else if (erased->s_array) {
                         // ERASE S$ with no index on a string array: release all memory
-                        for (int i = 0; i < vars[idx].array_size; i++) {
-                            if (vars[idx].s_array[i]) {
-                                basic_string_destroy(vars[idx].s_array[i]);
+                        for (int i = 0; i < erased->array_size; i++) {
+                            if (erased->s_array[i]) {
+                                basic_string_destroy(erased->s_array[i]);
                             }
                         }
-                        free(vars[idx].s_array);
-                        vars[idx].s_array = NULL;
-                        vars[idx].array_size = 0;
-                        vars[idx].num_dims = 0;
+                        free(erased->s_array);
+                        erased->s_array = NULL;
+                        erased->array_size = 0;
+                        erased->num_dims = 0;
                     } else if (array_idx == -1) { // Scalar string variable
-                        basic_string_destroy(vars[idx].s_value);
-                        vars[idx].s_value = NULL;
+                        basic_string_destroy(erased->s_value);
+                        erased->s_value = NULL;
                     }
                 } else {
                     // numeric variable or array
-                    if (array_idx >= 0 && vars[idx].array && array_idx < vars[idx].array_size) {
-                        vars[idx].array[array_idx] = 0;
-                    } else if (vars[idx].array) {
+                    if (array_idx >= 0 && erased->array && array_idx < erased->array_size) {
+                        erased->array[array_idx] = 0;
+                    } else if (erased->array) {
                         // ERASE A with no index: release numeric array memory
-                        free(vars[idx].array);
-                        vars[idx].array = NULL;
-                        vars[idx].array_size = 0;
-                        vars[idx].num_dims = 0;
+                        free(erased->array);
+                        erased->array = NULL;
+                        erased->array_size = 0;
+                        erased->num_dims = 0;
                     } else if (array_idx == -1) { // Scalar numeric variable
-                        vars[idx].value = 0;
+                        erased->value = 0;
                     }
                 }
             }
@@ -8432,10 +8522,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     if (fixed_length >= 0) {
                         vars[idx].string_declared = 1;
                         vars[idx].string_fixed_length = (size_t)fixed_length;
+                        get_variable_ptr(idx)->string_declared = 1;
+                        get_variable_ptr(idx)->string_fixed_length = (size_t)fixed_length;
                         fixed_string_declarations_present = 1;
                         if (num_dims == 0) assign_string_variable_value(idx, -1, NULL, 0);
                     }
                     if (num_dims > 0) {
+                        // Inside a procedure this is the frame's local array, which is
+                        // created afresh on every call.
+                        Variable *target = get_variable_ptr(idx);
                         int total_size = 1;
                         int dim_err = 0;
                         for (int i = 0; i < num_dims; i++) {
@@ -8450,24 +8545,24 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         if (dim_err) break;
 
                         if (is_string_var(var.text)) {
-                            if (vars[idx].s_array) {
+                            if (target->s_array) {
                                 report_runtime_error(ERR_DUPLICATE_DEFINITION);
                                 break;
                             }
-                            vars[idx].s_array = calloc(total_size, sizeof(BasicString *));
+                            target->s_array = calloc(total_size, sizeof(BasicString *));
                         } else {
-                            if (vars[idx].array) {
+                            if (target->array) {
                                 report_runtime_error(ERR_DUPLICATE_DEFINITION);
                                 break;
                             }
-                            vars[idx].array = malloc(total_size * sizeof(double));
-                            for (int i = 0; i < total_size; i++) vars[idx].array[i] = 0;
+                            target->array = malloc(total_size * sizeof(double));
+                            for (int i = 0; i < total_size; i++) target->array[i] = 0;
                         }
-                        vars[idx].array_size = total_size;
-                        vars[idx].num_dims = num_dims;
+                        target->array_size = total_size;
+                        target->num_dims = num_dims;
                         for (int i = 0; i < num_dims; i++) {
-                            vars[idx].dims[i] = dims[i];
-                            vars[idx].lower_bounds[i] = lowers[i];
+                            target->dims[i] = dims[i];
+                            target->lower_bounds[i] = lowers[i];
                         }
                         arrays_dimensioned = 1;
                     }
@@ -8485,7 +8580,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     }
                     entry->base[base_len] = '\0';
                     for (int f = 0; f < call_stack_depth; f++) {
-                        memset(call_stack[f].resolved_variables, 0, sizeof(call_stack[f].resolved_variables));
+                        clear_resolved_variables(&call_stack[f]);
                     }
                 }
 
@@ -8855,9 +8950,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     get_next_token(&ptr);
                     Token var_tok = get_next_token(&ptr);
                     int idx = find_variable(var_tok.text);
-                    if (idx != -1 && vars[idx].array && vars[idx].array_size >= 2) {
-                        int w = (int)vars[idx].array[0];
-                        int h = (int)vars[idx].array[1];
+                    Variable *image = idx != -1 ? get_variable_ptr(idx) : NULL;
+                    if (image && image->array && image->array_size >= 2) {
+                        int w = (int)image->array[0];
+                        int h = (int)image->array[1];
                         int action = 0;
                         const char *action_saved = ptr;
                         if (get_next_token(&ptr).type == TOKEN_COMMA) {
@@ -8873,8 +8969,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         int k = 2;
                         for (int j = 0; j < h; j++) {
                             for (int i = 0; i < w; i++) {
-                                if (k >= vars[idx].array_size) break;
-                                unsigned int src_col = color_from_value(vars[idx].array[k++]);
+                                if (k >= image->array_size) break;
+                                unsigned int src_col = color_from_value(image->array[k++]);
                                 unsigned int dst_col = color_from_value(get_pixel(x + i, y + j));
                                 unsigned int final_col = src_col;
                                 switch (action) {
@@ -8984,13 +9080,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 int min_x = (x1 < x2) ? x1 : x2;
                 int min_y = (y1 < y2) ? y1 : y2;
                 int total_size = 2 + w * h;
-                if (idx != -1 && vars[idx].array && vars[idx].array_size >= total_size) {
-                    vars[idx].array[0] = (double)w;
-                    vars[idx].array[1] = (double)h;
+                Variable *image = idx != -1 ? get_variable_ptr(idx) : NULL;
+                if (image && image->array && image->array_size >= total_size) {
+                    image->array[0] = (double)w;
+                    image->array[1] = (double)h;
                     int k = 2;
                     for (int j = 0; j < h; j++) {
                         for (int i = 0; i < w; i++) {
-                            vars[idx].array[k++] = (double)get_pixel(min_x + i, min_y + j);
+                            image->array[k++] = (double)get_pixel(min_x + i, min_y + j);
                         }
                     }
                 } else {
@@ -9931,7 +10028,7 @@ void run_program() {
                         ts.pos++;
                         if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COMMA) ts.pos++;
                     }
-                    memset(frame->resolved_variables, 0, sizeof(frame->resolved_variables));
+                    clear_resolved_variables(frame);
                 } else {
                     ts.pos = exec_stmt->token_count;
                 }
@@ -10096,7 +10193,9 @@ void run_program() {
                 // Check if it's an implicit SUB call!
                 ProcedureDef *proc = find_procedure(t->text);
                 if (proc && !proc->is_function) {
-                    ts.pos = start_pos + 1; // position right after SubName token
+                    // Arguments follow this SubName token, which need not start the line
+                    // (it may follow THEN, ELSE or a colon).
+                    ts.pos = (int)(current_token - ts.tokens) + 1;
                     curr = execute_sub_call(proc, &ts, exec_stmt);
                     jumped = 1;
                     break;

@@ -1,0 +1,6 @@
+call 1 starts at 0  10 n1 2 
+call 2 starts at 0  20 n2 2 
+call 3 starts at 0  30 n3 2 
+call 4 starts at 0  40 n4 2 
+module g(1) still 99 
+ 15   21   2   62 

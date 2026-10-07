@@ -9,3 +9,8 @@ PRINT X&
 PRINT HEX$(-1); " "; HEX$(-70000); " "; HEX$(&HFF00FF00); " "; HEX$(4294967295); " "; OCT$(-1)
 CONST MASK = &HFFFF0000
 PRINT MASK; HEX$(MASK)
+' More than 7 significant digits makes a DOUBLE; E exponents and ! stay SINGLE.
+PRINT 3.14159265358979; 0.000123456789; 1.23456789E+2; 1.23456789!; 3.1415926
+' Assigning to INTEGER/LONG rounds half to even.
+A% = 2.5: B% = 3.5: C& = -4.5
+PRINT A%; B%; C&
