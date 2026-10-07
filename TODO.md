@@ -13,9 +13,8 @@
 
 ## QB64 extensions
 
-- Off-screen images: `_NEWIMAGE` as a function returning an image handle, `_DEST`/`_SOURCE`, `_PUTIMAGE` between images, and `_COPYIMAGE`, so animations can draw static layers once instead of every frame.
-- `_TITLE`, `_KEYDOWN`/`_KEYHIT`, and `_MOUSEX`/`_MOUSEY`/`_MOUSEBUTTON` for interactive demos.
-- `_INTEGER64`/`_UNSIGNED INTEGER` types and `DEFLNG`.
+- `_UNSIGNED _INTEGER64` and `_INTEGER64` values above 2^53 lose precision because variables are doubles.
+- `_CLEARCOLOR`, `_SETALPHA`, `_BLEND`/`_DONTBLEND`, `_SCREENIMAGE`, `_DISPLAY` as a handle function, `_PRINTMODE`, and `_TITLE$` are not implemented.
 
 ## Interpreter correctness
 

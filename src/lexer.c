@@ -46,6 +46,7 @@ static const KeywordMap keyword_table[] = {
     {"DEF", TOKEN_DEF},
     {"DEFDBL", TOKEN_DEFDBL},
     {"DEFINT", TOKEN_DEFINT},
+    {"DEFLNG", TOKEN_DEFLNG},
     {"DEFSNG", TOKEN_DEFSNG},
     {"DEFSTR", TOKEN_DEFSTR},
     {"DELETE", TOKEN_DELETE},
@@ -182,6 +183,7 @@ static const KeywordMap keyword_table[] = {
     {"XOR", TOKEN_XOR},
     {"_AUTODISPLAY", TOKEN_AUTODISPLAY},
     {"_DELAY", TOKEN_DELAY},
+    {"_DEST", TOKEN_DEST},
     {"_DISPLAY", TOKEN_DISPLAY},
     {"_FONT", TOKEN_FONT},
     {"_FREEFONT", TOKEN_FREEFONT},
@@ -193,6 +195,8 @@ static const KeywordMap keyword_table[] = {
     {"_PRINTSTRING", TOKEN_PRINTSTRING},
     {"_PRINTWIDTH", TOKEN_PRINTWIDTH},
     {"_PUTIMAGE", TOKEN_PUTIMAGE},
+    {"_SOURCE", TOKEN_SOURCE},
+    {"_TITLE", TOKEN_TITLE},
     {"_INFLATE$", TOKEN_INFLATE},
 };
 
@@ -422,13 +426,17 @@ Token get_next_token(const char **input) {
             break;
         }
     }
-    // LONG (&) and _UNSIGNED LONG (~&) suffixes end an identifier.
-    if (i > 0 && i < BASIC_TOKEN_TEXT_MAX - 2) {
-        if (**input == '~' && (*input)[1] == '&') {
+    // QB64 suffixes end an identifier: & LONG, && _INTEGER64, and ~ for the
+    // unsigned forms (~% ~%% ~& ~&&). % and %% are read by the loop above.
+    if (i > 0 && i < BASIC_TOKEN_TEXT_MAX - 4) {
+        if (**input == '~' && ((*input)[1] == '&' || (*input)[1] == '%')) {
+            char kind = (*input)[1];
             buffer[i++] = *(*input)++;
             buffer[i++] = *(*input)++;
+            if (**input == kind) buffer[i++] = *(*input)++;
         } else if (**input == '&' && !isalnum((unsigned char)(*input)[1])) {
             buffer[i++] = *(*input)++;
+            if (**input == '&' && !isalnum((unsigned char)(*input)[1])) buffer[i++] = *(*input)++;
         }
     }
     buffer[i] = '\0';

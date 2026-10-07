@@ -10,6 +10,7 @@
 '    * radar card                        pie wedge (negative angles) + PAINT
 '    * line card                         LINE style masks, marching ants
 '    * paint card                        PAINT tiles, LINE -STEP, alpha swatches
+'    * sky                               drawn once into a _NEWIMAGE, _PUTIMAGE each frame
 '
 '  Space pauses, any other key exits.   Run with: basika -w <this file>
 ' ============================================================================
@@ -46,6 +47,7 @@ DIM SHARED Stars(1 TO STAR_COUNT) AS Star
 DIM SHARED Sparks(1 TO SPARK_COUNT) AS Spark
 DIM SHARED TrailX(1 TO TRAIL_LENGTH) AS SINGLE, TrailY(1 TO TRAIL_LENGTH) AS SINGLE
 DIM SHARED NextSpark AS INTEGER, AntStyle AS LONG
+DIM SHARED SkyImage AS LONG
 
 DIM t AS DOUBLE, dt AS DOUBLE, lastTime AS DOUBLE, now AS DOUBLE
 DIM fps AS SINGLE, fpsTime AS DOUBLE, fpsFrames AS INTEGER
@@ -77,7 +79,7 @@ DO
         fpsFrames = 0
     END IF
 
-    DrawSky
+    _PUTIMAGE (0, 0), SkyImage ' the static sky is drawn once, off screen
     DrawStars t
     DrawAurora t
     DrawRings t, 0
@@ -114,6 +116,11 @@ SUB InitScene
     NEXT
     NextSpark = 1
     AntStyle = &HF0F0
+    ' Draw the unchanging sky into an off-screen image once.
+    SkyImage = _NEWIMAGE(SCREEN_W, SCREEN_H, 32)
+    _DEST SkyImage
+    DrawSky
+    _DEST 0
 END SUB
 
 ' A filled circle built from one horizontal span per row, so a translucent

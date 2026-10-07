@@ -92,6 +92,12 @@ Graphics demos can be run with a visible window using `-w`:
 ./basika -w demo/boing_ball.bas
 ```
 
+`demo/qb64_paint.bas` is a small MacPaint-style program built on the QB64 image, mouse and keyboard extensions (pencil, brush, spray, shapes, fill bucket, opacity, undo, mirror and flip):
+
+```sh
+./basika -w demo/qb64_paint.bas
+```
+
 Try the sound and `PLAY` Music Macro Language demo:
 
 ```sh

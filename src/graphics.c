@@ -35,15 +35,6 @@ static double gfx_cursor_y = 0;
 
 #define MAX_IMAGE_SLOTS 64
 
-typedef struct {
-    SDL_Texture *texture;
-    int width;
-    int height;
-    int in_use;
-} ImageSlot;
-
-static ImageSlot image_slots[MAX_IMAGE_SLOTS];
-
 
 static TTF_Font *font = NULL;
 static char font_path[512] = "";
@@ -69,6 +60,7 @@ static unsigned int fg_color = 15;
 static unsigned int bg_color = 0;
 static void reset_draw_colors(int mode);
 static void restore_default_palette(void);
+static void reset_dest_to_screen(void);
 
 static int view_active = 0;
 static int view_screen = 0;
@@ -294,6 +286,7 @@ int graphics_copy_page(int source, int destination) {
 }
 
 void set_screen_mode(int mode) {
+    reset_dest_to_screen();
     current_screen_mode = mode;
     switch(mode) {
         case 1:  mode_res_w = 320; mode_res_h = 200; break;
@@ -349,6 +342,7 @@ void set_screen_mode(int mode) {
 
 void set_screen_newimage(int width, int height, int colors) {
     if (width <= 0 || height <= 0) return;
+    reset_dest_to_screen();
     color_mode_32 = (colors == 32);
     palette_mode_256 = !color_mode_32;
     current_screen_mode = -1;
@@ -637,74 +631,307 @@ int graphics_printwidth(const char *text) {
     return (int)strlen(text) * current_col_width;
 }
 
-int graphics_loadimage(const char *filename, int mode) {
-    (void)mode;
-    if (!filename || !renderer) return 0;
+/* ---- Images (_NEWIMAGE, _LOADIMAGE, _DEST, _SOURCE, _PUTIMAGE) ----
+ * Every drawing command uses the "current canvas" globals. An image keeps
+ * its own copy of that state, and _DEST swaps it in, so all primitives,
+ * PRINT and PAINT draw into images unchanged. Handles follow QB64: images
+ * are below -1, -1 means failure and 0 is the screen. */
 
-    int slot_idx = -1;
-    for (int i = 0; i < MAX_IMAGE_SLOTS; i++) {
-        if (!image_slots[i].in_use) { slot_idx = i; break; }
-    }
-    if (slot_idx < 0) return 0;
+typedef struct {
+    SDL_Texture *canvas;
+    int canvas_width, canvas_height, mode_res_w, mode_res_h;
+    int color_mode_32, palette_mode_256, screen_mode;
+    unsigned int fg_color, bg_color;
+    SDL_Color text_color;
+    double gfx_cursor_x, gfx_cursor_y;
+    int cursor_x, cursor_y;
+    int text_columns, text_rows, col_width, row_height;
+    int view_active, view_screen, view_x1, view_y1, view_x2, view_y2;
+    int window_active, window_screen;
+    double win_x1, win_y1, win_x2, win_y2;
+} DrawState;
 
-    SDL_Surface *surface = IMG_Load(filename);
-    if (!surface) return 0;
-    SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
-    if (!texture) {
-        SDL_DestroySurface(surface);
-        return 0;
-    }
-    image_slots[slot_idx].texture = texture;
-    image_slots[slot_idx].width = surface->w;
-    image_slots[slot_idx].height = surface->h;
-    image_slots[slot_idx].in_use = 1;
-    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
-    SDL_DestroySurface(surface);
-    return slot_idx + 1;
+typedef struct {
+    int in_use;
+    DrawState state; /* state.canvas is the image's texture */
+} ImageSlot;
+
+static ImageSlot image_slots[MAX_IMAGE_SLOTS];
+static DrawState screen_state;
+static int dest_handle = 0;   /* 0 = screen */
+static int source_handle = 0;
+
+static void save_draw_state(DrawState *s) {
+    *s = (DrawState){canvas, canvas_width, canvas_height, mode_res_w, mode_res_h,
+                     color_mode_32, palette_mode_256, current_screen_mode,
+                     fg_color, bg_color, current_text_color, gfx_cursor_x, gfx_cursor_y,
+                     cursor_x, cursor_y, text_columns, text_rows, current_col_width, current_row_height,
+                     view_active, view_screen, view_x1, view_y1, view_x2, view_y2,
+                     window_active, window_screen, win_x1, win_y1, win_x2, win_y2};
 }
 
-int graphics_freeimage(int handle) {
-    if (!renderer || handle < 1 || handle > MAX_IMAGE_SLOTS ||
-        !image_slots[handle - 1].in_use) return 0;
+static void load_draw_state(const DrawState *s) {
+    canvas = s->canvas; canvas_width = s->canvas_width; canvas_height = s->canvas_height;
+    mode_res_w = s->mode_res_w; mode_res_h = s->mode_res_h;
+    color_mode_32 = s->color_mode_32; palette_mode_256 = s->palette_mode_256;
+    current_screen_mode = s->screen_mode;
+    fg_color = s->fg_color; bg_color = s->bg_color; current_text_color = s->text_color;
+    gfx_cursor_x = s->gfx_cursor_x; gfx_cursor_y = s->gfx_cursor_y;
+    cursor_x = s->cursor_x; cursor_y = s->cursor_y;
+    text_columns = s->text_columns; text_rows = s->text_rows;
+    current_col_width = s->col_width; current_row_height = s->row_height;
+    view_active = s->view_active; view_screen = s->view_screen;
+    view_x1 = s->view_x1; view_y1 = s->view_y1; view_x2 = s->view_x2; view_y2 = s->view_y2;
+    window_active = s->window_active; window_screen = s->window_screen;
+    win_x1 = s->win_x1; win_y1 = s->win_y1; win_x2 = s->win_x2; win_y2 = s->win_y2;
+}
 
-    ImageSlot *slot = &image_slots[handle - 1];
-    SDL_DestroyTexture(slot->texture);
-    slot->texture = NULL;
-    slot->width = 0;
-    slot->height = 0;
-    slot->in_use = 0;
+static ImageSlot *image_for_handle(int handle) {
+    int slot = -handle - 2;
+    if (handle >= -1 || slot >= MAX_IMAGE_SLOTS || !image_slots[slot].in_use) return NULL;
+    return &image_slots[slot];
+}
+
+/* The saved state of a handle (0 = screen); NULL for an invalid handle. */
+static DrawState *state_for_handle(int handle) {
+    if (handle == 0) return &screen_state;
+    ImageSlot *image = image_for_handle(handle);
+    return image ? &image->state : NULL;
+}
+
+/* Makes handle the current canvas, saving the previous one's state. */
+static int switch_canvas(int handle) {
+    if (handle == dest_handle) return 1;
+    DrawState *target = state_for_handle(handle);
+    DrawState *current = state_for_handle(dest_handle);
+    if (!target) return 0;
+    if (current) save_draw_state(current);
+    load_draw_state(target);
+    dest_handle = handle;
+    if (renderer && canvas) SDL_SetRenderTarget(renderer, canvas);
     return 1;
 }
 
+/* SCREEN always draws on the screen again, as in QB64. */
+static void reset_dest_to_screen(void) {
+    if (dest_handle != 0) switch_canvas(0);
+    source_handle = 0;
+}
+
+int graphics_valid_handle(int handle) {
+    return state_for_handle(handle) != NULL;
+}
+
+/* _DEST handle: later drawing goes to that image (0 is the screen). */
+int graphics_set_dest(int handle) {
+    return switch_canvas(handle);
+}
+
+int graphics_get_dest(void) { return dest_handle; }
+
+/* _SOURCE handle: POINT, GET and _PUTIMAGE read from that image. */
+int graphics_set_source(int handle) {
+    if (!state_for_handle(handle)) return 0;
+    source_handle = handle;
+    return 1;
+}
+
+int graphics_get_source(void) { return source_handle; }
+
+/* POINT/GET read the _SOURCE image. */
+double graphics_point(double x, double y) {
+    if (source_handle == dest_handle || !state_for_handle(source_handle)) return get_pixel(x, y);
+    int previous = dest_handle;
+    switch_canvas(source_handle);
+    double value = get_pixel(x, y);
+    switch_canvas(previous);
+    return value;
+}
+
+static int free_image_slot(void) {
+    for (int i = 0; i < MAX_IMAGE_SLOTS; i++) {
+        if (!image_slots[i].in_use) return i;
+    }
+    return -1;
+}
+
+/* Creates a blank width x height image; mode 32 makes it 32-bit (cleared to
+ * transparent black), 256 or 13 a 256-color image, and any other screen
+ * mode number a 16-color image. Returns the handle, or -1. */
+static int create_image(int width, int height, int mode, SDL_Texture *contents, int contents_scaled) {
+    if (!renderer || width < 1 || height < 1 || width > 16384 || height > 16384) return -1;
+    int slot = free_image_slot();
+    if (slot < 0) return -1;
+    SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                             width, height);
+    if (!texture) return -1;
+    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+    SDL_SetTextureBlendMode(texture, mode == 32 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    SDL_SetRenderTarget(renderer, texture);
+    SDL_SetRenderClipRect(renderer, NULL);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, mode == 32 ? 0 : 255);
+    SDL_RenderClear(renderer);
+    if (contents) {
+        SDL_BlendMode original;
+        SDL_GetTextureBlendMode(contents, &original);
+        SDL_SetTextureBlendMode(contents, SDL_BLENDMODE_NONE);
+        SDL_FRect dest = {0, 0, (float)width, (float)height};
+        SDL_RenderTexture(renderer, contents, NULL, contents_scaled ? &dest : NULL);
+        SDL_SetTextureBlendMode(contents, original);
+    }
+    SDL_SetRenderTarget(renderer, canvas);
+
+    ImageSlot *image = &image_slots[slot];
+    image->in_use = 1;
+    /* Start from the screen's font metrics, then describe the image. */
+    save_draw_state(&image->state);
+    DrawState *st = &image->state;
+    st->canvas = texture;
+    st->canvas_width = st->mode_res_w = width;
+    st->canvas_height = st->mode_res_h = height;
+    st->color_mode_32 = mode == 32;
+    st->palette_mode_256 = mode == 256 || mode == 13;
+    st->screen_mode = (mode == 32 || mode == 256) ? -1 : mode;
+    st->fg_color = mode == 32 ? 0xFFFFFFFFu : 15;
+    st->bg_color = mode == 32 ? 0xFF000000u : 0;
+    st->gfx_cursor_x = width / 2;
+    st->gfx_cursor_y = height / 2;
+    st->cursor_x = st->cursor_y = 0;
+    st->text_columns = width / 8 > 0 ? width / 8 : 1;
+    st->text_rows = height / 16 > 0 ? height / 16 : 1;
+    st->col_width = width / st->text_columns;
+    st->row_height = height / st->text_rows;
+    st->view_active = 0; st->view_screen = 0;
+    st->view_x1 = 0; st->view_y1 = 0; st->view_x2 = width - 1; st->view_y2 = height - 1;
+    st->window_active = 0;
+    st->text_color = st->color_mode_32 ? (SDL_Color){255, 255, 255, 255} : current_text_color;
+    return -(slot + 2);
+}
+
+int graphics_newimage(int width, int height, int mode) {
+    if (mode != 32 && mode != 256 && (mode < 0 || mode > 13)) return -1;
+    return create_image(width, height, mode, NULL, 0);
+}
+
+int graphics_loadimage(const char *filename, int mode) {
+    if (!filename || !renderer) return -1;
+    SDL_Surface *surface = IMG_Load(filename);
+    if (!surface) return -1;
+    SDL_Texture *loaded = SDL_CreateTextureFromSurface(renderer, surface);
+    int width = surface->w, height = surface->h;
+    SDL_DestroySurface(surface);
+    if (!loaded) return -1;
+    int handle = create_image(width, height, mode == 256 ? 256 : 32, loaded, 0);
+    SDL_DestroyTexture(loaded);
+    return handle;
+}
+
+/* _COPYIMAGE(handle): a new image with the same size, mode and pixels. */
+int graphics_copyimage(int handle) {
+    DrawState *source = state_for_handle(handle);
+    if (!source) return -1;
+    if (handle == dest_handle) save_draw_state(source);
+    int mode = source->color_mode_32 ? 32 : source->palette_mode_256 ? 256
+             : source->screen_mode >= 0 ? source->screen_mode : 256;
+    return create_image(source->mode_res_w, source->mode_res_h, mode, source->canvas, 1);
+}
+
+int graphics_freeimage(int handle) {
+    ImageSlot *image = image_for_handle(handle);
+    if (!renderer || !image) return 0;
+    if (dest_handle == handle) switch_canvas(0);
+    if (source_handle == handle) source_handle = 0;
+    SDL_DestroyTexture(image->state.canvas);
+    memset(image, 0, sizeof(*image));
+    return 1;
+}
+
+/* _WIDTH(handle) / _HEIGHT(handle); handle 1 means the current destination. */
+int graphics_image_size(int handle, int want_height) {
+    if (handle == 1) return want_height ? mode_res_h : mode_res_w;
+    DrawState *state = state_for_handle(handle);
+    if (!state) return -1;
+    if (handle == dest_handle) return want_height ? mode_res_h : mode_res_w;
+    return want_height ? state->mode_res_h : state->mode_res_w;
+}
+
+/* _PUTIMAGE: copies the source rectangle of one image onto the destination
+ * rectangle of another (both in their own pixel coordinates). A single
+ * destination point keeps the source size; no destination stretches over the
+ * whole image; a reversed rectangle mirrors the picture. */
+int graphics_putimage_ex(int has_dest, int dx1, int dy1, int has_dest2, int dx2, int dy2,
+                         int source, int destination,
+                         int has_src, int sx1, int sy1, int has_src2, int sx2, int sy2) {
+    if (!renderer) return 0;
+    DrawState *current = state_for_handle(dest_handle);
+    if (current) save_draw_state(current); // the live state is the destination's
+    DrawState *src = state_for_handle(source);
+    DrawState *dst = state_for_handle(destination);
+    if (!src || !dst || !src->canvas || !dst->canvas) return 0;
+    if (!has_src) { sx1 = 0; sy1 = 0; sx2 = src->mode_res_w - 1; sy2 = src->mode_res_h - 1; }
+    else if (!has_src2) { sx2 = src->mode_res_w - 1; sy2 = src->mode_res_h - 1; }
+    int flip_x = 0, flip_y = 0;
+    if (sx2 < sx1) { int t = sx1; sx1 = sx2; sx2 = t; flip_x = !flip_x; }
+    if (sy2 < sy1) { int t = sy1; sy1 = sy2; sy2 = t; flip_y = !flip_y; }
+    if (!has_dest) { dx1 = 0; dy1 = 0; dx2 = dst->mode_res_w - 1; dy2 = dst->mode_res_h - 1; }
+    else if (!has_dest2) { dx2 = dx1 + (sx2 - sx1); dy2 = dy1 + (sy2 - sy1); }
+    if (dx2 < dx1) { int t = dx1; dx1 = dx2; dx2 = t; flip_x = !flip_x; }
+    if (dy2 < dy1) { int t = dy1; dy1 = dy2; dy2 = t; flip_y = !flip_y; }
+
+    double sxs = (double)src->canvas_width / src->mode_res_w, sys = (double)src->canvas_height / src->mode_res_h;
+    double dxs = (double)dst->canvas_width / dst->mode_res_w, dys = (double)dst->canvas_height / dst->mode_res_h;
+    SDL_FRect source_rect = {(float)(sx1 * sxs), (float)(sy1 * sys),
+                             (float)((sx2 - sx1 + 1) * sxs), (float)((sy2 - sy1 + 1) * sys)};
+    SDL_FRect dest_rect = {(float)(dx1 * dxs), (float)(dy1 * dys),
+                           (float)((dx2 - dx1 + 1) * dxs), (float)((dy2 - dy1 + 1) * dys)};
+    SDL_Texture *source_texture = src->canvas;
+    SDL_Texture *copy = NULL;
+    if (src->canvas == dst->canvas) {
+        // A texture cannot be drawn onto itself; copy the source first.
+        int handle = graphics_copyimage(source);
+        ImageSlot *image = image_for_handle(handle);
+        if (!image) return 0;
+        copy = image->state.canvas;
+        source_texture = copy;
+        image->state.canvas = NULL;
+        memset(image, 0, sizeof(*image));
+    }
+    SDL_BlendMode original;
+    SDL_GetTextureBlendMode(source_texture, &original);
+    // 32-bit images blend by alpha; the screen and palette images copy.
+    SDL_SetTextureBlendMode(source_texture, src->color_mode_32 && source != 0 ? SDL_BLENDMODE_BLEND
+                                                                              : SDL_BLENDMODE_NONE);
+    SDL_SetRenderTarget(renderer, dst->canvas);
+    SDL_SetRenderClipRect(renderer, NULL);
+    SDL_FlipMode flip = (SDL_FlipMode)((flip_x ? SDL_FLIP_HORIZONTAL : 0) | (flip_y ? SDL_FLIP_VERTICAL : 0));
+    SDL_RenderTextureRotated(renderer, source_texture, &source_rect, &dest_rect, 0, NULL, flip);
+    SDL_SetTextureBlendMode(source_texture, original);
+    if (copy) SDL_DestroyTexture(copy);
+    SDL_SetRenderTarget(renderer, canvas);
+    if (destination == 0) update_graphics();
+    return 1;
+}
+
+/* The older BASIKA form: _PUTIMAGE (x1,y1)[-(x2,y2)], handle[, (sx1,sy1)-(sx2,sy2)]. */
 int graphics_putimage(int x1, int y1, int x2, int y2, int handle,
                       int sx1, int sy1, int sx2, int sy2, int has_source) {
-    if (!renderer || !canvas || handle < 1 || handle > MAX_IMAGE_SLOTS ||
-        !image_slots[handle - 1].in_use) return 0;
+    int has_dest2 = !(x2 < x1 || y2 < y1);
+    return graphics_putimage_ex(1, x1, y1, has_dest2, x2, y2, handle, dest_handle,
+                                has_source, sx1, sy1, has_source, sx2, sy2);
+}
 
-    ImageSlot *slot = &image_slots[handle - 1];
-    if (!has_source) {
-        sx1 = 0; sy1 = 0;
-        sx2 = slot->width - 1; sy2 = slot->height - 1;
-    }
-    if (sx1 > sx2) { int temp = sx1; sx1 = sx2; sx2 = temp; }
-    if (sy1 > sy2) { int temp = sy1; sy1 = sy2; sy2 = temp; }
-    if (x2 < x1 || y2 < y1) {
-        x2 = x1 + (sx2 - sx1);
-        y2 = y1 + (sy2 - sy1);
-    }
-    if (sx1 < 0 || sy1 < 0 || sx2 >= slot->width || sy2 >= slot->height) return 0;
-
-    double xs = (double)canvas_width / mode_res_w;
-    double ys = (double)canvas_height / mode_res_h;
-    SDL_FRect source = {(float)sx1, (float)sy1,
-                        (float)(sx2 - sx1 + 1), (float)(sy2 - sy1 + 1)};
-    SDL_FRect dest = {(float)(x1 * xs), (float)(y1 * ys),
-                      (float)((x2 - x1 + 1) * xs),
-                      (float)((y2 - y1 + 1) * ys)};
-    SDL_SetRenderTarget(renderer, canvas);
-    SDL_RenderTexture(renderer, slot->texture, &source, &dest);
-    update_graphics();
+/* SCREEN handle: shows an image by making the screen a copy of it. */
+int graphics_screen_from_image(int handle) {
+    DrawState *image = state_for_handle(handle);
+    if (!image || handle == 0) return 0;
+    int mode = image->color_mode_32 ? 32 : 256;
+    int previous_dest = dest_handle;
+    switch_canvas(0);
+    set_screen_newimage(image->mode_res_w, image->mode_res_h, mode);
+    save_draw_state(&screen_state);
+    graphics_putimage_ex(0, 0, 0, 0, 0, 0, handle, 0, 0, 0, 0, 0, 0, 0);
+    if (previous_dest != 0 && previous_dest != handle) switch_canvas(previous_dest);
     return 1;
 }
 
@@ -1420,7 +1647,8 @@ double get_pixel(double user_x, double user_y) {
     SDL_DestroySurface(surf);
 
     if (color_mode_32) {
-        return (double)(0xFF000000u | ((unsigned int)r << 16) | ((unsigned int)g << 8) | b);
+        // Images keep real alpha (transparent pixels read as &H00RRGGBB); the screen is opaque.
+        return (double)(((unsigned int)a << 24) | ((unsigned int)r << 16) | ((unsigned int)g << 8) | b);
     }
     // Return the nearest palette entry so blended pixels remain readable.
     if (!palette_initialized) init_palette256();
@@ -1954,6 +2182,116 @@ static void handle_stick_button(SDL_JoystickID id, int button, int pressed) {
     }
 }
 
+/* ---- QB64 keyboard (_KEYDOWN/_KEYHIT) and mouse (_MOUSE*) ---- */
+
+#define KEYHIT_QUEUE_SIZE 64
+static int keyhit_queue[KEYHIT_QUEUE_SIZE];
+static int keyhit_head = 0, keyhit_tail = 0;
+static int held_key_code[SDL_SCANCODE_COUNT];
+static int mouse_buttons[4] = {0};
+static int mouse_events_pending = 0;
+static int mouse_wheel_total = 0;
+
+/* QB64 key codes: ASCII for printable keys (letters follow Shift), 256 *
+ * scan code for cursor and function keys, and 1003xx for modifier keys. */
+static int qb64_key_code(SDL_Keycode key, SDL_Keymod mod) {
+    switch (key) {
+        case SDLK_BACKSPACE: return 8;
+        case SDLK_TAB: return 9;
+        case SDLK_RETURN: case SDLK_KP_ENTER: return 13;
+        case SDLK_ESCAPE: return 27;
+        case SDLK_HOME: return 71 * 256;
+        case SDLK_UP: return 72 * 256;
+        case SDLK_PAGEUP: return 73 * 256;
+        case SDLK_LEFT: return 75 * 256;
+        case SDLK_RIGHT: return 77 * 256;
+        case SDLK_END: return 79 * 256;
+        case SDLK_DOWN: return 80 * 256;
+        case SDLK_PAGEDOWN: return 81 * 256;
+        case SDLK_INSERT: return 82 * 256;
+        case SDLK_DELETE: return 83 * 256;
+        case SDLK_F11: return 133 * 256;
+        case SDLK_F12: return 134 * 256;
+        case SDLK_LSHIFT: return 100304;
+        case SDLK_RSHIFT: return 100303;
+        case SDLK_LCTRL: return 100306;
+        case SDLK_RCTRL: return 100305;
+        case SDLK_LALT: return 100308;
+        case SDLK_RALT: return 100307;
+        default: break;
+    }
+    if (key >= SDLK_F1 && key <= SDLK_F10) return (int)(59 + (key - SDLK_F1)) * 256;
+    if (key >= 'a' && key <= 'z') return (mod & SDL_KMOD_SHIFT) ? (int)key - 32 : (int)key;
+    if (key >= 32 && key < 127) return (int)key;
+    return 0;
+}
+
+static void push_keyhit(int code) {
+    int next = (keyhit_tail + 1) % KEYHIT_QUEUE_SIZE;
+    if (next == keyhit_head) return; // full: drop the newest
+    keyhit_queue[keyhit_tail] = code;
+    keyhit_tail = next;
+}
+
+static void track_key(const SDL_KeyboardEvent *event, int down) {
+    if (event->scancode >= SDL_SCANCODE_COUNT) return;
+    if (down) {
+        int code = qb64_key_code(event->key, event->mod);
+        if (!code) return;
+        held_key_code[event->scancode] = code;
+        push_keyhit(code);
+    } else {
+        int code = held_key_code[event->scancode];
+        held_key_code[event->scancode] = 0;
+        if (code) push_keyhit(-code);
+    }
+}
+
+/* _KEYHIT: the next key press (positive) or release (negative), or 0. */
+int graphics_keyhit(void) {
+    handle_events();
+    if (keyhit_head == keyhit_tail) return 0;
+    int code = keyhit_queue[keyhit_head];
+    keyhit_head = (keyhit_head + 1) % KEYHIT_QUEUE_SIZE;
+    return code;
+}
+
+/* _KEYDOWN(code): whether the key with that QB64 code is held. */
+int graphics_keydown(int code) {
+    handle_events();
+    for (int i = 0; i < SDL_SCANCODE_COUNT; i++) {
+        if (held_key_code[i] == code) return 1;
+    }
+    return 0;
+}
+
+/* _MOUSEINPUT: -1 while mouse events remain to be read, then 0. */
+int graphics_mouse_input(void) {
+    handle_events();
+    if (mouse_events_pending > 0) {
+        mouse_events_pending--;
+        return -1;
+    }
+    return 0;
+}
+
+int graphics_mouse_x(void) { handle_events(); return pen_x; }
+int graphics_mouse_y(void) { handle_events(); return pen_y; }
+
+/* _MOUSEBUTTON(n): 1 left, 2 right, 3 middle. */
+int graphics_mouse_button(int n) {
+    handle_events();
+    return (n >= 1 && n <= 3) ? mouse_buttons[n] : 0;
+}
+
+/* _MOUSEWHEEL: wheel movement since the last call (positive is toward the user). */
+int graphics_mouse_wheel(void) {
+    handle_events();
+    int total = mouse_wheel_total;
+    mouse_wheel_total = 0;
+    return total;
+}
+
 void handle_events() {
     if (!window) return;
     SDL_Event e;
@@ -1962,7 +2300,24 @@ void handle_events() {
         if (e.type == SDL_EVENT_TEXT_INPUT) {
             if (e.text.text[0]) last_key_char = (unsigned char)e.text.text[0];
         }
-        if (e.type == SDL_EVENT_MOUSE_MOTION) update_pen_position(e.motion.x, e.motion.y);
+        if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
+            track_key(&e.key, e.type == SDL_EVENT_KEY_DOWN);
+        }
+        if (e.type == SDL_EVENT_MOUSE_MOTION) {
+            update_pen_position(e.motion.x, e.motion.y);
+            mouse_events_pending++;
+        }
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            int button = e.button.button == SDL_BUTTON_LEFT ? 1 : e.button.button == SDL_BUTTON_RIGHT ? 2
+                       : e.button.button == SDL_BUTTON_MIDDLE ? 3 : 0;
+            if (button) mouse_buttons[button] = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? -1 : 0;
+            update_pen_position(e.button.x, e.button.y);
+            mouse_events_pending++;
+        }
+        if (e.type == SDL_EVENT_MOUSE_WHEEL) {
+            mouse_wheel_total -= (int)e.wheel.y;
+            mouse_events_pending++;
+        }
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
             update_pen_position(e.button.x, e.button.y);
             pen_down_x = pen_x;
@@ -2068,8 +2423,8 @@ void close_graphics() {
         if (glyph_cache[i]) SDL_DestroyTexture(glyph_cache[i]);
     }
     for (int i = 0; i < MAX_IMAGE_SLOTS; i++) {
-        if (image_slots[i].texture) SDL_DestroyTexture(image_slots[i].texture);
-        image_slots[i].texture = NULL;
+        if (image_slots[i].in_use && image_slots[i].state.canvas) SDL_DestroyTexture(image_slots[i].state.canvas);
+        image_slots[i].state.canvas = NULL;
         image_slots[i].in_use = 0;
     }
     if (font) TTF_CloseFont(font);

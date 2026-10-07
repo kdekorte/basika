@@ -18,7 +18,7 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CHAIN`, `CHDIR`,
 `CHR$`, `CIRCLE`, `CLEAR`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COMMON`, `CONST`, `CONT`, `COS`, `CVD`, `CVI`,
-`CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
+`CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
 `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
 `HEX$`, `IF`, `INKEY$`, `INPUT`, `INPUT$`, `INSTR`, `INT`, `IS`, `KEY`, `KILL`, `LCASE$`,
@@ -30,13 +30,14 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SELECT`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STICK`, `STOP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `UNLOCK`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
-`VIEW`, `WAIT`, `WEND`, `WHILE`, `WIDTH`, `WINDOW`, `WRITE`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DISPLAY`, `_FONT`,
-`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
+`VIEW`, `WAIT`, `WEND`, `WHILE`, `WIDTH`, `WINDOW`, `WRITE`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DEST`, `_DISPLAY`, `_FONT`,
+`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`, `_SOURCE`, `_TITLE`,
 `_DEFLATE$`, `_INFLATE$`.
 
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
-`_PI`, `_WIDTH`, `_HEIGHT`.
+`_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
+`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`.
 
 `_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
 Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
@@ -136,17 +137,18 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DEFSTR letter_range`: Defines variables starting with these letters as strings.
 - `DEFSNG letter_range`: Defines variables starting with these letters as single-precision.
 - `DEFDBL letter_range`: Defines variables starting with these letters as double-precision.
+- `DEFLNG letter_range`: Defines variables starting with these letters as LONG.
 - `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`.
 - `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
 - `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
-- Type suffixes: `%` INTEGER (16-bit), `&` LONG (32-bit), `~&` _UNSIGNED LONG (0 to 4294967295, wraps like QB64), `!` SINGLE, `#` DOUBLE, `$` STRING. INTEGER and LONG assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range. `AND`, `OR`, `XOR` and `NOT` keep all 32 bits of LONG values.
+- Type suffixes: `%%` _BYTE (8-bit), `%` INTEGER (16-bit), `&` LONG (32-bit), `&&` _INTEGER64, `!` SINGLE, `#` DOUBLE, `$` STRING; a `~` before an integer suffix (`~%%`, `~%`, `~&`, `~&&`) makes it `_UNSIGNED`. The `AS` names are `_BYTE`, `INTEGER`, `LONG`, `_INTEGER64`, each optionally preceded by `_UNSIGNED`. Unsigned values wrap around like QB64; values are held as doubles, so `_INTEGER64` values are exact only up to 2^53. Integer assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range. `AND`, `OR`, `XOR` and `NOT` keep all 32 bits of LONG values.
 - `DIM name AS STRING * n`: Declares a fixed-width scalar string padded with spaces.
 - `DIM name(size) AS STRING * n`: Declares a fixed-width string array; assignments are padded or truncated to `n` characters.
 - `ERASE var`: Reinitializes variables or arrays.
 - `LET var = expression`: Assignment (keyword is optional).
 - `OPTION BASE {0 | 1}`: Sets minimum array subscript.
 - `READ var1[, var2...]`: Reads from `DATA` statements.
-- `RESTORE [line]`: Resets `DATA` pointer.
+- `RESTORE [line | label]`: Resets the `DATA` pointer, or points it at the first `DATA` at or after the given line or label.
 - `SWAP var1, var2`: Exchanges values of two variables or array elements.
 
 ## Operators
@@ -218,6 +220,7 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `PEN(n)`: The mouse as a light pen: 0 is -1 if pressed since the last `PEN(0)`; 1/2 the x/y of the last press; 3 is -1 while the button is down; 4/5 the current x/y; 6/7 the text row/column of the last press; 8/9 the current row/column.
 - `STICK(n)`: Joystick position from 1 to 200 (100 at rest): 0/1 are joystick A's x/y and 2/3 joystick B's; 0 when no joystick is attached. `STRIG` reports the joysticks' first two buttons.
 - `SCREEN _NEWIMAGE(width, height[, mode])`: Creates a graphics screen of any size. `mode` 32 makes a 32-bit image with alpha colors; any other value uses the 256-color palette.
+- `SCREEN handle`: Shows an off-screen image: the screen becomes a copy of it at its size.
 - `SCREENSHOT "filename.png"`: Saves the current graphics window content to a file. Supports `.png` and `.jpg`/`.jpeg` extensions.
 - `_FONT handle`: Sets the active font to the loaded font specified by `handle` (or `0` to restore default font).
 - `_FREEFONT handle`: Frees a loaded font handle.
@@ -230,14 +233,23 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `SOUND freq, duration`: Produces a tone for a duration in 18.2-Hz timer ticks. Frequency must be 37-32767 and duration 0-65535.
 - `VIEW [(x1,y1)-(x2,y2)[, [fillcolor][, border]]]`: Defines a physical viewport (in screen pixels). All subsequent graphics commands are clipped to this region. Coordinates are relative to the viewport origin unless `VIEW SCREEN` is used (absolute). Omit coordinates to reset.
 - `WINDOW [(x1,y1)-(x2,y2)]`: Maps a custom logical coordinate system onto the current viewport. After this call, all graphics commands accept logical coordinates. `(x1,y1)` is the bottom-left and `(x2,y2)` is the top-right by default (Y increases upward, like math). Use `WINDOW SCREEN` to keep Y increasing downward. Omit coordinates to reset to screen coordinates.
-- `_LOADIMAGE("filename", mode)`: Loads an image file and returns a numeric image handle. The optional mode is accepted for QB64 compatibility.
-- `_PUTIMAGE (x1,y1), handle`: Draws an image at the destination position. A destination rectangle can be supplied as `(x1,y1)-(x2,y2)` to scale the image; source rectangles are supported with the corresponding QB64 syntax.
-- `_FREEIMAGE handle`: Releases a loaded image handle so its texture resources can be reused.
+- Images use QB64 handles: valid images are below -1, -1 means failure, and 0 is the screen.
+- `_NEWIMAGE(width, height[, mode])`: Returns a new off-screen image; mode 32 (32-bit, starting fully transparent), 256 or a screen mode number (default 256).
+- `_LOADIMAGE("filename"[, mode])`: Loads an image file as an image you can also draw on; returns its handle, or -1.
+- `_COPYIMAGE(handle)`: Returns a new image holding a copy of an image (0 copies the screen).
+- `_DEST handle` / `_SOURCE handle`: Every drawing command (including `PRINT`, `PAINT` and `CLS`) draws on the `_DEST` image, and `POINT`, `GET` and `_PUTIMAGE` read from `_SOURCE`; both start at 0, the screen. As functions, `_DEST` and `_SOURCE` return the current handles. `SCREEN` sets both back to 0.
+- `_PUTIMAGE [(dx1,dy1)[-(dx2,dy2)]][, [source][, [dest]][, (sx1,sy1)[-(sx2,sy2)]]]`: Copies the source rectangle of one image onto another (defaults: the whole `_SOURCE` image onto `_DEST`). A single destination point keeps the source size, no destination stretches over the whole image, and a reversed rectangle mirrors the picture. 32-bit images blend by their alpha. The older form `_PUTIMAGE (x,y), handle, (sx1,sy1)-(sx2,sy2)` is still accepted.
+- `_FREEIMAGE handle`: Releases an image; drawing returns to the screen if it was `_DEST`.
+- `_TITLE text$`: Sets the window title.
+- `_KEYDOWN(code)`: -1 while the key with that QB64 code is held: ASCII for printable keys (lowercase letters unshifted, uppercase with Shift), 256 times the scan code for cursor and function keys (Up 18432, Down 20480, Left 19200, Right 19712, F1 15104), and 100304/100303 left/right Shift, 100306/100305 Ctrl, 100308/100307 Alt.
+- `_KEYHIT`: The next key from a queue, positive when pressed and negative when released, or 0.
+- `_MOUSEX`, `_MOUSEY`, `_MOUSEBUTTON(n)`: The mouse position in screen pixels and whether button n (1 left, 2 right, 3 middle) is down (-1).
+- `_MOUSEINPUT`: -1 while unread mouse events remain (so `DO WHILE _MOUSEINPUT: LOOP` catches up), then 0. `_MOUSEWHEEL`: Wheel movement since it was last read.
 - `_RGB32(r, g, b[, a])`, `_RGB32(gray[, a])`, `_RGBA32(r, g, b, a)`: Return a 32-bit `&HAARRGGBB` color. Channels are clamped to 0-255.
 - `_RGB(r, g, b)`, `_RGBA(r, g, b, a)`: A 32-bit color in a 32-bit image, otherwise the nearest palette index.
 - `_RED32(c)`, `_GREEN32(c)`, `_BLUE32(c)`, `_ALPHA32(c)`: Channels of a 32-bit color. `_RED(c)`, `_GREEN(c)`, `_BLUE(c)`, `_ALPHA(c)` do the same for a color in the current mode, looking palette indexes up in the palette.
 - `_PI[(multiplier)]`: π in double precision, optionally multiplied (`_PI(2)` is 2π).
-- `_WIDTH`, `_HEIGHT`: Width and height of the graphics screen in pixels.
+- `_WIDTH[(handle)]`, `_HEIGHT[(handle)]`: Width and height in pixels of the `_DEST` image, or of the given image (0 is the screen).
 - `_DEFLATE$(text$)`: Compresses a dynamic string with zlib and returns a lossless encoded compressed string.
 - `_INFLATE$(data$)`: Decompresses a string returned by `_DEFLATE$`, including multi-megabyte values; invalid input returns an empty string.
 

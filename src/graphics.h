@@ -20,9 +20,22 @@ void draw_circle(double cx, double cy, double radius, unsigned int color,
                  int has_aspect, double aspect);
 int graphics_save_screenshot(const char *filename);
 int graphics_loadimage(const char *filename, int mode);
+int graphics_newimage(int width, int height, int mode);
+int graphics_copyimage(int handle);
 int graphics_freeimage(int handle);
 int graphics_putimage(int x1, int y1, int x2, int y2, int handle,
-					  int sx1, int sy1, int sx2, int sy2, int has_source);
+                      int sx1, int sy1, int sx2, int sy2, int has_source);
+int graphics_putimage_ex(int has_dest, int dx1, int dy1, int has_dest2, int dx2, int dy2,
+                         int source, int destination,
+                         int has_src, int sx1, int sy1, int has_src2, int sx2, int sy2);
+int graphics_valid_handle(int handle);
+int graphics_set_dest(int handle);
+int graphics_get_dest(void);
+int graphics_set_source(int handle);
+int graphics_get_source(void);
+double graphics_point(double x, double y);
+int graphics_image_size(int handle, int want_height);
+int graphics_screen_from_image(int handle);
 double get_pixel(double x, double y);
 void draw_paint(double x, double y, unsigned int color, unsigned int border_color);
 void draw_paint_tile(double x, double y, const unsigned char *tile, int tile_length, unsigned int border_color);
@@ -50,6 +63,13 @@ void graphics_cls();
 int graphics_is_active();
 void handle_events();
 int graphics_pen(int n);
+int graphics_keyhit(void);
+int graphics_keydown(int code);
+int graphics_mouse_input(void);
+int graphics_mouse_x(void);
+int graphics_mouse_y(void);
+int graphics_mouse_button(int n);
+int graphics_mouse_wheel(void);
 int graphics_stick(int n);
 void wait_for_keypress();
 void set_window_title(const char *title);

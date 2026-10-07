@@ -1,6 +1,6 @@
 10 SCREEN 2
 20 image% = _LOADIMAGE("tests/image_fixture.bmp", 32)
-30 IF image% > 0 THEN PRINT "LOADIMAGE PASS"
+30 IF image% < -1 THEN PRINT "LOADIMAGE PASS"
 40 _PUTIMAGE (10, 10), image%
 50 PRINT "PUTIMAGE PASS"
 60 SCREENSHOT "tests/image_test.png"

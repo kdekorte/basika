@@ -144,6 +144,8 @@ TESTS=(
   "tests/graphics/rgb_functions"
   "tests/graphics/palette_pages"
   "tests/graphics/pen_stick"
+  "tests/graphics/offscreen_images"
+  "tests/math/qb64_types"
   "tests/control_flow/labels_no_lines"
   "tests/procedures/qbasic_sub"
   "tests/procedures/qbasic_function"
@@ -154,6 +156,7 @@ TESTS=(
   "tests/procedures/string_locals_release"
   "tests/procedures/local_arrays"
   "tests/procedures/static_locals"
+  "tests/procedures/nested_calls_in_arguments"
   "tests/procedures/local_record_arrays"
   "tests/system/direct_mode"
   "tests/control_flow/stop_statement"
@@ -258,7 +261,8 @@ for t in "${TESTS[@]}"; do
     rm -f tests/point_test.png
     rm -f tests/point_test.result
   elif [ "$t" = "tests/graphics/qbasic_primitives" ] || [ "$t" = "tests/graphics/rgb_functions" ] ||
-       [ "$t" = "tests/graphics/palette_pages" ] || [ "$t" = "tests/graphics/pen_stick" ]; then
+       [ "$t" = "tests/graphics/palette_pages" ] || [ "$t" = "tests/graphics/pen_stick" ] ||
+       [ "$t" = "tests/graphics/offscreen_images" ]; then
     # Headless graphics tests write their assertion result to tests/<name>.result.
     name=$(basename "$t")
     rm -f "tests/$name.result" "tests/$name.png"

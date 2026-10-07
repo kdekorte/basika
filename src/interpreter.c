@@ -250,9 +250,14 @@ typedef struct {
 
     double func_return_numeric;
     BasicString *func_return_string;
+    int return_depth; /* call_stack_depth to restore when this call returns */
 } CallFrame;
 
 static CallFrame call_stack[MAX_CALL_FRAMES];
+/* Calls whose arguments are still being evaluated. Their frames sit just
+ * above the stack, so a call made while evaluating an argument (F(1, G(2)))
+ * takes the next slot instead of overwriting the half-built frame. */
+static int frames_being_built = 0;
 
 static void report_runtime_error(RuntimeError code);
 
@@ -298,6 +303,11 @@ static ProcedureDef *find_procedure_tok(Token *token) {
     return (ProcedureDef *)token->proc_cache;
 }
 
+static int is_function_name(const char *name) {
+    ProcedureDef *proc = find_procedure(name);
+    return proc && proc->is_function;
+}
+
 static ProcedureDef *find_procedure_by_header(Statement *header_stmt) {
     if (!header_stmt) return NULL;
     for (int p = 0; p < proc_count; p++) {
@@ -312,12 +322,11 @@ static int is_type_suffix_char(char c) {
 }
 
 /* Length of name without a trailing numeric suffix (%, !, #, & or ~&). */
+static size_t type_suffix_length(const char *name, size_t len);
+
 static size_t numeric_base_length(const char *name, size_t len) {
-    if (len == 0) return 0;
-    char last = name[len - 1];
-    if (last == '&') return (len >= 2 && name[len - 2] == '~') ? len - 2 : len - 1;
-    if (last == '!' || last == '%' || last == '#') return len - 1;
-    return len;
+    if (len == 0 || name[len - 1] == '$') return len;
+    return len - type_suffix_length(name, len);
 }
 
 /* LONG and DOUBLE values print with full precision. */
@@ -326,14 +335,75 @@ static int name_has_wide_suffix(const char *name) {
     return len > 0 && (name[len - 1] == '#' || name[len - 1] == '&');
 }
 
-static const char *primitive_type_suffix(const char *type_name) {
+/* Primitive types: name in DIM/TYPE/parameters, variable suffix, record
+ * size in bytes, and integer range. Values are held as doubles, so 64-bit
+ * integers are exact only up to 2^53. */
+typedef struct {
+    const char *name;
+    const char *suffix;
+    int bytes;
+    int is_integer;
+    int is_unsigned;
+    double min_value, max_value;
+} PrimitiveType;
+
+static const PrimitiveType primitive_types[] = {
+    {"STRING", "$", 0, 0, 0, 0, 0},
+    {"_BYTE", "%%", 1, 1, 0, -128, 127},
+    {"_UNSIGNED _BYTE", "~%%", 1, 1, 1, 0, 255},
+    {"INTEGER", "%", 2, 1, 0, -32768, 32767},
+    {"_UNSIGNED INTEGER", "~%", 2, 1, 1, 0, 65535},
+    {"LONG", "&", 4, 1, 0, -2147483648.0, 2147483647.0},
+    {"_UNSIGNED LONG", "~&", 4, 1, 1, 0, 4294967295.0},
+    {"_INTEGER64", "&&", 8, 1, 0, -9223372036854775808.0, 9223372036854775807.0},
+    {"_UNSIGNED _INTEGER64", "~&&", 8, 1, 1, 0, 18446744073709551615.0},
+    {"SINGLE", "!", 4, 0, 0, 0, 0},
+    {"DOUBLE", "#", 8, 0, 0, 0, 0},
+};
+
+static const PrimitiveType *find_primitive_type(const char *type_name) {
     if (!type_name) return NULL;
-    if (strcasecmp(type_name, "STRING") == 0) return "$";
-    if (strcasecmp(type_name, "INTEGER") == 0) return "%";
-    if (strcasecmp(type_name, "LONG") == 0) return "&";
-    if (strcasecmp(type_name, "_UNSIGNED LONG") == 0) return "~&";
-    if (strcasecmp(type_name, "SINGLE") == 0) return "!";
-    if (strcasecmp(type_name, "DOUBLE") == 0) return "#";
+    for (size_t i = 0; i < sizeof(primitive_types) / sizeof(primitive_types[0]); i++) {
+        if (strcasecmp(type_name, primitive_types[i].name) == 0) return &primitive_types[i];
+    }
+    return NULL;
+}
+
+static const char *primitive_type_suffix(const char *type_name) {
+    const PrimitiveType *type = find_primitive_type(type_name);
+    return type ? type->suffix : NULL;
+}
+
+/* Length of the type suffix ending a variable name ("~&&", "%%", "!", ...). */
+static size_t type_suffix_length(const char *name, size_t len) {
+    if (len == 0) return 0;
+    char last = name[len - 1];
+    if (last == '!' || last == '#' || last == '$') return 1;
+    if (last != '%' && last != '&') return 0;
+    size_t n = (len >= 2 && name[len - 2] == last) ? 2 : 1;
+    if (len > n && name[len - n - 1] == '~') n++;
+    return n;
+}
+
+/* The primitive type named by a variable's suffix, or NULL. */
+static const PrimitiveType *primitive_type_of_name(const char *name) {
+    size_t len = strlen(name);
+    size_t n = type_suffix_length(name, len);
+    if (n == 0) return NULL;
+    for (size_t i = 0; i < sizeof(primitive_types) / sizeof(primitive_types[0]); i++) {
+        if (strcmp(name + len - n, primitive_types[i].suffix) == 0) return &primitive_types[i];
+    }
+    return NULL;
+}
+
+/* Two-word type names: "_UNSIGNED" followed by INTEGER, LONG, _BYTE or
+ * _INTEGER64. Returns the combined name or NULL. */
+static const char *unsigned_type_name(const char *first, const char *second) {
+    if (strcasecmp(first, "_UNSIGNED") != 0 || !second) return NULL;
+    if (strcasecmp(second, "INTEGER") == 0) return "_UNSIGNED INTEGER";
+    if (strcasecmp(second, "LONG") == 0) return "_UNSIGNED LONG";
+    if (strcasecmp(second, "_BYTE") == 0) return "_UNSIGNED _BYTE";
+    if (strcasecmp(second, "_INTEGER64") == 0) return "_UNSIGNED _INTEGER64";
     return NULL;
 }
 
@@ -357,7 +427,7 @@ static int has_record_prefix(const char *name, const char *prefix) {
 #define MAX_DECLARED_TYPES 512
 typedef struct {
     char name[64];
-    char suffix[3];
+    char suffix[4];
     const ProcedureDef *scope;
     int shared;
 } DeclaredType;
@@ -982,12 +1052,18 @@ static int get_stdin_char(void) {
     return c;
 }
 
+static void restore_data_to_statement(Statement *stmt);
+
 static void restore_data_to_line(int line) {
     if (line <= 0) {
         reset_data_pointer();
         return;
     }
-    Statement *stmt = find_line(line);
+    restore_data_to_statement(find_line(line));
+}
+
+/* Point READ at the first DATA item at or after stmt. */
+static void restore_data_to_statement(Statement *stmt) {
     if (!stmt) {
         reset_data_pointer();
         return;
@@ -1057,22 +1133,20 @@ static inline __attribute__((always_inline)) int coerce_numeric_value(const char
 
     if (suffix == '!') {
         *val = (double)((float)*val);
-    } else if (suffix == '%') {
-        if (*val < -32768.5 || *val > 32767.5) {
-            report_runtime_error(ERR_OVERFLOW);
-            return 0;
-        }
-        *val = nearbyint(*val);
-    } else if (suffix == '&' && len >= 2 && name[len - 2] == '~') {
-        // _UNSIGNED LONG wraps modulo 2^32 like QB64.
-        *val = fmod(nearbyint(*val), 4294967296.0);
-        if (*val < 0) *val += 4294967296.0;
-    } else if (suffix == '&') {
-        if (*val < -2147483648.5 || *val > 2147483647.5) {
-            report_runtime_error(ERR_OVERFLOW);
-            return 0;
-        }
-        *val = nearbyint(*val);
+        return 1;
+    }
+    if (suffix != '%' && suffix != '&') return 1;
+    const PrimitiveType *type = primitive_type_of_name(name);
+    if (!type || !type->is_integer) return 1;
+    *val = nearbyint(*val);
+    if (type->is_unsigned) {
+        // Unsigned types wrap around like QB64.
+        double modulus = type->max_value + 1.0;
+        *val = fmod(*val, modulus);
+        if (*val < 0) *val += modulus;
+    } else if (*val < type->min_value || *val > type->max_value) {
+        report_runtime_error(ERR_OVERFLOW);
+        return 0;
     }
     return 1;
 }
@@ -1167,6 +1241,16 @@ static int parse_restore(const char **input) {
     Token arg = get_next_token(input);
     if (arg.type == TOKEN_NUMBER) {
         restore_data_to_line(arg.int_val);
+        return 1;
+    }
+    if (arg.type == TOKEN_IDENTIFIER) {
+        /* RESTORE label (QBasic) */
+        Statement *stmt = find_label(arg.text);
+        if (!stmt) {
+            report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+            return 0;
+        }
+        restore_data_to_statement(stmt);
         return 1;
     }
     *input = saved;
@@ -1875,10 +1959,10 @@ static int scan_user_types(void) {
         }
         Token *field_type = &stmt->tokens[position++];
         const char *field_type_name = field_type->text;
-        if (strcasecmp(field_type->text, "_UNSIGNED") == 0 &&
-            stmt->tokens[position].type == TOKEN_IDENTIFIER &&
-            strcasecmp(stmt->tokens[position].text, "LONG") == 0) {
-            field_type_name = "_UNSIGNED LONG";
+        const char *combined = stmt->tokens[position].type == TOKEN_IDENTIFIER
+            ? unsigned_type_name(field_type->text, stmt->tokens[position].text) : NULL;
+        if (combined) {
+            field_type_name = combined;
             position++;
         }
         size_t fixed_string_length = 0;
@@ -4620,15 +4704,8 @@ static int user_type_storage_size(UserType *type, size_t *size_out, int depth) {
                 return 0;
             }
             element_size = (size_t)field->fixed_string_length;
-        } else if (strcasecmp(field->type_name, "INTEGER") == 0) {
-            element_size = sizeof(int16_t);
-        } else if (strcasecmp(field->type_name, "LONG") == 0 ||
-                   strcasecmp(field->type_name, "_UNSIGNED LONG") == 0) {
-            element_size = sizeof(int32_t);
-        } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
-            element_size = sizeof(float);
-        } else if (strcasecmp(field->type_name, "DOUBLE") == 0) {
-            element_size = sizeof(double);
+        } else if (find_primitive_type(field->type_name)) {
+            element_size = (size_t)find_primitive_type(field->type_name)->bytes;
         } else {
             report_runtime_error(ERR_TYPE_MISMATCH);
             return 0;
@@ -4658,6 +4735,40 @@ static void transfer_little_endian_bytes(unsigned char *bytes, void *value,
 #endif
 }
 
+/* Packed little-endian record fields: integers by size and signedness,
+ * SINGLE as a 4-byte float, DOUBLE as 8 bytes. */
+static void encode_record_value(const char *type_name, double value, unsigned char *out) {
+    const PrimitiveType *type = find_primitive_type(type_name);
+    if (type && type->is_integer) {
+        uint64_t bits = type->is_unsigned ? (uint64_t)value : (uint64_t)(int64_t)value;
+        for (int i = 0; i < type->bytes; i++) out[i] = (unsigned char)(bits >> (8 * i));
+    } else if (type && type->bytes == 4) {
+        float single = (float)value;
+        transfer_little_endian_bytes(out, &single, sizeof(single), 1);
+    } else {
+        transfer_little_endian_bytes(out, &value, sizeof(value), 1);
+    }
+}
+
+static double decode_record_value(const char *type_name, const unsigned char *in) {
+    const PrimitiveType *type = find_primitive_type(type_name);
+    if (type && type->is_integer) {
+        uint64_t bits = 0;
+        for (int i = 0; i < type->bytes; i++) bits |= (uint64_t)in[i] << (8 * i);
+        if (type->is_unsigned) return (double)bits;
+        int shift = 64 - 8 * type->bytes;
+        return (double)((int64_t)(bits << shift) >> shift); // sign-extend
+    }
+    if (type && type->bytes == 4) {
+        float single;
+        transfer_little_endian_bytes((unsigned char *)in, &single, sizeof(single), 0);
+        return single;
+    }
+    double value;
+    transfer_little_endian_bytes((unsigned char *)in, &value, sizeof(value), 0);
+    return value;
+}
+
 static int transfer_user_type_fields(UserType *type, const char *prefix,
                                      unsigned char *buffer, size_t *offset,
                                      int writing, int depth) {
@@ -4683,15 +4794,9 @@ static int transfer_user_type_fields(UserType *type, const char *prefix,
             if (!user_type_storage_size(nested, &element_size, depth + 1)) return 0;
         } else if (strcasecmp(field->type_name, "STRING") == 0) {
             element_size = (size_t)field->fixed_string_length;
-        } else if (strcasecmp(field->type_name, "INTEGER") == 0) {
-            element_size = sizeof(int16_t);
-        } else if (strcasecmp(field->type_name, "LONG") == 0 ||
-                   strcasecmp(field->type_name, "_UNSIGNED LONG") == 0) {
-            element_size = sizeof(int32_t);
-        } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
-            element_size = sizeof(float);
         } else {
-            element_size = sizeof(double);
+            const PrimitiveType *primitive = find_primitive_type(field->type_name);
+            element_size = primitive ? (size_t)primitive->bytes : sizeof(double);
         }
 
         for (int element = 0; element < element_count; element++) {
@@ -4741,52 +4846,9 @@ static int transfer_user_type_fields(UserType *type, const char *prefix,
             } else if (writing) {
                 double value = array_index >= 0 && variable->array
                     ? variable->array[array_index] : variable->value;
-                if (strcasecmp(field->type_name, "INTEGER") == 0) {
-                    int16_t integer = (int16_t)value;
-                    transfer_little_endian_bytes(buffer + *offset, &integer,
-                                                 sizeof(integer), 1);
-                } else if (strcasecmp(field->type_name, "LONG") == 0) {
-                    int32_t integer = (int32_t)value;
-                    transfer_little_endian_bytes(buffer + *offset, &integer,
-                                                 sizeof(integer), 1);
-                } else if (strcasecmp(field->type_name, "_UNSIGNED LONG") == 0) {
-                    uint32_t integer = (uint32_t)value;
-                    transfer_little_endian_bytes(buffer + *offset, &integer,
-                                                 sizeof(integer), 1);
-                } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
-                    float single = (float)value;
-                    transfer_little_endian_bytes(buffer + *offset, &single,
-                                                 sizeof(single), 1);
-                } else {
-                    transfer_little_endian_bytes(buffer + *offset, &value,
-                                                 sizeof(value), 1);
-                }
+                encode_record_value(field->type_name, value, buffer + *offset);
             } else {
-                double value;
-                if (strcasecmp(field->type_name, "INTEGER") == 0) {
-                    int16_t integer;
-                    transfer_little_endian_bytes(buffer + *offset, &integer,
-                                                 sizeof(integer), 0);
-                    value = integer;
-                } else if (strcasecmp(field->type_name, "LONG") == 0) {
-                    int32_t integer;
-                    transfer_little_endian_bytes(buffer + *offset, &integer,
-                                                 sizeof(integer), 0);
-                    value = integer;
-                } else if (strcasecmp(field->type_name, "_UNSIGNED LONG") == 0) {
-                    uint32_t integer;
-                    transfer_little_endian_bytes(buffer + *offset, &integer,
-                                                 sizeof(integer), 0);
-                    value = integer;
-                } else if (strcasecmp(field->type_name, "SINGLE") == 0) {
-                    float single;
-                    transfer_little_endian_bytes(buffer + *offset, &single,
-                                                 sizeof(single), 0);
-                    value = single;
-                } else {
-                    transfer_little_endian_bytes(buffer + *offset, &value,
-                                                 sizeof(value), 0);
-                }
+                double value = decode_record_value(field->type_name, buffer + *offset);
                 if (array_index >= 0 && variable->array) {
                     variable->array[array_index] = value;
                 } else {
@@ -5328,10 +5390,10 @@ static void scan_procedures(void) {
                                     UserType *parameter_type =
                                         find_user_type(stmt->tokens[pos].text);
                                     const char *type_name = stmt->tokens[pos].text;
-                                    if (strcasecmp(type_name, "_UNSIGNED") == 0 &&
-                                        pos + 1 < stmt->token_count &&
-                                        strcasecmp(stmt->tokens[pos + 1].text, "LONG") == 0) {
-                                        type_name = "_UNSIGNED LONG";
+                                    const char *combined = pos + 1 < stmt->token_count
+                                        ? unsigned_type_name(type_name, stmt->tokens[pos + 1].text) : NULL;
+                                    if (combined) {
+                                        type_name = combined;
                                         pos++;
                                     }
                                     const char *suffix = primitive_type_suffix(type_name);
@@ -5403,13 +5465,15 @@ static void scan_procedures(void) {
 }
 
 static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statement *exec_stmt) {
-    if (call_stack_depth >= MAX_CALL_FRAMES) {
+    if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return NULL;
     }
 
-    CallFrame *frame = &call_stack[call_stack_depth];
+    int frame_slot = call_stack_depth + frames_being_built;
+    CallFrame *frame = &call_stack[frame_slot];
     reset_call_frame(frame);
+    frames_being_built++;
     frame->proc = proc;
     frame->return_stmt = exec_stmt;
 
@@ -5432,8 +5496,9 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
         ProcParamDef *pdef = &proc->params[arg_idx];
         Token t_arg = ts->tokens[ts->pos];
 
-        /* A CONST name is a value, never a by-reference variable. */
-        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER) && find_named_constant(t_arg.text) < 0;
+        /* CONST and FUNCTION names are values, never by-reference variables. */
+        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER) && find_named_constant(t_arg.text) < 0 &&
+            !is_function_name(t_arg.text);
         int next_is_sep = (ts->pos + 1 >= exec_stmt->token_count || 
                            ts->tokens[ts->pos + 1].type == TOKEN_COMMA || 
                            ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || 
@@ -5518,7 +5583,9 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
     }
 
     frame->return_token_idx = ts->pos;
-    call_stack_depth++;
+    frames_being_built--;
+    frame->return_depth = call_stack_depth;
+    call_stack_depth = frame_slot + 1;
     return proc->start_stmt;
 }
 
@@ -6068,10 +6135,15 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 }
                 ProcedureDef *sub = find_procedure(t->text);
                 if (sub && !sub->is_function) {
-                    ts.pos = 1;
-                    curr_proc_stmt = execute_sub_call(sub, &ts, exec_stmt);
-                    jumped = 1;
-                    break;
+                    // Inside a FUNCTION a SUB runs to completion here, then the
+                    // calling statement continues.
+                    ts.pos = (int)(current_token - ts.tokens) + 1;
+                    if (execute_sub_call(sub, &ts, exec_stmt)) {
+                        CallFrame *sub_frame = &call_stack[call_stack_depth - 1];
+                        execute_procedure_statements(sub);
+                        call_stack_depth = sub_frame->return_depth;
+                    }
+                    continue;
                 }
                 ts.pos--;
                 /* fall through */
@@ -6099,13 +6171,15 @@ static void execute_procedure_statements(ProcedureDef *proc) {
 
 
 static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char **input) {
-    if (call_stack_depth >= MAX_CALL_FRAMES) {
+    if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return 0.0;
     }
 
-    CallFrame *frame = &call_stack[call_stack_depth];
+    int frame_slot = call_stack_depth + frames_being_built;
+    CallFrame *frame = &call_stack[frame_slot];
     reset_call_frame(frame);
+    frames_being_built++;
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -6138,7 +6212,7 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
         var_buf[vlen] = '\0';
         const char *after_var = skip_whitespace_fast(temp);
         int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':')) &&
-            find_named_constant(var_buf) < 0;
+            find_named_constant(var_buf) < 0 && !is_function_name(var_buf);
 
         if (is_simple_var) {
             int c_var_idx = pdef->user_type_index >= 0
@@ -6190,7 +6264,9 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
         *input = p;
     }
 
-    call_stack_depth++;
+    frames_being_built--;
+    frame->return_depth = call_stack_depth;
+    call_stack_depth = frame_slot + 1;
 
     execute_procedure_statements(proc);
 
@@ -6202,21 +6278,21 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
         }
     }
 
-    if (call_stack_depth > 0) {
-        call_stack_depth--;
-    }
+    call_stack_depth = frame->return_depth;
 
     return result;
 }
 
 static int evaluate_function_call_string_text(ProcedureDef *proc, const char **input, BasicString *out) {
-    if (call_stack_depth >= MAX_CALL_FRAMES) {
+    if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return 0;
     }
 
-    CallFrame *frame = &call_stack[call_stack_depth];
+    int frame_slot = call_stack_depth + frames_being_built;
+    CallFrame *frame = &call_stack[frame_slot];
     reset_call_frame(frame);
+    frames_being_built++;
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -6249,7 +6325,7 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
         var_buf[vlen] = '\0';
         const char *after_var = skip_whitespace_fast(temp);
         int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':')) &&
-            find_named_constant(var_buf) < 0;
+            find_named_constant(var_buf) < 0 && !is_function_name(var_buf);
 
         if (is_simple_var) {
             int c_var_idx = pdef->user_type_index >= 0
@@ -6301,7 +6377,9 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
         *input = p;
     }
 
-    call_stack_depth++;
+    frames_being_built--;
+    frame->return_depth = call_stack_depth;
+    call_stack_depth = frame_slot + 1;
 
     execute_procedure_statements(proc);
 
@@ -6312,22 +6390,22 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
         }
     }
 
-    if (call_stack_depth > 0) {
-        call_stack_depth--;
-    }
+    call_stack_depth = frame->return_depth;
 
     return 1;
 }
 
 static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts) {
 
-    if (call_stack_depth >= MAX_CALL_FRAMES) {
+    if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return 0.0;
     }
 
-    CallFrame *frame = &call_stack[call_stack_depth];
+    int frame_slot = call_stack_depth + frames_being_built;
+    CallFrame *frame = &call_stack[frame_slot];
     reset_call_frame(frame);
+    frames_being_built++;
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -6348,8 +6426,9 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
         ProcParamDef *pdef = &proc->params[arg_idx];
         Token t_arg = ts->tokens[ts->pos];
 
-        /* A CONST name is a value, never a by-reference variable. */
-        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER) && find_named_constant(t_arg.text) < 0;
+        /* CONST and FUNCTION names are values, never by-reference variables. */
+        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER) && find_named_constant(t_arg.text) < 0 &&
+            !is_function_name(t_arg.text);
         int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
         if (is_var_id && next_is_sep) {
@@ -6395,7 +6474,9 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
 
     if (has_parens && ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
 
-    call_stack_depth++;
+    frames_being_built--;
+    frame->return_depth = call_stack_depth;
+    call_stack_depth = frame_slot + 1;
 
     execute_procedure_statements(proc);
 
@@ -6407,21 +6488,21 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
         }
     }
 
-    if (call_stack_depth > 0) {
-        call_stack_depth--;
-    }
+    call_stack_depth = frame->return_depth;
 
     return result;
 }
 
 static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, BasicString *out) {
-    if (call_stack_depth >= MAX_CALL_FRAMES) {
+    if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return 0;
     }
 
-    CallFrame *frame = &call_stack[call_stack_depth];
+    int frame_slot = call_stack_depth + frames_being_built;
+    CallFrame *frame = &call_stack[frame_slot];
     reset_call_frame(frame);
+    frames_being_built++;
     frame->proc = proc;
 
     for (int p = 0; p < proc->param_count; p++) {
@@ -6442,8 +6523,9 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
         ProcParamDef *pdef = &proc->params[arg_idx];
         Token t_arg = ts->tokens[ts->pos];
 
-        /* A CONST name is a value, never a by-reference variable. */
-        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER) && find_named_constant(t_arg.text) < 0;
+        /* CONST and FUNCTION names are values, never by-reference variables. */
+        int is_var_id = (t_arg.type == TOKEN_IDENTIFIER) && find_named_constant(t_arg.text) < 0 &&
+            !is_function_name(t_arg.text);
         int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
         if (is_var_id && next_is_sep) {
@@ -6489,7 +6571,9 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
 
     if (has_parens && ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
 
-    call_stack_depth++;
+    frames_being_built--;
+    frame->return_depth = call_stack_depth;
+    call_stack_depth = frame_slot + 1;
 
     execute_procedure_statements(proc);
 
@@ -6500,9 +6584,7 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
         }
     }
 
-    if (call_stack_depth > 0) {
-        call_stack_depth--;
-    }
+    call_stack_depth = frame->return_depth;
 
     return 1;
 }
@@ -6519,7 +6601,9 @@ enum {
     QB64_FN_NONE, QB64_FN_RGB32, QB64_FN_RGBA32, QB64_FN_RGB, QB64_FN_RGBA,
     QB64_FN_RED32, QB64_FN_GREEN32, QB64_FN_BLUE32, QB64_FN_ALPHA32,
     QB64_FN_RED, QB64_FN_GREEN, QB64_FN_BLUE, QB64_FN_ALPHA,
-    QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT
+    QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT,
+    QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
+    QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE
 };
 
 static int qb64_function_id(const char *name) {
@@ -6531,6 +6615,10 @@ static int qb64_function_id(const char *name) {
         {"_RED", QB64_FN_RED}, {"_GREEN", QB64_FN_GREEN},
         {"_BLUE", QB64_FN_BLUE}, {"_ALPHA", QB64_FN_ALPHA},
         {"_PI", QB64_FN_PI}, {"_WIDTH", QB64_FN_WIDTH}, {"_HEIGHT", QB64_FN_HEIGHT},
+        {"_KEYDOWN", QB64_FN_KEYDOWN}, {"_KEYHIT", QB64_FN_KEYHIT},
+        {"_MOUSEX", QB64_FN_MOUSEX}, {"_MOUSEY", QB64_FN_MOUSEY},
+        {"_MOUSEBUTTON", QB64_FN_MOUSEBUTTON}, {"_MOUSEINPUT", QB64_FN_MOUSEINPUT},
+        {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
     };
     if (name[0] != '_') return QB64_FN_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -6598,9 +6686,36 @@ static double qb64_function_value(int id, const double *args, int argc) {
             last_expression_is_double = 1;
             return M_PI * (argc >= 1 ? args[0] : 1.0);
         case QB64_FN_WIDTH:
-            return graphics_is_active() ? graphics_width() : 80;
-        case QB64_FN_HEIGHT:
-            return graphics_is_active() ? graphics_height() : 25;
+        case QB64_FN_HEIGHT: {
+            // _WIDTH/_HEIGHT[(handle)]: of the current destination, or of an image.
+            if (!graphics_is_active()) return id == QB64_FN_WIDTH ? 80 : 25;
+            int size = graphics_image_size(argc >= 1 ? (int)args[0] : 1, id == QB64_FN_HEIGHT);
+            if (size < 0) break;
+            return size;
+        }
+        case QB64_FN_COPYIMAGE: {
+            if (!graphics_is_active()) init_graphics();
+            int handle = graphics_copyimage(argc >= 1 ? (int)args[0] : graphics_get_source());
+            if (handle == -1 && argc >= 1 && !graphics_valid_handle((int)args[0])) break;
+            return handle;
+        }
+        // Keyboard and mouse state comes from the window; without one it reads as idle.
+        case QB64_FN_KEYDOWN:
+            if (argc != 1) break;
+            return graphics_is_active() && graphics_keydown((int)args[0]) ? -1 : 0;
+        case QB64_FN_KEYHIT:
+            return graphics_is_active() ? graphics_keyhit() : 0;
+        case QB64_FN_MOUSEX:
+            return graphics_is_active() ? graphics_mouse_x() : 0;
+        case QB64_FN_MOUSEY:
+            return graphics_is_active() ? graphics_mouse_y() : 0;
+        case QB64_FN_MOUSEBUTTON:
+            if (argc != 1) break;
+            return graphics_is_active() ? graphics_mouse_button((int)args[0]) : 0;
+        case QB64_FN_MOUSEINPUT:
+            return graphics_is_active() ? graphics_mouse_input() : 0;
+        case QB64_FN_MOUSEWHEEL:
+            return graphics_is_active() ? graphics_mouse_wheel() : 0;
     }
     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
     return 0;
@@ -6664,7 +6779,7 @@ static double primary_tok(TokenStream *ts) {
                     double y = evaluate_expression_tok(ts);
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                     if (!graphics_is_active()) init_graphics();
-                    return (double)get_pixel(x, y);
+                    return graphics_point(x, y);
                 } else {
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                     return graphics_cursor_query((int)x);
@@ -6773,6 +6888,30 @@ static double primary_tok(TokenStream *ts) {
             return (double)result;
         }
         return 0;
+    }
+    if (token->type == TOKEN_DEST) return graphics_get_dest();
+    if (token->type == TOKEN_SOURCE) return graphics_get_source();
+    if (token->type == TOKEN_NEWIMAGE) {
+        /* _NEWIMAGE(width, height[, mode]) -> handle */
+        double args[3] = {0, 0, 256};
+        int argc = 0;
+        if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+            ts->pos++;
+            while (argc < 3) {
+                args[argc++] = evaluate_expression_tok(ts);
+                if (ts->tokens[ts->pos].type != TOKEN_COMMA) break;
+                ts->pos++;
+            }
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+        }
+        if (argc < 2) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+        if (!graphics_is_active()) init_graphics();
+        int handle = graphics_newimage((int)args[0], (int)args[1], (int)args[2]);
+        if (handle == -1) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return handle;
     }
     if (token->type == TOKEN_LOADIMAGE) {
         /* _LOADIMAGE(filename$, mode&) -> handle */
@@ -7280,7 +7419,7 @@ static double primary(const char **input) {
                     double y = evaluate_expression(input);
                     get_next_token(input); // consume ')'
                     if (!graphics_is_active()) init_graphics();
-                    return (double)get_pixel(x, y);
+                    return graphics_point(x, y);
                 } else {
                     return graphics_cursor_query((int)x);
                 }
@@ -7393,6 +7532,30 @@ static double primary(const char **input) {
             return (double)result2;
         }
         return 0;
+    }
+    if (t.type == TOKEN_DEST) return graphics_get_dest();
+    if (t.type == TOKEN_SOURCE) return graphics_get_source();
+    if (t.type == TOKEN_NEWIMAGE) {
+        double args[3] = {0, 0, 256};
+        int argc = 0;
+        if (get_next_token(input).type == TOKEN_LPAREN) {
+            while (argc < 3) {
+                args[argc++] = evaluate_expression(input);
+                const char *sep_saved = *input;
+                Token sep = get_next_token(input);
+                if (sep.type == TOKEN_COMMA) continue;
+                if (sep.type != TOKEN_RPAREN) *input = sep_saved;
+                break;
+            }
+        }
+        if (argc < 2) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
+        }
+        if (!graphics_is_active()) init_graphics();
+        int handle = graphics_newimage((int)args[0], (int)args[1], (int)args[2]);
+        if (handle == -1) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return handle;
     }
     if (t.type == TOKEN_LOADIMAGE) {
         /* _LOADIMAGE(filename$, mode&) -> handle */
@@ -7882,10 +8045,10 @@ static void execute_shared_or_static(TokenStream *ts, int is_static) {
             if (look + 1 < stmt->token_count && ts->tokens[look].type == TOKEN_AS) {
                 const char *type_name = ts->tokens[look + 1].text;
                 look += 2;
-                if (strcasecmp(type_name, "_UNSIGNED") == 0 &&
-                    look < stmt->token_count &&
-                    strcasecmp(ts->tokens[look].text, "LONG") == 0) {
-                    type_name = "_UNSIGNED LONG";
+                const char *combined = look < stmt->token_count
+                    ? unsigned_type_name(type_name, ts->tokens[look].text) : NULL;
+                if (combined) {
+                    type_name = combined;
                     look++;
                 }
                 suffix = primitive_type_suffix(type_name);
@@ -8352,7 +8515,7 @@ static void execute_common(const char **ptr) {
             const char *unsigned_saved = *ptr;
             if (strcasecmp(type_name, "_UNSIGNED") == 0) {
                 Token width = get_next_token(ptr);
-                if (strcasecmp(width.text, "LONG") == 0) type_name = "_UNSIGNED LONG";
+                if (unsigned_type_name(type_name, width.text)) type_name = unsigned_type_name(type_name, width.text);
                 else *ptr = unsigned_saved;
             }
             const char *suffix = primitive_type_suffix(type_name);
@@ -8848,6 +9011,17 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             execute_common(&ptr);
         } else if (t.type == TOKEN_CHAIN) {
             execute_chain(&ptr);
+        } else if (t.type == TOKEN_DEST || t.type == TOKEN_SOURCE) {
+            // _DEST handle / _SOURCE handle (0 is the screen)
+            if (!graphics_is_active()) init_graphics();
+            int handle = (int)evaluate_expression(&ptr);
+            int ok = t.type == TOKEN_DEST ? graphics_set_dest(handle) : graphics_set_source(handle);
+            if (!ok) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        } else if (t.type == TOKEN_TITLE) {
+            // _TITLE text$ sets the window title.
+            char title[256] = "";
+            parse_string_expression(&ptr, title, sizeof(title));
+            if (graphics_is_active()) set_window_title(title);
         } else if (t.type == TOKEN_PCOPY) {
             // PCOPY source_page, destination_page
             int source = (int)evaluate_expression(&ptr);
@@ -9044,6 +9218,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
         } else if (t.type == TOKEN_DEFINT) {
             parse_def_range(&ptr, '%');
+        } else if (t.type == TOKEN_DEFLNG) {
+            parse_def_range(&ptr, '&');
         } else if (t.type == TOKEN_DEFSTR) {
             parse_def_range(&ptr, '$');
         } else if (t.type == TOKEN_DEFSNG) {
@@ -9788,7 +9964,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         const char *unsigned_saved = ptr;
                         if (strcasecmp(type_name, "_UNSIGNED") == 0) {
                             Token width = get_next_token(&ptr);
-                            if (strcasecmp(width.text, "LONG") == 0) type_name = "_UNSIGNED LONG";
+                            if (unsigned_type_name(type_name, width.text)) type_name = unsigned_type_name(type_name, width.text);
                             else ptr = unsigned_saved;
                         }
                         suffix = primitive_type_suffix(type_name);
@@ -10236,6 +10412,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         has_arg[a] = 1;
                     }
                 }
+                // SCREEN handle shows an image (QB64).
+                if (mode < -1) {
+                    if (!graphics_screen_from_image(mode)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    else current_screen_mode = -1;
+                    *ptr_addr = ptr;
+                    return;
+                }
                 // Repeating the current mode (to flip pages) keeps the screen.
                 if (mode != current_screen_mode) {
                     set_screen_mode(mode);
@@ -10532,7 +10715,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     int k = 2;
                     for (int j = 0; j < h; j++) {
                         for (int i = 0; i < w; i++) {
-                            image->array[k++] = (double)get_pixel(min_x + i, min_y + j);
+                            image->array[k++] = graphics_point(min_x + i, min_y + j);
                         }
                     }
                 } else {
@@ -10623,49 +10806,53 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else if (t.type == TOKEN_PUTIMAGE) {
-            int x1 = 0, y1 = 0, x2 = -1, y2 = -1;
-            int sx1 = 0, sy1 = 0, sx2 = 0, sy2 = 0;
-            int has_source = 0;
-            Token next = get_next_token(&ptr);
-            if (next.type == TOKEN_LPAREN) {
-                x1 = (int)evaluate_expression(&ptr);
-                if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                y1 = (int)evaluate_expression(&ptr);
-                if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                Token separator = get_next_token(&ptr);
-                if (separator.type == TOKEN_MINUS) {
-                    if (get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                    x2 = (int)evaluate_expression(&ptr);
-                    if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                    y2 = (int)evaluate_expression(&ptr);
-                    if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                    if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                } else if (separator.type != TOKEN_COMMA) {
-                    report_runtime_error(ERR_SYNTAX_ERROR); return;
-                }
-            } else if (next.type != TOKEN_COMMA) {
-                report_runtime_error(ERR_SYNTAX_ERROR); return;
-            }
-
-            int handle = (int)evaluate_expression(&ptr);
-            const char *after_handle = ptr;
-            Token source_separator = get_next_token(&ptr);
-            if (source_separator.type == TOKEN_COMMA) {
-                if (get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                sx1 = (int)evaluate_expression(&ptr);
-                if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                sy1 = (int)evaluate_expression(&ptr);
-                if (get_next_token(&ptr).type != TOKEN_RPAREN || get_next_token(&ptr).type != TOKEN_MINUS || get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                sx2 = (int)evaluate_expression(&ptr);
-                if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                sy2 = (int)evaluate_expression(&ptr);
-                if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
-                has_source = 1;
-            } else {
-                ptr = after_handle;
-            }
+            // _PUTIMAGE [(dx1,dy1)[-(dx2,dy2)]][, [source][, [dest]][, (sx1,sy1)[-(sx2,sy2)]]]
+            // The older BASIKA form _PUTIMAGE (x,y), source, (sx1,sy1)-(sx2,sy2)
+            // (source rectangle in the third place) is also accepted.
             if (!graphics_is_active()) init_graphics();
-            if (!graphics_putimage(x1, y1, x2, y2, handle, sx1, sy1, sx2, sy2, has_source)) {
+            double ix1 = 0, iy1 = 0, ix2 = 0, iy2 = 0;
+            int has_dest = 0, has_dest2 = 0, has_src = 0, has_src2 = 0;
+            int source = graphics_get_source(), destination = graphics_get_dest();
+            double sx1 = 0, sy1 = 0, sx2 = 0, sy2 = 0;
+            int point = parse_graphics_point(&ptr, 0, 0, &ix1, &iy1);
+            if (point < 0) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+            if (point == 1) {
+                has_dest = 1;
+                const char *saved = ptr;
+                if (get_next_token(&ptr).type == TOKEN_MINUS) {
+                    if (parse_graphics_point(&ptr, ix1, iy1, &ix2, &iy2) != 1) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                    has_dest2 = 1;
+                } else {
+                    ptr = saved;
+                }
+            }
+            int slot = 0; // 0 source, 1 destination, 2 source rectangle
+            while (next_graphics_comma(&ptr) && slot < 3) {
+                const char *probe = ptr;
+                double px, py;
+                int is_point = graphics_arg_present(&ptr) && parse_graphics_point(&probe, 0, 0, &px, &py) == 1;
+                if (slot == 2 || (slot == 1 && is_point)) {
+                    if (!is_point) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                    parse_graphics_point(&ptr, 0, 0, &sx1, &sy1);
+                    has_src = 1;
+                    const char *saved = ptr;
+                    if (get_next_token(&ptr).type == TOKEN_MINUS) {
+                        if (parse_graphics_point(&ptr, sx1, sy1, &sx2, &sy2) != 1) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+                        has_src2 = 1;
+                    } else {
+                        ptr = saved;
+                    }
+                    break;
+                }
+                if (graphics_arg_present(&ptr)) {
+                    int handle = (int)evaluate_expression(&ptr);
+                    if (slot == 0) source = handle; else destination = handle;
+                }
+                slot++;
+            }
+            if (!graphics_putimage_ex(has_dest, (int)ix1, (int)iy1, has_dest2, (int)ix2, (int)iy2,
+                                      source, destination, has_src, (int)sx1, (int)sy1,
+                                      has_src2, (int)sx2, (int)sy2)) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else if (t.type == TOKEN_SCREENSHOT) {
@@ -10773,6 +10960,7 @@ static void run_program_from(Statement *start) {
     for_ptr = 0;
     do_ptr = 0;
     call_stack_depth = 0;
+    frames_being_built = 0;
     scan_procedures();
     scanned_generation = program_edit_generation();
     print_col = 0;
@@ -11530,7 +11718,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     if (exit_type.type == TOKEN_SUB || exit_type.type == TOKEN_FUNCTION) {
                         if (call_stack_depth > 0) {
                             CallFrame *frame = &call_stack[call_stack_depth - 1];
-                            call_stack_depth--;
+                            call_stack_depth = frame->return_depth;
                             if (frame->return_stmt && frame->return_token_idx < frame->return_stmt->token_count) {
                                 curr = frame->return_stmt;
                                 resume_ts_pos = frame->return_token_idx;
@@ -11572,7 +11760,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
                     if (call_stack_depth > 0) {
                         CallFrame *frame = &call_stack[call_stack_depth - 1];
-                        call_stack_depth--;
+                        call_stack_depth = frame->return_depth;
                         if (frame->return_stmt && frame->return_token_idx < frame->return_stmt->token_count) {
                             curr = frame->return_stmt;
                             resume_ts_pos = frame->return_token_idx;
@@ -11738,6 +11926,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
         if (runtime_error_occurred && on_error_goto_line > 0) {
             Statement *trap = find_line(on_error_goto_line);
             if (trap) {
+                frames_being_built = 0; // the failed statement's calls were abandoned
                 curr = trap;
                 resume_ptr = NULL;
                 runtime_error_occurred = 0;
