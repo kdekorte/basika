@@ -15,7 +15,7 @@ S$ Byte 3: 246
 S$ Byte 4: 194 
 Testing MKD$ and CVD
 D$ len: 8 
-CVD(D$): 0.3 
+CVD(D$): .3 
 D$ Byte 1: 51 
 D$ Byte 2: 51 
 D$ Byte 3: 51 
@@ -27,5 +27,5 @@ D$ Byte 8: 63
 Testing with RANDOM file and FIELD
 CVI(FI$): 16961 
 CVS(FS$):-123.45 
-CVD(FD$): 0.3 
+CVD(FD$): .3 
 Deleted

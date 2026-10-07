@@ -17,11 +17,7 @@
 
 ## Interpreter correctness
 
-- Array subscripts truncate floating-point indexes (`a(1.5)` is `a(1)`); QBasic rounds them.
-- `SQR`, `LOG` and other math functions return NaN or infinity for invalid arguments instead of QBasic's "Illegal function call".
-- `PRINT` and `STR$` show a leading zero for fractions (`0.5`); QBasic prints `.5`.
-- `EQV` and `IMP` operators are not implemented.
-- `MKL$` and `CVL` are not implemented.
+- `PUT #n, [position], variable` and `GET` only accept records (and BASIKA's `len, data` form); QBasic also writes and reads numeric and string variables, which BINARY files rely on.
 - Each field of each `TYPE` array element uses one of the 8192 variable-table entries; storing records as contiguous blocks would remove that limit and speed up record I/O.
 
 ## Lexer and interpreter performance

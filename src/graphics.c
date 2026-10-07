@@ -70,6 +70,15 @@ static int window_active = 0;
 static int window_screen = 0;
 static double win_x1 = 0, win_y1 = 0, win_x2 = 0, win_y2 = 0;
 
+/* Coordinates round to the nearest pixel (half to even, like CINT), as in
+ * QBasic; values far off screen are clamped so they stay valid ints. */
+static int round_coordinate(double value) {
+    double r = nearbyint(value);
+    if (!(r > -1e9)) return -1000000000;
+    if (r > 1e9) return 1000000000;
+    return (int)r;
+}
+
 static void transform_coords(double x, double y, int *px, int *py) {
     if (window_active) {
         double px_d = view_x1 + (x - win_x1) * (view_x2 - view_x1) / (win_x2 - win_x1);
@@ -82,11 +91,11 @@ static void transform_coords(double x, double y, int *px, int *py) {
         *px = (int)(px_d + (px_d < 0 ? -0.5 : 0.5));
         *py = (int)(py_d + (py_d < 0 ? -0.5 : 0.5));
     } else if (view_active && !view_screen) {
-        *px = (int)x + view_x1;
-        *py = (int)y + view_y1;
+        *px = round_coordinate(x) + view_x1;
+        *py = round_coordinate(y) + view_y1;
     } else {
-        *px = (int)x;
-        *py = (int)y;
+        *px = round_coordinate(x);
+        *py = round_coordinate(y);
     }
 }
 

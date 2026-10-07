@@ -148,6 +148,8 @@ TESTS=(
   "tests/math/qb64_types"
   "tests/math/integer_math"
   "tests/math/restore_label"
+  "tests/math/qbasic_rules"
+  "tests/procedures/array_parameters"
   "tests/control_flow/labels_no_lines"
   "tests/procedures/qbasic_sub"
   "tests/procedures/qbasic_function"

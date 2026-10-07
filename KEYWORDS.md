@@ -20,19 +20,19 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `!` suffix keeps it SINGLE.
 
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CDBL`, `CHAIN`, `CHDIR`,
-`CHR$`, `CINT`, `CIRCLE`, `CLNG`, `CLEAR`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COMMON`, `CONST`, `CONT`, `COS`, `CSNG`, `CVD`, `CVI`,
+`CHR$`, `CINT`, `CIRCLE`, `CLNG`, `CLEAR`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COMMON`, `CONST`, `CONT`, `COS`, `CSNG`, `CVD`, `CVI`, `CVL`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
-`ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
-`HEX$`, `IF`, `INKEY$`, `INPUT`, `INPUT$`, `INSTR`, `INT`, `IS`, `KEY`, `KILL`, `LCASE$`,
-`LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOCK`, `LOF`, `LOG`, `LOOP`, `LSET`,
-`LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
+`EQV`, `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
+`HEX$`, `IF`, `IMP`, `INKEY$`, `INPUT`, `INPUT$`, `INSTR`, `INT`, `IS`, `KEY`, `KILL`, `LCASE$`,
+`LBOUND`, `LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOCK`, `LOF`, `LOG`, `LOOP`, `LSET`,
+`LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKL$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
 `NOT`, `OCT$`, `OFF`, `ON`, `OPEN`, `OPTION`, `OR`, `PAINT`, `PALETTE`, `PCOPY`, `PEEK`, `PEN`, `PLAY`,
 `POKE`, `PRESET`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SELECT`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
 `SPC`, `SQR`, `STATIC`, `STEP`, `STICK`, `STOP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
-`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `UNLOCK`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
+`THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UBOUND`, `UCASE$`, `UNLOCK`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WAIT`, `WEND`, `WHILE`, `WIDTH`, `WINDOW`, `WRITE`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DEST`, `_DISPLAY`, `_FONT`,
 `_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`, `_SOURCE`, `_TITLE`,
 `_DEFLATE$`, `_INFLATE$`.
@@ -97,7 +97,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 ## Subroutines and Functions (QBasic Procedures)
 - `SUB subname[(param1[, param2...])] [STATIC] ... END SUB`: Defines a QBasic-style subroutine procedure with isolated local variable scope. With `STATIC`, every local variable, array and record keeps its value between calls. A parameter may be declared `name AS type` with `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING` or a user-defined type; values passed in are converted to that type.
 - `FUNCTION funcname[(param1[, param2...])] [STATIC] ... END FUNCTION`: Defines a QBasic-style function procedure that returns a value by assigning `funcname = expression`. Supports recursion.
-- `CALL subname[(arg1[, arg2...])]` or `subname arg1[, arg2...]`: Invokes a subroutine procedure. Simple variable arguments are passed by reference; parenthesized expressions `((x))` are passed by value.
+- `CALL subname[(arg1[, arg2...])]` or `subname arg1[, arg2...]`: Invokes a subroutine procedure. Simple variable arguments are passed by reference; parenthesized expressions `((x))` are passed by value. Pass a whole array as `name()`, declared in the procedure as `param()` (optionally `param() AS type`); the procedure works on the caller's array.
 - `DECLARE {SUB | FUNCTION} name[(params)]`: Declare procedure signatures (procedures are also pre-scanned automatically).
 - `SHARED var1[()] [AS type][, var2...]`: Grants access to main program global variables from within a procedure block.
 - `STATIC var1[()] [AS type][, var2...]`: Inside a `SUB` or `FUNCTION`, keeps the listed local variables (and arrays) between calls.
@@ -141,7 +141,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DEFSNG letter_range`: Defines variables starting with these letters as single-precision.
 - `DEFDBL letter_range`: Defines variables starting with these letters as double-precision.
 - `DEFLNG letter_range`: Defines variables starting with these letters as LONG.
-- `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`.
+- `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`. Bounds and subscripts are rounded to whole numbers like `CINT` (`a(1.5)` is `a(2)`).
+- `LBOUND(array[, dimension])`, `UBOUND(array[, dimension])`: Lowest and highest subscript of an array dimension (default 1); "Subscript out of range" for an array that is not dimensioned.
 - `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
 - `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
 - Type suffixes: `%%` _BYTE (8-bit), `%` INTEGER (16-bit), `&` LONG (32-bit), `&&` _INTEGER64, `!` SINGLE, `#` DOUBLE, `$` STRING; a `~` before an integer suffix (`~%%`, `~%`, `~&`, `~&&`) makes it `_UNSIGNED`. The `AS` names are `_BYTE`, `INTEGER`, `LONG`, `_INTEGER64`, each optionally preceded by `_UNSIGNED`. Integer variables hold exact 64-bit values, so `_INTEGER64` is exact over its whole range. Unsigned values wrap around like QB64. Integer assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range.
@@ -159,7 +160,9 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - Arithmetic types follow QBasic: an operation takes the larger of its operands' types (INTEGER < LONG < `_INTEGER64` < `_UNSIGNED _INTEGER64` < SINGLE < DOUBLE). An INTEGER, LONG or `_INTEGER64` result that does not fit its type is an Overflow error even when it is assigned to a wider variable, so `a% * b%` with 200 and 200 overflows; write `CLNG(a%) * b%`. `_UNSIGNED _INTEGER64` arithmetic wraps around. `_BYTE` and the smaller unsigned types compute as LONG.
 - `/` and `^` always give a floating-point result. `\` and `MOD` round floating-point operands to whole numbers first (`7.6 \ 2` is 4) and keep integer types.
 - Comparisons between integers are exact, including against floating-point values, and give -1 (true) or 0 (false).
-- `AND`, `OR`, `XOR`, `NOT`: Bitwise operations on whole numbers (floating-point operands are rounded) at the width of their operand types.
+- `AND`, `OR`, `XOR`, `EQV`, `IMP`, `NOT`: Bitwise operations on whole numbers (floating-point operands are rounded) at the width of their operand types. `a EQV b` is `NOT (a XOR b)` and `a IMP b` is `NOT a OR b`.
+- A floating-point result too large for its type is an Overflow error.
+- Where a statement or function needs a whole number (string positions, `CHR$` codes, file numbers, `LOCATE` rows, graphics coordinates, ...), a fractional value is rounded half to even like `CINT`, as in QBasic.
 - A `FOR` loop with an integer counter counts in whole steps; stepping past the counter type's range (`FOR i% = 1 TO 32767`) is an Overflow, as in QBasic.
 
 ## Input and Output
@@ -260,13 +263,13 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_INFLATE$(data$)`: Decompresses a string returned by `_DEFLATE$`, including multi-megabyte values; invalid input returns an empty string.
 
 ## Numeric Functions
-- `ABS(n)`, `SQR(n)`, `SIN(n)`, `COS(n)`, `TAN(n)`, `ATN(n)`
+- `ABS(n)`, `SQR(n)`, `SIN(n)`, `COS(n)`, `TAN(n)`, `ATN(n)`. As in QBasic, `SQR` of a negative number, `LOG` of zero or a negative number, and a fractional power of a negative number are "Illegal function call"; `EXP` and `^` results too large are Overflow, and `0 ^` a negative power is "Division by zero".
 - `EXP(n)`, `LOG(n)`, `INT(n)`, `FIX(n)`, `RND[(n)]`, `SGN(n)`; `ABS`, `INT` and `FIX` keep integer types exact.
 - `CINT(n)`, `CLNG(n)`: Convert to INTEGER or LONG, rounding half to even (`CINT(2.5)` is 2); Overflow when out of range.
 - `CSNG(n)`, `CDBL(n)`: Convert to SINGLE or DOUBLE precision.
 - `ARGC`: Number of command-line arguments.
 - `ARGV$(index)`: Returns a command-line argument by index.
-- `CVI(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a binary string to integer, single, or double precision.
+- `CVI(s$)`, `CVL(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a 2-, 4-, 4- or 8-byte binary string to INTEGER, LONG, SINGLE or DOUBLE.
 - `EOF(n)`: Returns nonzero when file #n is at end of file.
 - `LOF(n)`: Length of file #n in bytes.
 - `LOC(n)`: For RANDOM files, the last record read or written; for BINARY files, the last byte; otherwise the current byte position in file #n.
@@ -295,10 +298,11 @@ dynamic strings.
 - `LCASE$(s$)` / `UCASE$(s$)`: Case conversion.
 - `LEFT$(s$, n)`, `RIGHT$(s$, n)`, `MID$(s$, start[, n])`: Substring.
 - `LTRIM$(s$)`, `RTRIM$(s$)`, `TRIM$(s$)`: Whitespace removal.
-- `MKD$(n)`, `MKI$(n)`, `MKS$(n)`: Convert numeric values to binary strings.
+- `MKI$(n)`, `MKL$(n)`, `MKS$(n)`, `MKD$(n)`: Convert a number to the binary string of an INTEGER, LONG, SINGLE or DOUBLE; `MKI$` and `MKL$` round like `CINT`/`CLNG` and report Overflow when out of range.
 - `REVERSE(s$)`: Reverses a string.
 - `SPACE$(n)`: Returns string of spaces.
 - `STR$(n)`: Converts a number to the text `PRINT` shows, with a leading space for positive values (`STR$(1234567)` is `" 1234567"`).
+- Numbers print as in QBasic: fractions have no leading zero (`.5`, `-.25`) and exponents are uppercase, `E` for SINGLE and `D` for DOUBLE (`1E+20`, `1D+300`).
 - `TIME$`: Current system time.
 
 ## Memory and Special

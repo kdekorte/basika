@@ -769,6 +769,9 @@ static void set_string_variable(int idx, int array_idx, const char *value);
 static int resolve_token_variable(Token *token);
 static Num evaluate_num_tok(TokenStream *ts);
 static Num evaluate_num_text(const char **input);
+static int round_to_int(double value);
+static int evaluate_int_text(const char **input);
+static int evaluate_int_tok(TokenStream *ts);
 static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out);
 static const char *skip_whitespace_fast(const char *p);
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num);
@@ -1194,6 +1197,17 @@ static __attribute__((noinline)) Num num_overflow(int kind) {
     return num_i(0, kind);
 }
 
+static __attribute__((noinline)) double num_float_overflow(void) {
+    report_runtime_error(ERR_OVERFLOW);
+    return 0;
+}
+
+/* A floating-point result too large for a DOUBLE is an Overflow, as in
+ * QBasic, rather than an infinity. */
+static inline __attribute__((always_inline)) double num_checked_float(double value) {
+    return __builtin_expect(isinf(value), 0) ? num_float_overflow() : value;
+}
+
 /* An INTEGER or LONG result, checked against its range. */
 static inline __attribute__((always_inline)) Num num_small_result(int64_t value, int kind) {
     if (kind == NUM_INTEGER ? (value < -32768 || value > 32767)
@@ -1227,26 +1241,26 @@ NUM_COLD Num num_arith_slow(int op, Num a, Num b) {
         return num_i((int64_t)(op == '+' ? x + y : op == '-' ? x - y : x * y), kind);
     }
     double x = num_to_double(a), y = num_to_double(b);
-    return num_f(op == '+' ? x + y : op == '-' ? x - y : x * y, kind);
+    return num_f(num_checked_float(op == '+' ? x + y : op == '-' ? x - y : x * y), kind);
 }
 
 NUM_HOT Num num_add(Num a, Num b) {
     int kind = a.kind > b.kind ? a.kind : b.kind;
-    if (kind >= NUM_SINGLE) return num_f(num_to_double(a) + num_to_double(b), kind);
+    if (kind >= NUM_SINGLE) return num_f(num_checked_float(num_to_double(a) + num_to_double(b)), kind);
     if (kind <= NUM_LONG) return num_small_result(a.i + b.i, kind);
     return num_arith_slow('+', a, b);
 }
 
 NUM_HOT Num num_subtract(Num a, Num b) {
     int kind = a.kind > b.kind ? a.kind : b.kind;
-    if (kind >= NUM_SINGLE) return num_f(num_to_double(a) - num_to_double(b), kind);
+    if (kind >= NUM_SINGLE) return num_f(num_checked_float(num_to_double(a) - num_to_double(b)), kind);
     if (kind <= NUM_LONG) return num_small_result(a.i - b.i, kind);
     return num_arith_slow('-', a, b);
 }
 
 NUM_HOT Num num_multiply(Num a, Num b) {
     int kind = a.kind > b.kind ? a.kind : b.kind;
-    if (kind >= NUM_SINGLE) return num_f(num_to_double(a) * num_to_double(b), kind);
+    if (kind >= NUM_SINGLE) return num_f(num_checked_float(num_to_double(a) * num_to_double(b)), kind);
     if (kind <= NUM_LONG) return num_small_result(a.i * b.i, kind);
     return num_arith_slow('*', a, b);
 }
@@ -1269,11 +1283,22 @@ static Num num_divide(Num a, Num b) {
         report_runtime_error(ERR_DIVISION_BY_ZERO);
         return num_i(0, NUM_INTEGER);
     }
-    return num_f(num_to_double(a) / right, num_float_kind(a, b));
+    return num_f(num_checked_float(num_to_double(a) / right), num_float_kind(a, b));
 }
 
+/* x ^ y: a negative base needs a whole exponent and 0 ^ -n divides by
+ * zero, as in QBasic. */
 static Num num_power(Num a, Num b) {
-    return num_f(pow(num_to_double(a), num_to_double(b)), num_float_kind(a, b));
+    double base = num_to_double(a), exponent = num_to_double(b);
+    if (base < 0 && exponent != floor(exponent)) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return num_i(0, NUM_INTEGER);
+    }
+    if (base == 0 && exponent < 0) {
+        report_runtime_error(ERR_DIVISION_BY_ZERO);
+        return num_i(0, NUM_INTEGER);
+    }
+    return num_f(num_checked_float(pow(base, exponent)), num_float_kind(a, b));
 }
 
 /* \, MOD and the logical operators work on whole numbers: an integer stays as
@@ -1365,7 +1390,8 @@ static inline __attribute__((always_inline)) int num_compare(Num a, Num b) {
 
 static inline Num num_truth(int condition) { return num_i(condition ? -1 : 0, NUM_INTEGER); }
 
-/* AND, OR, XOR (op '&', '|', '^') and NOT (op '~', b ignored). */
+/* AND, OR, XOR, EQV, IMP (op '&', '|', '^', '=', '>') and NOT (op '~', b
+ * ignored). */
 static Num num_logical(int op, Num a, Num b) {
     int64_t x, y = 0;
     int ka = num_whole_operand(a, &x);
@@ -1376,6 +1402,8 @@ static Num num_logical(int op, Num a, Num b) {
         case '&': return num_i(x & y, kind);
         case '|': return num_i(x | y, kind);
         case '^': return num_i(x ^ y, kind);
+        case '=': return num_i(~(x ^ y), kind);
+        case '>': return num_i(~x | y, kind);
         default: return num_i(~x, kind);
     }
 }
@@ -1478,6 +1506,13 @@ static int num_to_integer_type(Num n, int vt, int64_t *out) {
     return 1;
 }
 
+/* Converts value to integer VarType vt as an expression result (CINT, CLNG). */
+static Num num_convert_integer(Num value, int vt) {
+    int64_t converted;
+    if (!num_to_integer_type(value, vt, &converted)) return num_i(0, var_type_kind[vt]);
+    return num_i(converted, var_type_kind[vt]);
+}
+
 /* Converts n to the variable's type and stores it. Returns 0 on Overflow. */
 static inline __attribute__((always_inline)) int store_num(Variable *v, int array_idx, Num n) {
     int vt = var_type(v);
@@ -1497,7 +1532,14 @@ static inline __attribute__((always_inline)) int store_num(Variable *v, int arra
         return 1;
     }
     double value = num_to_double(n);
-    if (vt == VT_SINGLE) value = (double)(float)value;
+    if (vt == VT_SINGLE) {
+        value = (double)(float)value;
+        // Beyond SINGLE's range (about 3.4E+38) is an Overflow.
+        if (__builtin_expect(isinf(value), 0) && !isinf(num_to_double(n))) {
+            report_runtime_error(ERR_OVERFLOW);
+            return 0;
+        }
+    }
     if (in_array) v->array[array_idx] = value;
     else v->value = value;
     return 1;
@@ -1887,7 +1929,7 @@ static int parse_dynamic_string_expression(const char **input, BasicString *out)
             term_parsed = basic_string_append(out, internal_command_line, strlen(internal_command_line));
         } else if (token.type == TOKEN_ARGVS) {
             Token open = get_next_token(input);
-            int index = (int)evaluate_expression(input);
+            int index = evaluate_int_text(input);
             Token close = get_next_token(input);
             if (open.type == TOKEN_LPAREN && close.type == TOKEN_RPAREN &&
                 index >= 0 && index < internal_argc && internal_argv) {
@@ -1898,7 +1940,7 @@ static int parse_dynamic_string_expression(const char **input, BasicString *out)
         } else if (token.type == TOKEN_STRING_FUNC) {
             Token open = get_next_token(input);
             if (open.type != TOKEN_LPAREN) { *input = saved; break; }
-            int count = (int)evaluate_expression(input);
+            int count = evaluate_int_text(input);
             if (get_next_token(input).type != TOKEN_COMMA) { *input = saved; break; }
             Token value_token = get_next_token(input);
             int character;
@@ -3762,6 +3804,18 @@ static void ensure_array_dimensioned(int idx, int num_dims) {
     arrays_dimensioned = 1;
 }
 
+/* Subscripts are rounded to whole numbers (half to even) like CINT, so
+ * a(1.5) is a(2) as in QBasic. Out-of-range values map to INT_MIN, which
+ * calc_linear_index reports as "Subscript out of range". */
+static int array_subscript(Num value) {
+    if (num_is_int(value)) {
+        if (value.kind == NUM_UINT64 && value.i < 0) return INT_MIN;
+        return value.i >= INT_MIN && value.i <= INT_MAX ? (int)value.i : INT_MIN;
+    }
+    double r = nearbyint(value.d);
+    return r >= INT_MIN && r <= INT_MAX ? (int)r : INT_MIN;
+}
+
 static int parse_array_index(const char **input, int var_idx) {
     const char *saved = *input;
     Token t = get_next_token(input);
@@ -3772,7 +3826,7 @@ static int parse_array_index(const char **input, int var_idx) {
 
     int indices[3] = {0};
     int num_indices = 0;
-    indices[0] = (int)evaluate_expression(input);
+    indices[0] = array_subscript(evaluate_num_text(input));
     num_indices = 1;
 
     while (num_indices < 3) {
@@ -3782,7 +3836,7 @@ static int parse_array_index(const char **input, int var_idx) {
             *input = sep_saved;
             break;
         }
-        indices[num_indices++] = (int)evaluate_expression(input);
+        indices[num_indices++] = array_subscript(evaluate_num_text(input));
     }
 
     Token close = get_next_token(input);
@@ -3806,7 +3860,7 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
         int index_value = 0;
         int simple_index = 0;
         if (index_token->type == TOKEN_NUMBER) {
-            index_value = (int)index_token->double_val;
+            index_value = array_subscript(num_from_token(index_token));
             if (index_token->is_double) last_expression_is_double = 1;
             simple_index = 1;
         } else if (index_token->type == TOKEN_IDENTIFIER && proc_count == 0 &&
@@ -3820,7 +3874,7 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
                 if (name_length > 0 && index_var->name[name_length - 1] == '#') {
                     last_expression_is_double = 1;
                 }
-                index_value = (int)load_double(index_var, -1);
+                index_value = array_subscript(load_num(index_var, -1));
                 simple_index = 1;
             }
         }
@@ -3835,13 +3889,13 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
 
     int indices[3] = {0};
     int num_indices = 0;
-    indices[0] = (int)evaluate_expression_tok(ts);
+    indices[0] = array_subscript(evaluate_num_tok(ts));
     num_indices = 1;
 
     while (num_indices < 3) {
         if (ts->tokens[ts->pos].type != TOKEN_COMMA) break;
         ts->pos++;
-        indices[num_indices++] = (int)evaluate_expression_tok(ts);
+        indices[num_indices++] = array_subscript(evaluate_num_tok(ts));
     }
 
     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
@@ -3919,6 +3973,26 @@ static void basic_string_to_buffer(const BasicString *src, char *out, int out_si
     out[len] = '\0';
 }
 
+/* MKI$, MKL$, MKS$, MKD$: the little-endian bytes of an INTEGER, LONG,
+ * SINGLE or DOUBLE. MKI$ and MKL$ round like CINT and CLNG, and a value
+ * outside the type's range is an Overflow. */
+static void append_number_bytes(BasicString *out, TokenType type, Num value) {
+    unsigned char bytes[8];
+    size_t count;
+    if (type == TOKEN_MKI || type == TOKEN_MKL) {
+        Num whole = num_convert_integer(value, type == TOKEN_MKI ? VT_INTEGER : VT_LONG);
+        count = type == TOKEN_MKI ? 2 : 4;
+        for (size_t i = 0; i < count; i++) bytes[i] = (unsigned char)((uint64_t)whole.i >> (8 * i));
+    } else if (type == TOKEN_MKS) {
+        float single = (float)num_to_double(value);
+        memcpy(bytes, &single, count = 4);
+    } else {
+        double number = num_to_double(value);
+        memcpy(bytes, &number, count = 8);
+    }
+    basic_string_append(out, bytes, count);
+}
+
 static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
     int parsed = 0;
 
@@ -3932,10 +4006,10 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             double arg = evaluate_expression_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (t.type == TOKEN_CHR) {
-                char c = (char)((int)arg & 0xFF);
+                char c = (char)(round_to_int(arg) & 0xFF);
                 basic_string_append(&term, &c, 1);
             } else {
-                int w = (int)arg; if (w < 0) w = 0; if (w >= 255) w = 255;
+                int w = round_to_int(arg); if (w < 0) w = 0; if (w >= 255) w = 255;
                 char *block = malloc((size_t)(w > 0 ? w : 1));
                 if (!block) return 0;
                 memset(block, ' ', (size_t)w);
@@ -3949,11 +4023,11 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             BasicString base = {0};
             if (!parse_string_expression_tok_heap(ts, &base)) return 0;
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
-            int n1 = (int)evaluate_expression_tok(ts);
+            int n1 = evaluate_int_tok(ts);
             int n2 = -1;
             if (ft == TOKEN_MID && ts->tokens[ts->pos].type == TOKEN_COMMA) {
                 ts->pos++;
-                n2 = (int)evaluate_expression_tok(ts);
+                n2 = evaluate_int_tok(ts);
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             int slen = (int)base.length;
@@ -3975,7 +4049,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_SPACE || t.type == TOKEN_SPC) {
             ts->pos++;
             ts->pos++;
-            int n = (int)evaluate_expression_tok(ts);
+            int n = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (n < 0) n = 0;
             char *block = malloc((size_t)(n > 0 ? n : 1));
@@ -3986,7 +4060,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_STRING_FUNC) {
             ts->pos++;
             ts->pos++;
-            int n = (int)evaluate_expression_tok(ts);
+            int n = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             char c = ' ';
             BasicString arg_buf = {0};
@@ -4019,7 +4093,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_ARGVS) {
             ts->pos++;
             ts->pos++;
-            int idx = (int)evaluate_expression_tok(ts);
+            int idx = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (idx >= 0 && idx < internal_argc && internal_argv) {
                 basic_string_append(&term, internal_argv[idx], strlen(internal_argv[idx]));
@@ -4029,11 +4103,11 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             ts->pos++;
             int fnum = -1;
             if (ts->tokens[ts->pos].type == TOKEN_HASH) ts->pos++;
-            fnum = (int)evaluate_expression_tok(ts);
+            fnum = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
-            int rec = (int)evaluate_expression_tok(ts);
+            int rec = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
-            int len = (int)evaluate_expression_tok(ts);
+            int len = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                 report_runtime_error(ERR_BAD_FILE_NUMBER);
@@ -4054,12 +4128,12 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             // INPUT$(n[, [#]file])
             ts->pos++;
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
-            int count = (int)evaluate_expression_tok(ts);
+            int count = evaluate_int_tok(ts);
             int fnum = -1;
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
                 ts->pos++;
                 if (ts->tokens[ts->pos].type == TOKEN_HASH) ts->pos++;
-                fnum = (int)evaluate_expression_tok(ts);
+                fnum = evaluate_int_tok(ts);
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (!read_input_chars(count, fnum, &term)) return 0;
@@ -4137,8 +4211,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
                 char *ev = getenv((const char *)arg_val.data);
                 if (ev) basic_string_append(&term, ev, strlen(ev));
             } else {
-                double val = evaluate_expression_tok(ts);
-                int idx = (int)val;
+                int idx = evaluate_int_tok(ts);
                 extern char **environ;
                 if (environ && idx > 0) {
                     int count = 1;
@@ -4161,27 +4234,12 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             char buf[128];
             format_str_function(val, buf, sizeof(buf));
             basic_string_append(&term, buf, strlen(buf));
-        } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
+        } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKL || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
             ts->pos++;
             ts->pos++;
-            double val = evaluate_expression_tok(ts);
+            Num val = evaluate_num_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-            if (t.type == TOKEN_MKI) {
-                int ival = (int)val;
-                char bytes[3];
-                bytes[0] = (char)(ival & 0xFF); bytes[1] = (char)((ival >> 8) & 0xFF); bytes[2] = '\0';
-                basic_string_append(&term, bytes, 2);
-            } else if (t.type == TOKEN_MKS) {
-                float fval = (float)val;
-                char bytes[5];
-                memcpy(bytes, &fval, 4); bytes[4] = '\0';
-                basic_string_append(&term, bytes, 4);
-            } else {
-                double dval = val;
-                char bytes[9];
-                memcpy(bytes, &dval, 8); bytes[8] = '\0';
-                basic_string_append(&term, bytes, 8);
-            }
+            append_number_bytes(&term, t.type, val);
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
             ts->pos++;
@@ -4268,10 +4326,10 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             double arg = evaluate_expression(input);
             get_next_token(input);
             if (t.type == TOKEN_CHR) {
-                char c = (char)((int)arg & 0xFF);
+                char c = (char)(round_to_int(arg) & 0xFF);
                 basic_string_append(&term, &c, 1);
             } else {
-                int w = (int)arg; if (w < 0) w = 0; if (w >= 255) w = 255;
+                int w = round_to_int(arg); if (w < 0) w = 0; if (w >= 255) w = 255;
                 char *block = malloc((size_t)(w > 0 ? w : 1));
                 if (!block) return 0;
                 memset(block, ' ', (size_t)w);
@@ -4284,11 +4342,11 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             BasicString base = {0};
             if (!parse_string_expression_heap(input, &base)) return 0;
             get_next_token(input);
-            int n1 = (int)evaluate_expression(input);
+            int n1 = evaluate_int_text(input);
             int n2 = -1;
             if (ft == TOKEN_MID) {
                 const char *comma_saved = *input;
-                if (get_next_token(input).type == TOKEN_COMMA) n2 = (int)evaluate_expression(input);
+                if (get_next_token(input).type == TOKEN_COMMA) n2 = evaluate_int_text(input);
                 else *input = comma_saved;
             }
             get_next_token(input);
@@ -4310,7 +4368,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             basic_string_release(&base);
         } else if (t.type == TOKEN_SPACE || t.type == TOKEN_SPC) {
             get_next_token(input);
-            int n = (int)evaluate_expression(input);
+            int n = evaluate_int_text(input);
             get_next_token(input);
             if (n < 0) n = 0;
             char *block = malloc((size_t)(n > 0 ? n : 1));
@@ -4320,7 +4378,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             free(block);
         } else if (t.type == TOKEN_STRING_FUNC) {
             get_next_token(input);
-            int n = (int)evaluate_expression(input);
+            int n = evaluate_int_text(input);
             get_next_token(input);
             char c = ' ';
             BasicString arg_buf = {0};
@@ -4360,7 +4418,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             basic_string_append(&term, internal_command_line, strlen(internal_command_line));
         } else if (t.type == TOKEN_ARGVS) {
             get_next_token(input);
-            int idx = (int)evaluate_expression(input);
+            int idx = evaluate_int_text(input);
             get_next_token(input);
             if (idx >= 0 && idx < internal_argc && internal_argv) {
                 basic_string_append(&term, internal_argv[idx], strlen(internal_argv[idx]));
@@ -4371,15 +4429,15 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             const char *saved_num = *input;
             Token hash_tok = get_next_token(input);
             if (hash_tok.type == TOKEN_HASH) {
-                fnum = (int)evaluate_expression(input);
+                fnum = evaluate_int_text(input);
             } else {
                 *input = saved_num;
-                fnum = (int)evaluate_expression(input);
+                fnum = evaluate_int_text(input);
             }
             get_next_token(input);
-            int rec = (int)evaluate_expression(input);
+            int rec = evaluate_int_text(input);
             get_next_token(input);
-            int len = (int)evaluate_expression(input);
+            int len = evaluate_int_text(input);
             get_next_token(input);
             if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                 report_runtime_error(ERR_BAD_FILE_NUMBER);
@@ -4399,13 +4457,13 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
         } else if (t.type == TOKEN_INPUTS) {
             // INPUT$(n[, [#]file])
             get_next_token(input);
-            int count = (int)evaluate_expression(input);
+            int count = evaluate_int_text(input);
             int fnum = -1;
             const char *saved = *input;
             if (get_next_token(input).type == TOKEN_COMMA) {
                 const char *hash_saved = *input;
                 if (get_next_token(input).type != TOKEN_HASH) *input = hash_saved;
-                fnum = (int)evaluate_expression(input);
+                fnum = evaluate_int_text(input);
                 saved = *input;
             }
             *input = saved;
@@ -4500,26 +4558,11 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             char buf[128];
             format_str_function(val, buf, sizeof(buf));
             basic_string_append(&term, buf, strlen(buf));
-        } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
+        } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKL || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
             get_next_token(input);
-            double val = evaluate_expression(input);
+            Num val = evaluate_num_text(input);
             get_next_token(input);
-            if (t.type == TOKEN_MKI) {
-                int ival = (int)val;
-                char bytes[3];
-                bytes[0] = (char)(ival & 0xFF); bytes[1] = (char)((ival >> 8) & 0xFF); bytes[2] = '\0';
-                basic_string_append(&term, bytes, 2);
-            } else if (t.type == TOKEN_MKS) {
-                float fval = (float)val;
-                char bytes[5];
-                memcpy(bytes, &fval, 4); bytes[4] = '\0';
-                basic_string_append(&term, bytes, 4);
-            } else {
-                double dval = val;
-                char bytes[9];
-                memcpy(bytes, &dval, 8); bytes[8] = '\0';
-                basic_string_append(&term, bytes, 8);
-            }
+            append_number_bytes(&term, t.type, val);
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
         } else if (t.type == TOKEN_IDENTIFIER) {
@@ -4729,9 +4772,24 @@ static int is_numeric_input(const char *text) {
 
 /* Formats a number the way PRINT does, without the surrounding spaces
  * (used by WRITE and STR$-style output). */
+/* Formats a number as QBasic does: no leading zero before the point (.5,
+ * -.25) and an uppercase exponent, E for SINGLE and D for DOUBLE (1E+20). */
 static void format_number_plain(Num value, int is_double, char *out, size_t size) {
-    if (num_is_int(value)) format_num_integer(value, out, size);
-    else snprintf(out, size, "%.*g", is_double ? 16 : 7, value.d);
+    if (num_is_int(value)) {
+        format_num_integer(value, out, size);
+        return;
+    }
+    char digits[64];
+    snprintf(digits, sizeof(digits), "%.*g", is_double ? 16 : 7, value.d);
+    const char *p = digits;
+    size_t n = 0;
+    if (*p == '-') {
+        if (n + 1 < size) out[n++] = '-';
+        p++;
+    }
+    if (p[0] == '0' && p[1] == '.') p++;
+    for (; *p && n + 1 < size; p++) out[n++] = *p == 'e' ? (is_double ? 'D' : 'E') : *p;
+    out[n] = '\0';
 }
 
 static void format_str_function(Num value, char *buf, size_t size) {
@@ -4751,7 +4809,7 @@ static void apply_basika_using(const char *fmt, double val, char *out, int out_s
         else if (fmt[i] == '.') has_dot = 1;
     }
     if (has_dot) snprintf(out, out_size, "%*.*f", hashes_before + hashes_after + 1, hashes_after, val);
-    else if (hashes_before > 0) snprintf(out, out_size, "%*d", hashes_before, (int)val);
+    else if (hashes_before > 0) snprintf(out, out_size, "%*.0f", hashes_before, val); // rounds, like %.Nf above
     else snprintf(out, out_size, "%g", val);
 }
 
@@ -5613,7 +5671,7 @@ static int is_string_token(const Token *t) {
             t->type == TOKEN_MID || t->type == TOKEN_UCASE || t->type == TOKEN_LCASE ||
             t->type == TOKEN_TRIM || t->type == TOKEN_LTRIM || t->type == TOKEN_RTRIM ||
             t->type == TOKEN_STR || t->type == TOKEN_HEX || t->type == TOKEN_OCT ||
-            t->type == TOKEN_MKI || t->type == TOKEN_MKS || t->type == TOKEN_MKD ||
+            t->type == TOKEN_MKI || t->type == TOKEN_MKL || t->type == TOKEN_MKS || t->type == TOKEN_MKD ||
             t->type == TOKEN_STRING_FUNC || t->type == TOKEN_DEFLATE || t->type == TOKEN_INFLATE || t->type == TOKEN_INKEY || t->type == TOKEN_INPUTS || t->type == TOKEN_GETS || t->type == TOKEN_ENVIRON ||
             t->type == TOKEN_TIME || t->type == TOKEN_DATE || t->type == TOKEN_TAB ||
             t->type == TOKEN_SPACE || t->type == TOKEN_SPC ||
@@ -5993,6 +6051,24 @@ static void scan_procedures(void) {
     }
 }
 
+/* An argument written name() is a whole array. Returns 1 and consumes it,
+ * setting *var_idx to the array's variable. Record arrays are bound by the
+ * user-type code instead. */
+static int array_argument_tok(TokenStream *ts, const ProcParamDef *pdef, int *var_idx) {
+    Token *name = &ts->tokens[ts->pos];
+    if (name->type != TOKEN_IDENTIFIER || pdef->user_type_index >= 0 ||
+        ts->tokens[ts->pos + 1].type != TOKEN_LPAREN || ts->tokens[ts->pos + 2].type != TOKEN_RPAREN ||
+        is_function_name(name->text)) {
+        return 0;
+    }
+    TokenType after = ts->tokens[ts->pos + 3].type;
+    if (after != TOKEN_COMMA && after != TOKEN_RPAREN && after != TOKEN_COLON && after != TOKEN_EOF) return 0;
+    *var_idx = resolve_token_variable(name);
+    if (*var_idx < 0) return 0;
+    ts->pos += 3;
+    return 1;
+}
+
 static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statement *exec_stmt) {
     if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
@@ -6033,7 +6109,13 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
                            ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || 
                            ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
-        if (is_var_id && next_is_sep) {
+        int array_var_idx;
+        if (array_argument_tok(ts, pdef, &array_var_idx)) {
+            // name() passes the whole array by reference.
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(array_var_idx);
+            frame->byref_caller_var_idx[arg_idx] = array_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+        } else if (is_var_id && next_is_sep) {
             int c_var_idx;
             if (pdef->user_type_index >= 0) {
                 c_var_idx = find_variable_raw_name(t_arg.text);
@@ -6833,7 +6915,13 @@ static Num evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts) {
             !is_function_name(t_arg.text);
         int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
-        if (is_var_id && next_is_sep) {
+        int array_var_idx;
+        if (array_argument_tok(ts, pdef, &array_var_idx)) {
+            // name() passes the whole array by reference.
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(array_var_idx);
+            frame->byref_caller_var_idx[arg_idx] = array_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+        } else if (is_var_id && next_is_sep) {
             int c_var_idx = pdef->user_type_index >= 0
                 ? find_variable_raw_name(t_arg.text)
                 : resolve_token_variable(&ts->tokens[ts->pos]);
@@ -6930,7 +7018,13 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
             !is_function_name(t_arg.text);
         int next_is_sep = (ts->tokens[ts->pos + 1].type == TOKEN_COMMA || ts->tokens[ts->pos + 1].type == TOKEN_RPAREN || ts->tokens[ts->pos + 1].type == TOKEN_COLON);
 
-        if (is_var_id && next_is_sep) {
+        int array_var_idx;
+        if (array_argument_tok(ts, pdef, &array_var_idx)) {
+            // name() passes the whole array by reference.
+            frame->byref_caller_variable[arg_idx] = get_variable_ptr(array_var_idx);
+            frame->byref_caller_var_idx[arg_idx] = array_var_idx;
+            frame->byref_caller_frame[arg_idx] = call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
+        } else if (is_var_id && next_is_sep) {
             int c_var_idx = pdef->user_type_index >= 0
                 ? find_variable_raw_name(t_arg.text)
                 : resolve_token_variable(&ts->tokens[ts->pos]);
@@ -7031,7 +7125,7 @@ static int qb64_function_id(const char *name) {
 static int clamp_color_channel(double value) {
     if (value < 0) return 0;
     if (value > 255) return 255;
-    return (int)value;
+    return (int)lround(value);
 }
 
 static double qb64_function_value(int id, const double *args, int argc) {
@@ -7090,20 +7184,20 @@ static double qb64_function_value(int id, const double *args, int argc) {
         case QB64_FN_HEIGHT: {
             // _WIDTH/_HEIGHT[(handle)]: of the current destination, or of an image.
             if (!graphics_is_active()) return id == QB64_FN_WIDTH ? 80 : 25;
-            int size = graphics_image_size(argc >= 1 ? (int)args[0] : 1, id == QB64_FN_HEIGHT);
+            int size = graphics_image_size(argc >= 1 ? round_to_int(args[0]) : 1, id == QB64_FN_HEIGHT);
             if (size < 0) break;
             return size;
         }
         case QB64_FN_COPYIMAGE: {
             if (!graphics_is_active()) init_graphics();
-            int handle = graphics_copyimage(argc >= 1 ? (int)args[0] : graphics_get_source());
-            if (handle == -1 && argc >= 1 && !graphics_valid_handle((int)args[0])) break;
+            int handle = graphics_copyimage(argc >= 1 ? round_to_int(args[0]) : graphics_get_source());
+            if (handle == -1 && argc >= 1 && !graphics_valid_handle(round_to_int(args[0]))) break;
             return handle;
         }
         // Keyboard and mouse state comes from the window; without one it reads as idle.
         case QB64_FN_KEYDOWN:
             if (argc != 1) break;
-            return graphics_is_active() && graphics_keydown((int)args[0]) ? -1 : 0;
+            return graphics_is_active() && graphics_keydown(round_to_int(args[0])) ? -1 : 0;
         case QB64_FN_KEYHIT:
             return graphics_is_active() ? graphics_keyhit() : 0;
         case QB64_FN_MOUSEX:
@@ -7112,7 +7206,7 @@ static double qb64_function_value(int id, const double *args, int argc) {
             return graphics_is_active() ? graphics_mouse_y() : 0;
         case QB64_FN_MOUSEBUTTON:
             if (argc != 1) break;
-            return graphics_is_active() ? graphics_mouse_button((int)args[0]) : 0;
+            return graphics_is_active() ? graphics_mouse_button(round_to_int(args[0])) : 0;
         case QB64_FN_MOUSEINPUT:
             return graphics_is_active() ? graphics_mouse_input() : 0;
         case QB64_FN_MOUSEWHEEL:
@@ -7139,13 +7233,6 @@ static double graphics_cursor_query(int n) {
  * several pages and a stack probe on every call. */
 static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, Token *token);
 
-/* Converts value to integer VarType vt as an expression result (CINT, CLNG). */
-static Num num_convert_integer(Num value, int vt) {
-    int64_t converted;
-    if (!num_to_integer_type(value, vt, &converted)) return num_i(0, var_type_kind[vt]);
-    return num_i(converted, var_type_kind[vt]);
-}
-
 /* Reads the parenthesized argument of a one-argument function. */
 static int function_argument_tok(TokenStream *ts, Num *argument) {
     if (ts->tokens[ts->pos].type != TOKEN_LPAREN) return 0;
@@ -7153,6 +7240,39 @@ static int function_argument_tok(TokenStream *ts, Num *argument) {
     *argument = evaluate_num_tok(ts);
     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
     return 1;
+}
+
+/* LBOUND(array[, dimension]) and UBOUND(array[, dimension]); an array that
+ * is not dimensioned, or a dimension it does not have, is "Subscript out of
+ * range". */
+static Num array_bound_tok(TokenStream *ts, TokenType which) {
+    if (ts->tokens[ts->pos].type != TOKEN_LPAREN || ts->tokens[ts->pos + 1].type != TOKEN_IDENTIFIER) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return num_i(0, NUM_INTEGER);
+    }
+    ts->pos++;
+    Token *name = &ts->tokens[ts->pos++];
+    Variable *array = NULL;
+    UserTypeInstance record;
+    int record_index = user_type_count > 0 ? find_existing_variable_raw_name(name->text) : -1;
+    if (record_index >= 0 && get_user_type_instance_for_root(record_index, &record)) {
+        array = get_variable_ptr(record_index);
+    } else {
+        int index = resolve_token_variable(name);
+        array = index >= 0 ? get_variable_ptr(index) : NULL;
+    }
+    int dimension = 1;
+    if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+        ts->pos++;
+        dimension = array_subscript(evaluate_num_tok(ts));
+    }
+    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+    if (!array || dimension < 1 || dimension > array->num_dims) {
+        report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
+        return num_i(0, NUM_INTEGER);
+    }
+    int bound = which == TOKEN_LBOUND ? array->lower_bounds[dimension - 1] : array->dims[dimension - 1];
+    return num_i(bound, bound >= -32768 && bound <= 32767 ? NUM_INTEGER : NUM_LONG);
 }
 
 static Num primary_tok(TokenStream *ts) {
@@ -7205,7 +7325,7 @@ static Num primary_tok(TokenStream *ts) {
                     return num_d(graphics_point(x, y));
                 } else {
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                    return num_d(graphics_cursor_query((int)x));
+                    return num_d(graphics_cursor_query(round_to_int(x)));
                 }
             }
             return num_i(0, NUM_INTEGER);
@@ -7286,6 +7406,8 @@ static Num primary_tok(TokenStream *ts) {
         return val;
     }
 
+    if (token->type == TOKEN_LBOUND || token->type == TOKEN_UBOUND) return array_bound_tok(ts, token->type);
+
     Num argument;
     switch (token->type) {
         case TOKEN_CINT:
@@ -7329,7 +7451,24 @@ static Num primary_tok(TokenStream *ts) {
         default:
             break;
     }
-    return num_d(builtin_function_tok(ts, token));
+    double result = builtin_function_tok(ts, token);
+    switch (token->type) {
+        // Functions with whole-number results return integers, so LOF of a
+        // large file or CVL prints every digit.
+        case TOKEN_CVI:
+            return num_i((int64_t)result, NUM_INTEGER);
+        case TOKEN_CVL: case TOKEN_LEN: case TOKEN_ASC: case TOKEN_INSTR: case TOKEN_LOF:
+        case TOKEN_LOC: case TOKEN_EOF_FUNC: case TOKEN_PEEK: case TOKEN_VARPTR:
+        case TOKEN_PRINTWIDTH:
+            if (result == trunc(result) && fabs(result) < 9.2e18) {
+                int64_t whole = (int64_t)result;
+                return num_i(whole, whole >= INT32_MIN && whole <= INT32_MAX ? NUM_LONG : NUM_INT64);
+            }
+            break;
+        default:
+            break;
+    }
+    return num_d(result);
 }
 
 static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, Token *token) {
@@ -7340,7 +7479,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
             char buf[BASIC_STRING_MAX] = "";
             parse_string_expression_tok(ts, buf, sizeof(buf));
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
-            int size = (int)evaluate_expression_tok(ts);
+            int size = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (!graphics_is_active()) init_graphics();
             fprintf(stderr, "DEBUG _LOADFONT: buf='%s' size=%d\n", buf, size);
@@ -7370,7 +7509,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
             return 0;
         }
         if (!graphics_is_active()) init_graphics();
-        int handle = graphics_newimage((int)args[0], (int)args[1], (int)args[2]);
+        int handle = graphics_newimage(round_to_int(args[0]), round_to_int(args[1]), round_to_int(args[2]));
         if (handle == -1) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
         return handle;
     }
@@ -7383,7 +7522,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
             int mode = 32;
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
                 ts->pos++;
-                mode = (int)evaluate_expression_tok(ts);
+                mode = evaluate_int_tok(ts);
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (!graphics_is_active()) init_graphics();
@@ -7391,7 +7530,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
         }
          return 0;
      }
-     if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_PEN || token->type == TOKEN_STICK || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
+     if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_PEN || token->type == TOKEN_STICK || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVL || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
         TokenType ft = token->type;
         int has_arg = 0;
         double arg = 0;
@@ -7413,7 +7552,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 if (array_idx >= 0) return 61440.0 + var_idx * 256.0 + array_idx;
                 return 61440.0 + var_idx * 256.0;
             }
-            if (ft == TOKEN_CVI || ft == TOKEN_CVS || ft == TOKEN_CVD) {
+            if (ft == TOKEN_CVI || ft == TOKEN_CVL || ft == TOKEN_CVS || ft == TOKEN_CVD) {
                 char buf[BASIC_STRING_MAX] = "";
                 int len = 0;
                 Token *arg_token = &ts->tokens[ts->pos];
@@ -7432,6 +7571,11 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 if (ft == TOKEN_CVI) {
                     int16_t val = 0;
                     int cpy = (len > 2) ? 2 : len;
+                    if (cpy > 0) memcpy(&val, buf, (size_t)cpy);
+                    return (double)val;
+                } else if (ft == TOKEN_CVL) {
+                    int32_t val = 0;
+                    int cpy = (len > 4) ? 4 : len;
                     if (cpy > 0) memcpy(&val, buf, (size_t)cpy);
                     return (double)val;
                 } else if (ft == TOKEN_CVS) {
@@ -7472,7 +7616,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 int start = 1;
                 Token next = ts->tokens[ts->pos];
                 if (next.type != TOKEN_STRING && next.type != TOKEN_IDENTIFIER) {
-                    start = (int)evaluate_expression_tok(ts);
+                    start = evaluate_int_tok(ts);
                     ts->pos++; // comma
                 }
                 parse_string_expression_tok(ts, s1, sizeof(s1));
@@ -7489,18 +7633,29 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
 
         switch (ft) {
             case TOKEN_ABS: return fabs(arg);
-            case TOKEN_SQR: return sqrt(arg);
+            case TOKEN_SQR:
+                // QBasic has no NaN: an invalid argument is an error.
+                if (arg < 0) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return 0;
+                }
+                return sqrt(arg);
             case TOKEN_SIN: return sin(arg);
             case TOKEN_COS: return cos(arg);
             case TOKEN_TAN: return tan(arg);
             case TOKEN_ATN: return atan(arg);
-            case TOKEN_EXP: return exp(arg);
-            case TOKEN_LOG: return log(arg);
+            case TOKEN_EXP: return num_checked_float(exp(arg));
+            case TOKEN_LOG:
+                if (arg <= 0) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return 0;
+                }
+                return log(arg);
             case TOKEN_INT: return floor(arg);
             case TOKEN_FIX: return (arg >= 0) ? floor(arg) : ceil(arg);
             case TOKEN_SGN: return (arg > 0) - (arg < 0);
             case TOKEN_EOF_FUNC: {
-                int fnum = (int)arg;
+                int fnum = round_to_int(arg);
                 if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return 0;
@@ -7511,7 +7666,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 return 0;
             }
             case TOKEN_LOF: {
-                int fnum = (int)arg;
+                int fnum = round_to_int(arg);
                 if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return 0;
@@ -7523,7 +7678,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 return (double)size;
             }
             case TOKEN_LOC: {
-                int fnum = (int)arg;
+                int fnum = round_to_int(arg);
                 if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return 0;
@@ -7541,15 +7696,15 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
                     return 0;
                 }
-                return graphics_is_active() ? graphics_pen((int)arg) : 0;
+                return graphics_is_active() ? graphics_pen(round_to_int(arg)) : 0;
             case TOKEN_STICK:
                 if (arg < 0 || arg > 3) {
                     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
                     return 0;
                 }
-                return graphics_is_active() ? graphics_stick((int)arg) : 0;
+                return graphics_is_active() ? graphics_stick(round_to_int(arg)) : 0;
             case TOKEN_STRIG: {
-                int s = (int)arg;
+                int s = round_to_int(arg);
                 if (s >= 0 && s < 8) {
                     if (s % 2 == 0) {
                         double val = strig_button_pressed_since[s] ? -1.0 : 0.0;
@@ -7562,7 +7717,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 return 0;
             }
             case TOKEN_PEEK: {
-                int addr = (int)arg;
+                int addr = round_to_int(arg);
                 if (addr < 0 || addr >= 65536) return 0;
                 return basika_memory[addr];
             }
@@ -7581,7 +7736,8 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
 }
 
 /* Operator precedence follows QBasic, from tightest to loosest: ^ (left to
- * right), negation, * and /, \, MOD, + and -, relations, NOT, AND, OR, XOR. */
+ * right), negation, * and /, \, MOD, + and -, relations, NOT, AND, OR, XOR,
+ * EQV, IMP. */
 static Num unary_tok(TokenStream *ts);
 
 static Num power_tok(TokenStream *ts) {
@@ -7785,6 +7941,25 @@ static Num bitwise_or_tok(TokenStream *ts) {
  * small stack keeps the frame under a page, avoiding a stack probe per call. */
 #define CACHED_EXPRESSION_STACK 64
 
+static Num exclusive_or_tok(TokenStream *ts) {
+    Num val = bitwise_or_tok(ts);
+    while (ts->tokens[ts->pos].type == TOKEN_XOR) {
+        ts->pos++;
+        val = num_logical('^', val, bitwise_or_tok(ts));
+    }
+    return val;
+}
+
+/* EQV and then IMP bind loosest of all, as in QBasic. */
+static Num equivalence_tok(TokenStream *ts) {
+    Num val = exclusive_or_tok(ts);
+    while (ts->tokens[ts->pos].type == TOKEN_EQV) {
+        ts->pos++;
+        val = num_logical('=', val, exclusive_or_tok(ts));
+    }
+    return val;
+}
+
 static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expression, Num *result) {
     Num values[CACHED_EXPRESSION_STACK];
     int stack_size = 0;
@@ -7864,10 +8039,10 @@ static Num evaluate_num_tok(TokenStream *ts) {
         }
     }
 
-    Num val = bitwise_or_tok(ts);
-    while (ts->tokens[ts->pos].type == TOKEN_XOR) {
+    Num val = equivalence_tok(ts);
+    while (ts->tokens[ts->pos].type == TOKEN_IMP) {
         ts->pos++;
-        val = num_logical('^', val, bitwise_or_tok(ts));
+        val = num_logical('>', val, equivalence_tok(ts));
     }
     return val;
 }
@@ -7932,6 +8107,24 @@ static Num evaluate_num_text(const char **input) {
 
 double evaluate_expression(const char **input) {
     return num_to_double(evaluate_num_text(input));
+}
+
+/* QBasic converts numeric arguments that must be whole numbers (string
+ * positions, CHR$ codes, file numbers, LOCATE rows, ...) by rounding half
+ * to even, like CINT, rather than truncating. */
+static int round_to_int(double value) {
+    double r = nearbyint(value);
+    if (!(r > INT_MIN)) return INT_MIN; // also NaN
+    if (r > INT_MAX) return INT_MAX;
+    return (int)r;
+}
+
+static int evaluate_int_text(const char **input) {
+    return round_to_int(evaluate_expression(input));
+}
+
+static int evaluate_int_tok(TokenStream *ts) {
+    return round_to_int(evaluate_expression_tok(ts));
 }
 
 static void interpret_statement_text(Statement *stmt, const char **ptr) {
@@ -8321,7 +8514,7 @@ static int execute_editor_command(const char *line) {
         int values[3] = {10, 0, 10};
         int index = 0;
         while (index < 3) {
-            if (graphics_arg_present(&ptr)) values[index] = (int)evaluate_expression(&ptr);
+            if (graphics_arg_present(&ptr)) values[index] = evaluate_int_text(&ptr);
             index++;
             if (!next_graphics_comma(&ptr)) break;
         }
@@ -8332,8 +8525,8 @@ static int execute_editor_command(const char *line) {
         renumber_program(values[0], values[1], values[2]);
     } else if (strcasecmp(command.text, "AUTO") == 0) {
         int start = 10, increment = 10;
-        if (graphics_arg_present(&ptr)) start = (int)evaluate_expression(&ptr);
-        if (next_graphics_comma(&ptr)) increment = (int)evaluate_expression(&ptr);
+        if (graphics_arg_present(&ptr)) start = evaluate_int_text(&ptr);
+        if (next_graphics_comma(&ptr)) increment = evaluate_int_text(&ptr);
         if (start < 0 || increment < 1) {
             report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             return 1;
@@ -8599,7 +8792,7 @@ static int load_program_file(const char *path) {
 static void execute_lock(const char **ptr, int locking) {
     const char *saved = *ptr;
     if (get_next_token(ptr).type != TOKEN_HASH) *ptr = saved;
-    int fnum = (int)evaluate_expression(ptr);
+    int fnum = evaluate_int_text(ptr);
     if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
         report_runtime_error(ERR_BAD_FILE_NUMBER);
         return;
@@ -8750,7 +8943,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             const char *saved_key = ptr;
             Token first = get_next_token(&ptr);
             if (first.type == TOKEN_LPAREN) {
-                int k = (int)evaluate_expression(&ptr);
+                int k = evaluate_int_text(&ptr);
                 Token rparen = get_next_token(&ptr);
                 if (rparen.type == TOKEN_RPAREN) {
                     Token mode = get_next_token(&ptr);
@@ -8829,7 +9022,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             Token first = get_next_token(&check_ptr);
             if (first.type == TOKEN_HASH) {
                 ptr = check_ptr;
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return;
@@ -8976,15 +9169,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 execute_statements(cont_stmt, cont_resume_ptr, cont_resume_ts_pos);
             }
         } else if (t.type == TOKEN_WAIT) {
-            int port = (int)evaluate_expression(&ptr);
+            int port = evaluate_int_text(&ptr);
             int and_mask = 0, xor_mask = 0;
             if (get_next_token(&ptr).type != TOKEN_COMMA) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
             }
-            and_mask = (int)evaluate_expression(&ptr);
+            and_mask = evaluate_int_text(&ptr);
             const char *saved = ptr;
-            if (get_next_token(&ptr).type == TOKEN_COMMA) xor_mask = (int)evaluate_expression(&ptr);
+            if (get_next_token(&ptr).type == TOKEN_COMMA) xor_mask = evaluate_int_text(&ptr);
             else ptr = saved;
             if (port < 0 || port > 65535 || and_mask < 0 || and_mask > 255 || xor_mask < 0 || xor_mask > 255) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
@@ -9000,7 +9193,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         } else if (t.type == TOKEN_DEST || t.type == TOKEN_SOURCE) {
             // _DEST handle / _SOURCE handle (0 is the screen)
             if (!graphics_is_active()) init_graphics();
-            int handle = (int)evaluate_expression(&ptr);
+            int handle = evaluate_int_text(&ptr);
             int ok = t.type == TOKEN_DEST ? graphics_set_dest(handle) : graphics_set_source(handle);
             if (!ok) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
         } else if (t.type == TOKEN_TITLE) {
@@ -9010,12 +9203,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             if (graphics_is_active()) set_window_title(title);
         } else if (t.type == TOKEN_PCOPY) {
             // PCOPY source_page, destination_page
-            int source = (int)evaluate_expression(&ptr);
+            int source = evaluate_int_text(&ptr);
             if (!next_graphics_comma(&ptr)) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
             }
-            int destination = (int)evaluate_expression(&ptr);
+            int destination = evaluate_int_text(&ptr);
             if (!graphics_is_active() || !graphics_copy_page(source, destination)) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
@@ -9047,12 +9240,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 if (!graphics_set_palette(size, attributes, values)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             } else {
-                int attribute = (int)evaluate_expression(&ptr);
+                int attribute = evaluate_int_text(&ptr);
                 if (!next_graphics_comma(&ptr)) {
                     report_runtime_error(ERR_SYNTAX_ERROR);
                     return;
                 }
-                long value = (long)evaluate_expression(&ptr);
+                long value = (long)nearbyint(evaluate_expression(&ptr));
                 if (!graphics_set_palette(1, &attribute, &value)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else if (t.type == TOKEN_CLEAR) {
@@ -9074,7 +9267,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 (first.type == TOKEN_IDENTIFIER && strcasecmp(first.text, "LPRINT") == 0)) {
                 // File and device widths are accepted; output is not wrapped.
                 if (first.type == TOKEN_HASH) {
-                    int fnum = (int)evaluate_expression(&ptr);
+                    int fnum = evaluate_int_text(&ptr);
                     if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                         report_runtime_error(ERR_BAD_FILE_NUMBER);
                         return;
@@ -9083,13 +9276,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 } else if (first.type == TOKEN_STRING) {
                     next_graphics_comma(&ptr);
                 }
-                int width = (int)evaluate_expression(&ptr);
+                int width = evaluate_int_text(&ptr);
                 if (width < 1 || width > 255) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             } else {
                 ptr = saved;
                 int columns = graphics_get_text_cols(), rows = graphics_get_text_rows();
-                if (graphics_arg_present(&ptr)) columns = (int)evaluate_expression(&ptr);
-                if (next_graphics_comma(&ptr)) rows = (int)evaluate_expression(&ptr);
+                if (graphics_arg_present(&ptr)) columns = evaluate_int_text(&ptr);
+                if (next_graphics_comma(&ptr)) rows = evaluate_int_text(&ptr);
                 if ((columns != 40 && columns != 80) ||
                     (rows != 25 && rows != 30 && rows != 43 && rows != 50 && rows != 60)) {
                     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
@@ -9293,10 +9486,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 putenv(strdup(cmd));
             }
         } else if (t.type == TOKEN_POKE) {
-            int addr = (int)evaluate_expression(&ptr);
+            int addr = evaluate_int_text(&ptr);
             const char *saved_comma = ptr;
             if (get_next_token(&ptr).type == TOKEN_COMMA) {
-                int val = (int)evaluate_expression(&ptr);
+                int val = evaluate_int_text(&ptr);
                 // Ensure address is within bounds before poking
                 if (addr >= 0 && addr < 65536) basika_memory[addr] = (unsigned char)(val & 0xFF);
             } else {
@@ -9381,14 +9574,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 const char *hash_saved = ptr;
                 if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 if (get_next_token(&ptr).type != TOKEN_COMMA) {
                     report_runtime_error(ERR_SYNTAX_ERROR);
                     return;
                 }
                 parse_string_expression(&ptr, path_buf, sizeof(path_buf));
                 saved = ptr;
-                if (get_next_token(&ptr).type == TOKEN_COMMA) reclen = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type == TOKEN_COMMA) reclen = evaluate_int_text(&ptr);
                 else ptr = saved;
             } else {
                 snprintf(path_buf, sizeof(path_buf), "%s", first);
@@ -9418,10 +9611,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 const char *hash_saved = ptr;
                 if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 saved = ptr;
                 if (get_next_token(&ptr).type == TOKEN_LEN && get_next_token(&ptr).type == TOKEN_EQUALS) {
-                    reclen = (int)evaluate_expression(&ptr);
+                    reclen = evaluate_int_text(&ptr);
                 } else {
                     ptr = saved;
                 }
@@ -9461,7 +9654,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
             }
-            int fnum = (int)evaluate_expression(&ptr);
+            int fnum = evaluate_int_text(&ptr);
             if (get_next_token(&ptr).type != TOKEN_COMMA) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
@@ -9481,7 +9674,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     return;
                 }
 
-                int seg_len = (int)evaluate_expression(&ptr);
+                int seg_len = evaluate_int_text(&ptr);
                 if (seg_len < 0) {
                     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
                     return;
@@ -9556,7 +9749,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 do {
                     const char *hash_saved = ptr;
                     if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
-                    close_file_number((int)evaluate_expression(&ptr));
+                    close_file_number(evaluate_int_text(&ptr));
                 } while (next_graphics_comma(&ptr));
             }
         } else if (t.type == TOKEN_KILL) {
@@ -9785,7 +9978,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             Token hash = get_next_token(&ptr);
             int fnum = -1;
             if (hash.type == TOKEN_HASH) {
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 const char *comma_ptr = ptr;
                 Token sep = get_next_token(&comma_ptr);
                 if (sep.type == TOKEN_COMMA) ptr = comma_ptr;
@@ -9909,13 +10102,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 if (get_next_token(&ptr).type == TOKEN_LPAREN) {
                     int closed = 0;
                     while (num_dims < 3) {
-                        int first = (int)evaluate_expression(&ptr);
+                        int first = array_subscript(evaluate_num_text(&ptr));
                         int lower = option_base;
                         int upper = first;
                         const char *to_saved = ptr;
                         if (get_next_token(&ptr).type == TOKEN_TO) {
                             lower = first;
-                            upper = (int)evaluate_expression(&ptr);
+                            upper = array_subscript(evaluate_num_text(&ptr));
                         } else {
                             ptr = to_saved;
                         }
@@ -10123,7 +10316,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             int fnum = -1;
             saved = ptr;
             if (get_next_token(&ptr).type == TOKEN_HASH) {
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 if (get_next_token(&ptr).type != TOKEN_COMMA) {
                     report_runtime_error(ERR_SYNTAX_ERROR);
                     return;
@@ -10147,7 +10340,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             int fnum = -1;
             const char *saved = ptr;
             if (get_next_token(&ptr).type == TOKEN_HASH) {
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return;
@@ -10351,15 +10544,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             if (nxt.type == TOKEN_NEWIMAGE) {
                 Token lparen = get_next_token(&ptr);
                 if (lparen.type == TOKEN_LPAREN) {
-                    int w = (int)evaluate_expression(&ptr);
+                    int w = evaluate_int_text(&ptr);
                     Token comma1 = get_next_token(&ptr);
                     if (comma1.type == TOKEN_COMMA) {
-                        int h = (int)evaluate_expression(&ptr);
+                        int h = evaluate_int_text(&ptr);
                         int colors = 256;
                         const char *saved_comma2 = ptr;
                         Token comma2 = get_next_token(&ptr);
                         if (comma2.type == TOKEN_COMMA) {
-                            colors = (int)evaluate_expression(&ptr);
+                            colors = evaluate_int_text(&ptr);
                             Token rparen = get_next_token(&ptr);
                             (void)rparen;
                         } else if (comma2.type == TOKEN_RPAREN) {
@@ -10385,12 +10578,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 ptr = saved_screen;
                 init_graphics();
                 int mode = current_screen_mode;
-                if (graphics_arg_present(&ptr)) mode = (int)evaluate_expression(&ptr);
+                if (graphics_arg_present(&ptr)) mode = evaluate_int_text(&ptr);
                 int args[3] = {0, 0, 0};
                 int has_arg[3] = {0, 0, 0};
                 for (int a = 0; a < 3 && next_graphics_comma(&ptr); a++) {
                     if (graphics_arg_present(&ptr)) {
-                        args[a] = (int)evaluate_expression(&ptr);
+                        args[a] = evaluate_int_text(&ptr);
                         has_arg[a] = 1;
                     }
                 }
@@ -10449,15 +10642,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             
             if (nxt.type == TOKEN_LPAREN) {
-                int x1 = (int)evaluate_expression(&ptr);
+                int x1 = evaluate_int_text(&ptr);
                 get_next_token(&ptr); // comma
-                int y1 = (int)evaluate_expression(&ptr);
+                int y1 = evaluate_int_text(&ptr);
                 get_next_token(&ptr); // RPAREN
                 get_next_token(&ptr); // minus
                 get_next_token(&ptr); // LPAREN
-                int x2 = (int)evaluate_expression(&ptr);
+                int x2 = evaluate_int_text(&ptr);
                 get_next_token(&ptr); // comma
-                int y2 = (int)evaluate_expression(&ptr);
+                int y2 = evaluate_int_text(&ptr);
                 get_next_token(&ptr); // RPAREN
                 unsigned int col = 0, bound = 0;
                 int has_col = 0, has_bound = 0;
@@ -10476,11 +10669,11 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
             } 
         } else if (t.type == TOKEN_LOCATE) {
-            int row = (int)evaluate_expression(&ptr);
+            int row = evaluate_int_text(&ptr);
             int col = print_col + 1;
             const char *saved_comma = ptr;
             if (get_next_token(&ptr).type == TOKEN_COMMA) {
-                col = (int)evaluate_expression(&ptr);
+                col = evaluate_int_text(&ptr);
             } else {
                 ptr = saved_comma;
             }
@@ -10531,7 +10724,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             Token hash = get_next_token(&ptr);
             int fnum = -1;
             if (hash.type == TOKEN_HASH) {
-                fnum = (int)evaluate_expression(&ptr);
+                fnum = evaluate_int_text(&ptr);
                 Token sep = get_next_token(&ptr);
                 if (sep.type == TOKEN_COMMA) {
                     double pos = evaluate_expression(&ptr);
@@ -10551,9 +10744,9 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             const char *saved = ptr;
             Token next = get_next_token(&ptr);
             if (next.type == TOKEN_LPAREN) {
-                int x = evaluate_expression(&ptr);
+                int x = evaluate_int_text(&ptr);
                 if (get_next_token(&ptr).type == TOKEN_COMMA) {
-                    int y = evaluate_expression(&ptr);
+                    int y = evaluate_int_text(&ptr);
                     get_next_token(&ptr);
                     get_next_token(&ptr);
                     Token var_tok = get_next_token(&ptr);
@@ -10597,7 +10790,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     }
                 }
             } else if (next.type == TOKEN_HASH) {
-                int fnum = (int)evaluate_expression(&ptr);
+                int fnum = evaluate_int_text(&ptr);
                 Token sep;
                 int has_more = 0;
                 double rec = parse_record_number(&ptr, fnum, &has_more);
@@ -10627,7 +10820,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                                                       array_index, 1);
                         } else {
                             ptr = argument_start;
-                            int len = (int)evaluate_expression(&ptr);
+                            int len = evaluate_int_text(&ptr);
                             sep = get_next_token(&ptr);
                             char data[512] = "";
                             if (sep.type == TOKEN_COMMA) {
@@ -10672,15 +10865,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             const char *saved = ptr;
             Token next = get_next_token(&ptr);
             if (next.type == TOKEN_LPAREN) {
-                int x1 = evaluate_expression(&ptr);
+                int x1 = evaluate_int_text(&ptr);
                 get_next_token(&ptr);
-                int y1 = evaluate_expression(&ptr);
+                int y1 = evaluate_int_text(&ptr);
                 get_next_token(&ptr);
                 get_next_token(&ptr);
                 get_next_token(&ptr);
-                int x2 = evaluate_expression(&ptr);
+                int x2 = evaluate_int_text(&ptr);
                 get_next_token(&ptr);
-                int y2 = evaluate_expression(&ptr);
+                int y2 = evaluate_int_text(&ptr);
                 get_next_token(&ptr);
                 get_next_token(&ptr);
                 Token var_tok = get_next_token(&ptr);
@@ -10704,7 +10897,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     report_runtime_error(ERR_SUBSCRIPT_OUT_OF_RANGE);
                 }
             } else if (next.type == TOKEN_HASH) {
-                int fnum = (int)evaluate_expression(&ptr);
+                int fnum = evaluate_int_text(&ptr);
                 Token sep;
                 int has_more = 0;
                 double rec = parse_record_number(&ptr, fnum, &has_more);
@@ -10737,7 +10930,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                                                       array_index, 0);
                         } else {
                             ptr = argument_start;
-                            int len = (int)evaluate_expression(&ptr);
+                            int len = evaluate_int_text(&ptr);
                             sep = get_next_token(&ptr);
                             if (sep.type != TOKEN_COMMA) { ptr = saved; }
                             else {
@@ -10783,7 +10976,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         } else if (t.type == TOKEN_DISPLAY) {
             graphics_present_now();
         } else if (t.type == TOKEN_FREEIMAGE) {
-            int handle = (int)evaluate_expression(&ptr);
+            int handle = evaluate_int_text(&ptr);
             if (!graphics_freeimage(handle)) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
@@ -10827,14 +11020,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     break;
                 }
                 if (graphics_arg_present(&ptr)) {
-                    int handle = (int)evaluate_expression(&ptr);
+                    int handle = evaluate_int_text(&ptr);
                     if (slot == 0) source = handle; else destination = handle;
                 }
                 slot++;
             }
-            if (!graphics_putimage_ex(has_dest, (int)ix1, (int)iy1, has_dest2, (int)ix2, (int)iy2,
-                                      source, destination, has_src, (int)sx1, (int)sy1,
-                                      has_src2, (int)sx2, (int)sy2)) {
+            if (!graphics_putimage_ex(has_dest, round_to_int(ix1), round_to_int(iy1), has_dest2,
+                                      round_to_int(ix2), round_to_int(iy2), source, destination,
+                                      has_src, round_to_int(sx1), round_to_int(sy1),
+                                      has_src2, round_to_int(sx2), round_to_int(sy2))) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else if (t.type == TOKEN_SCREENSHOT) {
@@ -10857,13 +11051,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
             }
-            int px = (int)evaluate_expression(&ptr);
+            int px = evaluate_int_text(&ptr);
             Token comma1 = get_next_token(&ptr);
             if (comma1.type != TOKEN_COMMA) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
                 return;
             }
-            int py = (int)evaluate_expression(&ptr);
+            int py = evaluate_int_text(&ptr);
             Token rparen = get_next_token(&ptr);
             if (rparen.type != TOKEN_RPAREN) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
@@ -10882,14 +11076,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             graphics_printstring(px, py, text);
         } else if (t.type == TOKEN_FONT) {
             /* _FONT handle% */
-            int handle = (int)evaluate_expression(&ptr);
+            int handle = evaluate_int_text(&ptr);
             if (!graphics_is_active()) init_graphics();
             if (!graphics_setfont(handle)) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else if (t.type == TOKEN_FREEFONT) {
             /* _FREEFONT handle% */
-            int handle = (int)evaluate_expression(&ptr);
+            int handle = evaluate_int_text(&ptr);
             if (!graphics_freefont(handle)) {
                 report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
@@ -11506,7 +11700,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     continue;
                 }
 
-                int index = (int)evaluate_expression_tok(&ts);
+                int index = evaluate_int_tok(&ts);
                 Token jump_type = ts.tokens[ts.pos++]; // GOTO or GOSUB
                 int count = 1;
                 while (count < index) {
