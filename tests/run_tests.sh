@@ -92,6 +92,8 @@ TESTS=(
   "tests/math/swap_array"
   "tests/math/variable_suffixes"
   "tests/math/csrln_pos"
+  "tests/math/numeric_literals"
+  "tests/arrays/dim_typed"
   "tests/control_flow/nested_for"
   "tests/control_flow/nested_while"
   "tests/control_flow/on_goto_nested"
@@ -138,11 +140,17 @@ TESTS=(
   "tests/graphics/drawing_alpha"
   "tests/graphics/point_test"
   "tests/graphics/autodisplay"
+  "tests/graphics/qbasic_primitives"
+  "tests/graphics/rgb_functions"
   "tests/control_flow/labels_no_lines"
   "tests/procedures/qbasic_sub"
   "tests/procedures/qbasic_function"
   "tests/procedures/qbasic_scope"
   "tests/procedures/qbasic_nested_calls"
+  "tests/procedures/dim_shared"
+  "tests/procedures/const_arguments"
+  "tests/procedures/string_locals_release"
+  "tests/control_flow/select_case_inline"
   "tests/user_types/user_types"
   "tests/user_types/user_types_arrays"
   "tests/user_types/user_types_assignment"
@@ -154,6 +162,8 @@ TESTS=(
   "tests/user_types/user_types_recursive"
   "tests/user_types/user_types_malformed_field"
   "tests/user_types/user_types_type_mismatch"
+  "tests/user_types/user_types_long"
+  "tests/system/timing"
 )
 
 for t in "${TESTS[@]}"; do
@@ -227,6 +237,17 @@ for t in "${TESTS[@]}"; do
     fi
     rm -f tests/point_test.png
     rm -f tests/point_test.result
+  elif [ "$t" = "tests/graphics/qbasic_primitives" ] || [ "$t" = "tests/graphics/rgb_functions" ]; then
+    # Headless graphics tests write their assertion result to tests/<name>.result.
+    name=$(basename "$t")
+    rm -f "tests/$name.result" "tests/$name.png"
+    OUT=$(./basika --headless "$t.bas" 2>&1)
+    if [ ! -f "tests/$name.result" ] || [ "$(tail -1 "tests/$name.result" | tr -d '[:space:]')" != "1" ]; then
+      echo "$t FAIL: graphics assertions failed"
+      cat "tests/$name.result" 2>/dev/null || true
+      exit 2
+    fi
+    rm -f "tests/$name.result" "tests/$name.png"
   elif [ "$t" = "tests/audio/asc_chr_beep" ]; then
     OUT=$(./basika "$t.bas" 2>&1)
   elif [[ "$t" == tests/audio/* ]]; then

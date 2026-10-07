@@ -22,7 +22,7 @@ FOR Pass = 1 TO 19
 		SWAP BarColor(BarIndex), BarColor(BarIndex + 1)
 		CALL DrawBarPair((BarIndex))
 		_DISPLAY
-		SLEEP 10
+		_DELAY .01
 	NoSwap:
 	NEXT BarIndex
 NEXT Pass

@@ -1,11 +1,18 @@
 REM BOING BALL - AN AMIGA-STYLE RED AND WHITE CHECKER SPHERE
 REM Press Space to pause/resume; press another key to quit.
 REM Run with: basika -w demo/boing_ball.bas
-SCREEN 12: CLS
+SCREEN _NEWIMAGE(640, 480, 32): CLS
 _AUTODISPLAY OFF
-LINE (0, 0)-(639, 479), 7, BF
 
-DIM SIN_ANGLE(96), COS_ANGLE(96)
+CONST GREY = _RGB32(170, 170, 170)
+CONST CYAN = _RGB32(85, 255, 255)
+CONST RED = _RGB32(255, 85, 85)
+CONST DARK_RED = _RGB32(170, 0, 0)
+CONST WHITE = _RGB32(255, 255, 255)
+CONST DARK_GREY = _RGB32(85, 85, 85)
+LINE (0, 0)-(639, 479), GREY, BF
+
+DIM SHARED SIN_ANGLE(96), COS_ANGLE(96)
 PI = 3.14159
 BALL_RADIUS = SphereHalfWidth(60, 0)
 FLOOR_Y = 330
@@ -50,12 +57,11 @@ WHILE 1
 
 		_DISPLAY
 	END IF
-	SLEEP 18
+	_LIMIT 55
 WEND
 END
 
 SUB InitializeTextureAngles(PiValue)
-	SHARED SIN_ANGLE, COS_ANGLE
 	FOR Index = 0 TO 96
 		Angle = -PiValue / 2 + Index * PiValue / 96
 		SIN_ANGLE(Index) = SIN(Angle)
@@ -65,31 +71,31 @@ END SUB
 
 SUB DrawBackdrop(FloorY)
 	REM Bright cyan, doubled strokes stay visible after the canvas is scaled down.
-	LINE (76, 20)-(564, FloorY), 11, B
-	LINE (77, 21)-(563, FloorY - 1), 11, B
+	LINE (76, 20)-(564, FloorY), CYAN, B
+	LINE (77, 21)-(563, FloorY - 1), CYAN, B
 	FOR GridX = 101 TO 539 STEP 25
-		LINE (GridX, 20)-(GridX, FloorY), 11
-		LINE (GridX + 1, 20)-(GridX + 1, FloorY), 11
+		LINE (GridX, 20)-(GridX, FloorY), CYAN
+		LINE (GridX + 1, 20)-(GridX + 1, FloorY), CYAN
 	NEXT GridX
 	FOR GridY = 45 TO 305 STEP 25
-		LINE (76, GridY)-(564, GridY), 11
-		LINE (76, GridY + 1)-(564, GridY + 1), 11
+		LINE (76, GridY)-(564, GridY), CYAN
+		LINE (76, GridY + 1)-(564, GridY + 1), CYAN
 	NEXT GridY
-	LINE (76, FloorY)-(22, 465), 11
-	LINE (77, FloorY)-(23, 465), 11
-	LINE (564, FloorY)-(618, 465), 11
-	LINE (563, FloorY)-(617, 465), 11
+	LINE (76, FloorY)-(22, 465), CYAN
+	LINE (77, FloorY)-(23, 465), CYAN
+	LINE (564, FloorY)-(618, 465), CYAN
+	LINE (563, FloorY)-(617, 465), CYAN
 	FOR GridX = 76 TO 564 STEP 25
 		BottomX = 22 + (GridX - 76) * 600 / 488
-		LINE (GridX, FloorY)-(BottomX, 465), 11
-		LINE (GridX + 1, FloorY)-(BottomX + 1, 465), 11
+		LINE (GridX, FloorY)-(BottomX, 465), CYAN
+		LINE (GridX + 1, FloorY)-(BottomX + 1, 465), CYAN
 	NEXT GridX
 	FOR Row = 1 TO 8
 		GridY = FloorY + Row * Row * 135 / 64
 		LeftX = 76 - (GridY - FloorY) * 54 / 135
 		RightX = 564 + (GridY - FloorY) * 54 / 135
-		LINE (LeftX, GridY)-(RightX, GridY), 11
-		LINE (LeftX, GridY + 1)-(RightX, GridY + 1), 11
+		LINE (LeftX, GridY)-(RightX, GridY), CYAN
+		LINE (LeftX, GridY + 1)-(RightX, GridY + 1), CYAN
 	NEXT Row
 END SUB
 
@@ -102,7 +108,7 @@ SUB RestoreBallArea(OldX, OldY, Radius, FloorY, ContactY)
 	IF ShadowRight < OldX + Radius + 4 THEN ShadowRight = OldX + Radius + 4
 	RestoreBottom = ContactY + ShadowRadius + 4
 	IF RestoreBottom < OldY + Radius + 40 THEN RestoreBottom = OldY + Radius + 40
-	LINE (OldX - Radius - 4, OldY - Radius - 4)-(ShadowRight, RestoreBottom), 7, BF
+	LINE (OldX - Radius - 4, OldY - Radius - 4)-(ShadowRight, RestoreBottom), GREY, BF
 	CALL DrawBackdrop((FloorY))
 END SUB
 
@@ -113,16 +119,24 @@ SUB DrawBall(BallX, BallY, Radius, Frame, PiValue, ContactY)
 	ShadowOffsetX = 18 + HeightAboveFloor * .1
 	ShadowAlpha = 160 - HeightAboveFloor * .35
 	IF ShadowAlpha < 80 THEN ShadowAlpha = 80
-	CIRCLE (BallX + ShadowOffsetX, ContactY), ShadowRadius, 0, 2, ShadowAlpha
-	CIRCLE (BallX, BallY), Radius, 15, 2
+	REM The shadow fades as the ball rises: a translucent _RGBA32 fill blends with the floor.
+	CALL FillEllipse((BallX + ShadowOffsetX), (ContactY), (ShadowRadius), (ShadowRadius * .45), _RGBA32(0, 0, 0, ShadowAlpha))
+	CALL FillEllipse((BallX), (BallY), (Radius), (Radius), WHITE)
 	CALL DrawSphereTexture((BallX), (BallY), (Radius), (Frame), (PiValue))
-	CIRCLE (BallX, BallY), Radius, 8
-	CIRCLE (BallX - 24, BallY - 28), 4, 15, 2
+	CIRCLE (BallX, BallY), Radius, DARK_GREY
+	CALL FillEllipse((BallX - 24), (BallY - 28), 4, 4, WHITE)
+END SUB
+
+SUB FillEllipse(CenterX, CenterY, RadiusX, RadiusY, FillColor AS _UNSIGNED LONG)
+	REM One horizontal span per row, so translucent colors blend evenly.
+	FOR Row = -INT(RadiusY) TO INT(RadiusY)
+		HalfWidth = RadiusX * SQR(1 - (Row / RadiusY) * (Row / RadiusY))
+		LINE (CenterX - HalfWidth, CenterY + Row)-(CenterX + HalfWidth, CenterY + Row), FillColor
+	NEXT Row
 END SUB
 
 SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
-	SHARED SIN_ANGLE, COS_ANGLE
-
+	DIM TileColor AS _UNSIGNED LONG, PreviousColor AS _UNSIGNED LONG
 	Phase = (Frame MOD 64) * PiValue / 32
 	Tilt = .62
 	Roll = .38 + SIN(Phase) * .12
@@ -135,7 +149,7 @@ SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
 
 	FOR DeltaY = -59 TO 59 STEP 2
 		HalfWidth = SQR(Radius * Radius - DeltaY * DeltaY)
-		PreviousColor = 15
+		PreviousColor = WHITE
 
 		FOR Segment = 0 TO 95
 			X1 = INT(HalfWidth * SIN_ANGLE(Segment))
@@ -170,12 +184,12 @@ SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
 
 			Parity = (LatitudeRow + LongitudeColumn) MOD 2
 			Light = Depth - DeltaX * .28 - DeltaY * .32
-			TileColor = 12
-			IF Parity = 1 THEN TileColor = 15
-			IF Light < 38 AND Parity = 0 THEN TileColor = 4
-			IF Light < 38 AND Parity = 1 THEN TileColor = 7
-			IF Light < 18 AND Parity = 0 THEN TileColor = 4
-			IF Light < 18 AND Parity = 1 THEN TileColor = 8
+			TileColor = RED
+			IF Parity = 1 THEN TileColor = WHITE
+			IF Light < 38 AND Parity = 0 THEN TileColor = DARK_RED
+			IF Light < 38 AND Parity = 1 THEN TileColor = GREY
+			IF Light < 18 AND Parity = 0 THEN TileColor = DARK_RED
+			IF Light < 18 AND Parity = 1 THEN TileColor = DARK_GREY
 
 			IF Segment = 0 THEN RunStart = X1: PreviousColor = TileColor
 			IF Segment > 0 AND TileColor <> PreviousColor THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X1, CenterY + DeltaY + 2), PreviousColor, BF: RunStart = X1
