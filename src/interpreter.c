@@ -29,6 +29,10 @@ static int resolve_target_line(Token tok) {
 #include "audio.h"
 
 volatile sig_atomic_t stop_running = 0;
+/* Set by STOP and Ctrl+C: the program pauses with "Break in N" and CONT can resume it. */
+volatile sig_atomic_t break_requested = 0;
+/* Line number given to statements typed in direct mode (GW-BASIC uses 65535). */
+#define DIRECT_LINE_NUMBER 65535
 
 #define MAX_VARIABLES 8192
 static Variable vars[MAX_VARIABLES];
@@ -68,6 +72,7 @@ static UserType user_types[MAX_USER_TYPES];
 static int user_type_count = 0;
 typedef struct {
     int root_variable_index;
+    const struct ProcedureDefTag *scope; /* declaring procedure, NULL at module level */
     int type_index;
     int num_dims;
     int dims[3];
@@ -122,6 +127,13 @@ typedef struct {
 } FileFieldState;
 
 static FileFieldState file_field_state[16];
+/* QBasic file modes: RANDOM files address LEN-byte records (default 128) and
+ * BINARY files address bytes; LOC reports the last record or byte used. */
+enum { FILE_MODE_INPUT = 'I', FILE_MODE_OUTPUT = 'O', FILE_MODE_APPEND = 'A',
+       FILE_MODE_RANDOM = 'R', FILE_MODE_BINARY = 'B' };
+static int file_mode[16];
+static int file_record_length[16];
+static long file_last_record[16];
 static int get_field_binding_for_var(int idx, int array_idx, int *out_fnum, FieldBinding *out_binding);
 
 static unsigned int rnd_seed = 1;
@@ -193,7 +205,7 @@ typedef struct {
     int user_type_index;
 } ProcParamDef;
 
-typedef struct {
+typedef struct ProcedureDefTag {
     char name[32];
     int is_function; // 0 for SUB, 1 for FUNCTION
     int is_static;
@@ -209,13 +221,17 @@ static int proc_count = 0;
 static unsigned int proc_generation = 1; /* bumped on each scan_procedures */
 
 #define MAX_CALL_FRAMES 64
+#define FRAME_LOCAL_CHUNK 128
+#define MAX_FRAME_LOCALS 8192
 
 typedef struct {
     ProcedureDef *proc;
     Statement *return_stmt;
     int return_token_idx;
     
-    Variable local_vars[128];
+    /* Locals are stored in 128-entry chunks allocated on first use, so large
+     * local record arrays fit while pointers to existing locals stay valid. */
+    Variable *local_chunks[MAX_FRAME_LOCALS / FRAME_LOCAL_CHUNK];
     int local_var_count;
     /* Per-call cache of variable lookups. Clearing all MAX_VARIABLES entries on
      * every call is costly, so the indexes that were filled are recorded and
@@ -236,6 +252,23 @@ typedef struct {
 } CallFrame;
 
 static CallFrame call_stack[MAX_CALL_FRAMES];
+
+static void report_runtime_error(RuntimeError code);
+
+/* Local variable `index` of a frame, allocating its chunk on first use. */
+static Variable *frame_local(CallFrame *frame, int index) {
+    static Variable fallback;
+    int chunk = index / FRAME_LOCAL_CHUNK;
+    if (index < 0 || chunk >= MAX_FRAME_LOCALS / FRAME_LOCAL_CHUNK) return &fallback;
+    if (!frame->local_chunks[chunk]) {
+        frame->local_chunks[chunk] = calloc(FRAME_LOCAL_CHUNK, sizeof(Variable));
+        if (!frame->local_chunks[chunk]) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return &fallback;
+        }
+    }
+    return &frame->local_chunks[chunk][index % FRAME_LOCAL_CHUNK];
+}
 static int call_stack_depth = 0;
 
 static int find_variable_raw_name(const char *name);
@@ -405,6 +438,88 @@ static void clear_procedure_declared_types(void) {
     declared_type_count = kept;
 }
 
+/* Locals of a STATIC procedure, and names listed in a STATIC statement,
+ * live here rather than in the call frame so they keep their values between
+ * calls. Both lists are cleared when the program is run again. */
+#define MAX_STATIC_LOCALS 1024
+#define MAX_STATIC_NAMES 256
+typedef struct {
+    const ProcedureDef *proc;
+    Variable var;
+} StaticLocal;
+typedef struct {
+    const ProcedureDef *proc;
+    char name[64];
+} StaticName;
+static StaticLocal static_locals[MAX_STATIC_LOCALS];
+static int static_local_count = 0;
+static StaticName static_names[MAX_STATIC_NAMES];
+static int static_name_count = 0;
+
+static void add_static_name(const ProcedureDef *proc, const char *name) {
+    for (int i = 0; i < static_name_count; i++) {
+        if (static_names[i].proc == proc && strcmp(static_names[i].name, name) == 0) return;
+    }
+    if (static_name_count >= MAX_STATIC_NAMES) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return;
+    }
+    static_names[static_name_count].proc = proc;
+    snprintf(static_names[static_name_count].name, sizeof(static_names[0].name), "%s", name);
+    static_name_count++;
+}
+
+static int is_static_local(const ProcedureDef *proc, const char *name) {
+    if (proc->is_static) return 1;
+    for (int i = 0; i < static_name_count; i++) {
+        if (static_names[i].proc != proc) continue;
+        const char *listed = static_names[i].name;
+        size_t root_length = numeric_base_length(listed, strlen(listed));
+        /* Arrays and record fields share the listed name as their root. */
+        if (proc_name_match(listed, name) ||
+            (strncasecmp(name, listed, root_length) == 0 &&
+             (name[root_length] == '.' || name[root_length] == '@'))) return 1;
+    }
+    return 0;
+}
+
+static Variable *static_local_variable(const ProcedureDef *proc, const char *name) {
+    for (int i = 0; i < static_local_count; i++) {
+        if (static_locals[i].proc == proc && strcasecmp(static_locals[i].var.name, name) == 0) {
+            return &static_locals[i].var;
+        }
+    }
+    if (static_local_count >= MAX_STATIC_LOCALS) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return &vars[0];
+    }
+    StaticLocal *slot = &static_locals[static_local_count++];
+    memset(slot, 0, sizeof(*slot));
+    slot->proc = proc;
+    snprintf(slot->var.name, sizeof(slot->var.name), "%s", name);
+    return &slot->var;
+}
+
+static void basic_string_destroy(BasicString *value);
+
+static void release_variable_storage(Variable *variable) {
+    if (variable->s_value) basic_string_destroy(variable->s_value);
+    if (variable->s_array) {
+        for (int i = 0; i < variable->array_size; i++) basic_string_destroy(variable->s_array[i]);
+        free(variable->s_array);
+    }
+    free(variable->array);
+    variable->s_value = NULL;
+    variable->s_array = NULL;
+    variable->array = NULL;
+}
+
+static void clear_static_locals(void) {
+    for (int i = 0; i < static_local_count; i++) release_variable_storage(&static_locals[i].var);
+    static_local_count = 0;
+    static_name_count = 0;
+}
+
 static void note_resolved_variable(CallFrame *frame, int idx) {
     if (frame->resolved_touched_count < (int)(sizeof(frame->resolved_touched) / sizeof(frame->resolved_touched[0]))) {
         frame->resolved_touched[frame->resolved_touched_count] = idx;
@@ -447,19 +562,19 @@ static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
                     caller_index, frame->byref_caller_frame[p]);
             }
             for (int l = 0; l < frame->local_var_count; l++) {
-                if (proc_name_match(frame->local_vars[l].name, name)) {
-                    return *resolved = &frame->local_vars[l];
+                if (proc_name_match((*frame_local(frame, l)).name, name)) {
+                    return *resolved = &(*frame_local(frame, l));
                 }
             }
-            if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+            if (frame->local_var_count >= MAX_FRAME_LOCALS) {
                 report_runtime_error(ERR_OUT_OF_MEMORY);
                 return &vars[0];
             }
             int local_index = frame->local_var_count++;
-            memset(&frame->local_vars[local_index], 0, sizeof(Variable));
-            snprintf(frame->local_vars[local_index].name,
-                     sizeof(frame->local_vars[local_index].name), "%s", name);
-            return *resolved = &frame->local_vars[local_index];
+            memset(&(*frame_local(frame, local_index)), 0, sizeof(Variable));
+            snprintf((*frame_local(frame, local_index)).name,
+                     sizeof((*frame_local(frame, local_index)).name), "%s", name);
+            return *resolved = &(*frame_local(frame, local_index));
         }
 
         if (parameter->user_type_index >= 0 && has_record_prefix(name, parameter->name)) {
@@ -478,15 +593,15 @@ static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
                 return *resolved = get_variable_ptr_for_frame(
                     member_index, frame->byref_caller_frame[p]);
             }
-            if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+            if (frame->local_var_count >= MAX_FRAME_LOCALS) {
                 report_runtime_error(ERR_OUT_OF_MEMORY);
                 return &vars[0];
             }
             int local_index = frame->local_var_count++;
-            memset(&frame->local_vars[local_index], 0, sizeof(Variable));
-            snprintf(frame->local_vars[local_index].name,
-                     sizeof(frame->local_vars[local_index].name), "%s", name);
-            return *resolved = &frame->local_vars[local_index];
+            memset(&(*frame_local(frame, local_index)), 0, sizeof(Variable));
+            snprintf((*frame_local(frame, local_index)).name,
+                     sizeof((*frame_local(frame, local_index)).name), "%s", name);
+            return *resolved = &(*frame_local(frame, local_index));
         }
 
         if (parameter->user_type_index >= 0 &&
@@ -515,35 +630,39 @@ static Variable *get_variable_ptr_for_frame(int idx, int frame_index) {
 
     if (frame->proc->is_function && proc_name_match(frame->proc->name, name)) {
         for (int l = 0; l < frame->local_var_count; l++) {
-            if (proc_name_match(frame->local_vars[l].name, name)) {
-                return *resolved = &frame->local_vars[l];
+            if (proc_name_match((*frame_local(frame, l)).name, name)) {
+                return *resolved = &(*frame_local(frame, l));
             }
         }
-        if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+        if (frame->local_var_count >= MAX_FRAME_LOCALS) {
             report_runtime_error(ERR_OUT_OF_MEMORY);
             return &vars[0];
         }
         int local_index = frame->local_var_count++;
-        memset(&frame->local_vars[local_index], 0, sizeof(Variable));
-        snprintf(frame->local_vars[local_index].name,
-                 sizeof(frame->local_vars[local_index].name), "%s", name);
-        return *resolved = &frame->local_vars[local_index];
+        memset(&(*frame_local(frame, local_index)), 0, sizeof(Variable));
+        snprintf((*frame_local(frame, local_index)).name,
+                 sizeof((*frame_local(frame, local_index)).name), "%s", name);
+        return *resolved = &(*frame_local(frame, local_index));
+    }
+
+    if (is_static_local(frame->proc, name)) {
+        return *resolved = static_local_variable(frame->proc, name);
     }
 
     for (int l = 0; l < frame->local_var_count; l++) {
-        if (strcasecmp(frame->local_vars[l].name, name) == 0) {
-            return *resolved = &frame->local_vars[l];
+        if (strcasecmp((*frame_local(frame, l)).name, name) == 0) {
+            return *resolved = &(*frame_local(frame, l));
         }
     }
-    if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+    if (frame->local_var_count >= MAX_FRAME_LOCALS) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return &vars[0];
     }
     int local_index = frame->local_var_count++;
-    memset(&frame->local_vars[local_index], 0, sizeof(Variable));
-    snprintf(frame->local_vars[local_index].name,
-             sizeof(frame->local_vars[local_index].name), "%s", name);
-    return *resolved = &frame->local_vars[local_index];
+    memset(&(*frame_local(frame, local_index)), 0, sizeof(Variable));
+    snprintf((*frame_local(frame, local_index)).name,
+             sizeof((*frame_local(frame, local_index)).name), "%s", name);
+    return *resolved = &(*frame_local(frame, local_index));
 }
 
 static Variable *get_variable_ptr(int idx) {
@@ -723,6 +842,7 @@ static const char* get_error_message(RuntimeError code) {
         case ERR_DIVISION_BY_ZERO: return "Division by zero";
         case ERR_TYPE_MISMATCH: return "Type mismatch";
         case ERR_OUT_OF_STRING_SPACE: return "Out of string space";
+        case ERR_CANT_CONTINUE: return "Can't continue";
         case ERR_CANT_RESUME: return "Can't RESUME";
         case ERR_RESUME_WITHOUT_ERROR: return "RESUME without error";
         case ERR_FOR_WITHOUT_NEXT: return "FOR without NEXT";
@@ -770,7 +890,11 @@ static void report_runtime_error(RuntimeError code) {
             int display_line = current_has_explicit_line_number || current_source_line_number <= 0
                 ? current_executing_line
                 : current_source_line_number;
-            snprintf(full_msg, sizeof(full_msg), "%s in %d\n", msg, display_line);
+            if (current_executing_line == DIRECT_LINE_NUMBER) {
+                snprintf(full_msg, sizeof(full_msg), "%s\n", msg);
+            } else {
+                snprintf(full_msg, sizeof(full_msg), "%s in %d\n", msg, display_line);
+            }
             basic_output(full_msg);
         }
     }
@@ -1339,21 +1463,11 @@ static double seconds_since_midnight(void) {
     return local.tm_hour * 3600.0 + local.tm_min * 60.0 + local.tm_sec + now.tv_usec / 1000000.0;
 }
 
-static void basic_string_destroy(BasicString *value);
-
 /* A popped frame keeps its locals until the slot is reused, because FUNCTION
  * results are read from it after the call returns. Release them before the
  * slot is cleared so string and array storage is not leaked on every call. */
 static void release_call_frame_storage(CallFrame *frame) {
-    for (int l = 0; l < frame->local_var_count; l++) {
-        Variable *local = &frame->local_vars[l];
-        if (local->s_value) basic_string_destroy(local->s_value);
-        if (local->s_array) {
-            for (int i = 0; i < local->array_size; i++) basic_string_destroy(local->s_array[i]);
-            free(local->s_array);
-        }
-        free(local->array);
-    }
+    for (int l = 0; l < frame->local_var_count; l++) release_variable_storage(&(*frame_local(frame, l)));
     frame->local_var_count = 0;
 }
 
@@ -1371,6 +1485,31 @@ static void reset_call_frame(CallFrame *frame) {
     frame->shared_count = 0;
     frame->func_return_numeric = 0;
     frame->func_return_string = NULL;
+}
+
+/* Division as in QBasic: dividing by zero is an error, and \ and MOD round
+ * their operands to whole numbers before dividing. */
+static inline double basic_divide(double left, double right) {
+    if (right == 0.0) {
+        report_runtime_error(ERR_DIVISION_BY_ZERO);
+        return 0.0;
+    }
+    return left / right;
+}
+
+static inline double basic_integer_divide(double left, double right, int want_remainder) {
+    // Operands are usually whole already; only round the ones that are not.
+    double a = (left == (double)(long long)left) ? left : nearbyint(left);
+    double b = (right == (double)(long long)right) ? right : nearbyint(right);
+    if (b == 0.0) {
+        report_runtime_error(ERR_DIVISION_BY_ZERO);
+        return 0.0;
+    }
+    if (fabs(a) < 9.0e18 && fabs(b) < 9.0e18) {
+        long long x = (long long)a, y = (long long)b;
+        return want_remainder ? (double)(x % y) : (double)(x / y);
+    }
+    return want_remainder ? fmod(a, b) : trunc(a / b);
 }
 
 static void basic_string_release(BasicString *value) {
@@ -1915,13 +2054,23 @@ static int instantiate_user_type(const char *prefix, UserType *type, int depth) 
     return 1;
 }
 
-static UserTypeInstance *find_user_type_instance(int root_variable_index) {
+/* Record instances DIMmed in a procedure belong to it; a procedure sees its
+ * own instance of a name first and otherwise the module-level one. */
+static UserTypeInstance *find_user_type_instance_in_scope(int root_variable_index,
+                                                          const ProcedureDef *scope) {
     for (int i = 0; i < user_type_instance_count; i++) {
-        if (user_type_instances[i].root_variable_index == root_variable_index) {
+        if (user_type_instances[i].root_variable_index == root_variable_index &&
+            user_type_instances[i].scope == scope) {
             return &user_type_instances[i];
         }
     }
     return NULL;
+}
+
+static UserTypeInstance *find_user_type_instance_for(int root_variable_index,
+                                                     const ProcedureDef *scope) {
+    UserTypeInstance *instance = scope ? find_user_type_instance_in_scope(root_variable_index, scope) : NULL;
+    return instance ? instance : find_user_type_instance_in_scope(root_variable_index, NULL);
 }
 
 static int get_user_type_instance_at_frame(int root_variable_index, int frame_index,
@@ -1950,7 +2099,9 @@ static int get_user_type_instance_at_frame(int root_variable_index, int frame_in
             return 1;
         }
     }
-    UserTypeInstance *instance = find_user_type_instance(root_variable_index);
+    const ProcedureDef *scope = (frame_index >= 0 && frame_index < call_stack_depth)
+        ? call_stack[frame_index].proc : NULL;
+    UserTypeInstance *instance = find_user_type_instance_for(root_variable_index, scope);
     if (!instance) return 0;
     *instance_out = *instance;
     return 1;
@@ -1982,8 +2133,19 @@ static int declare_user_type_instance(int root_variable_index, UserType *type,
         element_count *= dimension_size;
     }
 
-    UserTypeInstance *instance = find_user_type_instance(root_variable_index);
-    if (instance) {
+    const ProcedureDef *scope = current_declaration_scope();
+    UserTypeInstance *instance = find_user_type_instance_in_scope(root_variable_index, scope);
+    if (instance && scope) {
+        /* A procedure's locals are new on every call, so its DIM may declare
+         * different bounds each time; a repeat DIM within one call is still
+         * caught below because the local array already exists. */
+        instance->type_index = type_index;
+        instance->num_dims = num_dims;
+        instance->element_count = element_count;
+        memset(instance->dims, 0, sizeof(instance->dims));
+        if (num_dims > 0) memcpy(instance->dims, upper_bounds, (size_t)num_dims * sizeof(*upper_bounds));
+        memcpy(instance->lower_bounds, lower_bounds, sizeof(instance->lower_bounds));
+    } else if (instance) {
         if (instance->type_index != type_index || instance->num_dims != num_dims ||
             (num_dims > 0 &&
              memcmp(instance->dims, upper_bounds, (size_t)num_dims * sizeof(*upper_bounds)) != 0)) {
@@ -1998,6 +2160,7 @@ static int declare_user_type_instance(int root_variable_index, UserType *type,
         instance = &user_type_instances[user_type_instance_count++];
         memset(instance, 0, sizeof(*instance));
         instance->root_variable_index = root_variable_index;
+        instance->scope = scope;
         instance->type_index = type_index;
         instance->num_dims = num_dims;
         instance->element_count = element_count;
@@ -2419,9 +2582,9 @@ static double evaluate_compiled_expression_node(const UserFunction *function, in
         case EXPR_ADD: return left + right;
         case EXPR_SUBTRACT: return left - right;
         case EXPR_MULTIPLY: return left * right;
-        case EXPR_DIVIDE: return right != 0.0 ? left / right : left;
-        case EXPR_MOD: return right != 0.0 ? (double)((long)left % (long)right) : left;
-        case EXPR_IDIV: return right != 0.0 ? (double)(long)(left / right) : left;
+        case EXPR_DIVIDE: return basic_divide(left, right);
+        case EXPR_MOD: return basic_integer_divide(left, right, 1);
+        case EXPR_IDIV: return basic_integer_divide(left, right, 0);
         case EXPR_POWER: return pow(left, right);
         case EXPR_EQUAL: return left == right ? -1.0 : 0.0;
         case EXPR_NOT_EQUAL: return left != right ? -1.0 : 0.0;
@@ -3850,19 +4013,19 @@ static Variable *get_or_create_frame_variable(CallFrame *frame, int variable_ind
     note_resolved_variable(frame, variable_index);
     const char *name = vars[variable_index].name;
     for (int i = 0; i < frame->local_var_count; i++) {
-        if (strcasecmp(frame->local_vars[i].name, name) == 0) {
-            return frame->resolved_variables[variable_index] = &frame->local_vars[i];
+        if (strcasecmp((*frame_local(frame, i)).name, name) == 0) {
+            return frame->resolved_variables[variable_index] = &(*frame_local(frame, i));
         }
     }
-    if (frame->local_var_count >= (int)(sizeof(frame->local_vars) / sizeof(frame->local_vars[0]))) {
+    if (frame->local_var_count >= MAX_FRAME_LOCALS) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return &vars[0];
     }
     int local_index = frame->local_var_count++;
-    memset(&frame->local_vars[local_index], 0, sizeof(Variable));
-    snprintf(frame->local_vars[local_index].name,
-             sizeof(frame->local_vars[local_index].name), "%s", name);
-    return frame->resolved_variables[variable_index] = &frame->local_vars[local_index];
+    memset(&(*frame_local(frame, local_index)), 0, sizeof(Variable));
+    snprintf((*frame_local(frame, local_index)).name,
+             sizeof((*frame_local(frame, local_index)).name), "%s", name);
+    return frame->resolved_variables[variable_index] = &(*frame_local(frame, local_index));
 }
 
 static const char *user_type_field_suffix(const TypeField *field) {
@@ -4446,6 +4609,8 @@ static int transfer_user_type_fields(UserType *type, const char *prefix,
     return 1;
 }
 
+static int file_record_offset(int fnum, double record, long *offset);
+
 static int transfer_user_type_record(int file_number, double record_number,
                                      int root_index, int array_index, int writing) {
     if (file_number < 1 || file_number >= 16 || !file_handles[file_number]) {
@@ -4461,10 +4626,16 @@ static int transfer_user_type_record(int file_number, double record_number,
     size_t record_size;
     if (!user_type_storage_size(&user_types[instance.type_index], &record_size, 0) ||
         record_size == 0) return 0;
-    if (record_number < 1.0 || record_number > (double)LONG_MAX / (double)record_size) {
-        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+    // A record must fit the LEN given when a RANDOM file was opened.
+    if (file_mode[file_number] != FILE_MODE_BINARY &&
+        record_size > (size_t)file_record_length[file_number]) {
+        report_runtime_error(ERR_BAD_RECORD_LENGTH);
         return 0;
     }
+    long offset_in_file;
+    if (!file_record_offset(file_number, record_number, &offset_in_file)) return 0;
+    file_last_record[file_number] = file_mode[file_number] == FILE_MODE_BINARY
+        ? offset_in_file + (long)record_size : (long)record_number;
     Variable *root = get_variable_ptr(root_index);
     char prefix[128];
     int written = instance.num_dims > 0
@@ -4479,7 +4650,6 @@ static int transfer_user_type_record(int file_number, double record_number,
         report_runtime_error(ERR_OUT_OF_MEMORY);
         return 0;
     }
-    long offset_in_file = (long)((record_number - 1.0) * (double)record_size);
     int success = 1;
     if (writing) {
         size_t offset = 0;
@@ -4604,7 +4774,8 @@ static void execute_assignment(const char **input, Token var_token) {
         }
         set_string_variable(idx, array_idx, value);
     } else {
-        set_numeric_variable(idx, array_idx, evaluate_expression(input));
+        double value = evaluate_expression(input);
+        if (!runtime_error_occurred) set_numeric_variable(idx, array_idx, value);
     }
 }
 
@@ -4639,6 +4810,7 @@ static void clear_variables(int keep_registry) {
     named_constant_count = 0;
     declared_type_count = 0;
     global_shared_count = 0;
+    clear_static_locals();
     option_base = 0;
     option_base_set = 0;
     arrays_dimensioned = 0;
@@ -4914,6 +5086,7 @@ static void scan_procedures(void) {
     proc_generation++;
     proc_count = 0;
     clear_procedure_declared_types();
+    clear_static_locals();
     Statement *stmt = get_head();
     while (stmt) {
         if (stmt->token_count > 0) {
@@ -5129,14 +5302,14 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
             } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
                 double val = evaluate_expression_tok(ts);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 coerce_numeric_value(pdef->name, &val);
@@ -5158,6 +5331,8 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
     call_stack_depth++;
     return proc->start_stmt;
 }
+
+static void execute_shared_or_static(TokenStream *ts, int is_static);
 
 static void execute_procedure_statements(ProcedureDef *proc) {
     int saved_line = current_executing_line;
@@ -5556,6 +5731,11 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     break;
                 }
 
+            case TOKEN_SHARED:
+            case TOKEN_STATIC:
+                execute_shared_or_static(&ts, t->type == TOKEN_STATIC);
+                continue;
+
             case TOKEN_FOR: {
                 Token *var_token = &ts.tokens[ts.pos++];
                 Token eq = ts.tokens[ts.pos++];
@@ -5690,7 +5870,9 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         }
                         basic_string_release(&value);
                     } else {
-                        set_numeric_variable(idx, array_idx, evaluate_expression_tok(&ts));
+                        double value = evaluate_expression_tok(&ts);
+                        // An error while evaluating aborts the assignment, as in QBasic.
+                        if (!runtime_error_occurred) set_numeric_variable(idx, array_idx, value);
                     }
                     continue;
                 }
@@ -5789,14 +5971,14 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
             } else if (pdef->is_string) {
                 BasicString sval = {0};
                 parse_string_expression_heap(input, &sval);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, sval.data, sval.length);
                 basic_string_release(&sval);
             } else {
                 double val = evaluate_expression(input);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 coerce_numeric_value(pdef->name, &val);
@@ -5824,8 +6006,8 @@ static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char
 
     double result = 0.0;
     for (int l = 0; l < frame->local_var_count; l++) {
-        if (proc_name_match(frame->local_vars[l].name, proc->name)) {
-            result = frame->local_vars[l].value;
+        if (proc_name_match((*frame_local(frame, l)).name, proc->name)) {
+            result = (*frame_local(frame, l)).value;
             break;
         }
     }
@@ -5900,14 +6082,14 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
             } else if (pdef->is_string) {
                 BasicString sval = {0};
                 parse_string_expression_heap(input, &sval);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, sval.data, sval.length);
                 basic_string_release(&sval);
             } else {
                 double val = evaluate_expression(input);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 coerce_numeric_value(pdef->name, &val);
@@ -5934,8 +6116,8 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
     execute_procedure_statements(proc);
 
     for (int l = 0; l < frame->local_var_count; l++) {
-        if (proc_name_match(frame->local_vars[l].name, proc->name) && frame->local_vars[l].s_value) {
-            basic_string_append(out, frame->local_vars[l].s_value->data, frame->local_vars[l].s_value->length);
+        if (proc_name_match((*frame_local(frame, l)).name, proc->name) && (*frame_local(frame, l)).s_value) {
+            basic_string_append(out, (*frame_local(frame, l)).s_value->data, (*frame_local(frame, l)).s_value->length);
             break;
         }
     }
@@ -6002,14 +6184,14 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
             } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
                 double val = evaluate_expression_tok(ts);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 coerce_numeric_value(pdef->name, &val);
@@ -6029,8 +6211,8 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
 
     double result = 0.0;
     for (int l = 0; l < frame->local_var_count; l++) {
-        if (proc_name_match(frame->local_vars[l].name, proc->name)) {
-            result = frame->local_vars[l].value;
+        if (proc_name_match((*frame_local(frame, l)).name, proc->name)) {
+            result = (*frame_local(frame, l)).value;
             break;
         }
     }
@@ -6096,14 +6278,14 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
             } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
                 double val = evaluate_expression_tok(ts);
-                Variable *lv = &frame->local_vars[frame->local_var_count++];
+                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
                 coerce_numeric_value(pdef->name, &val);
@@ -6122,8 +6304,8 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
     execute_procedure_statements(proc);
 
     for (int l = 0; l < frame->local_var_count; l++) {
-        if (proc_name_match(frame->local_vars[l].name, proc->name) && frame->local_vars[l].s_value) {
-            basic_string_append(out, frame->local_vars[l].s_value->data, frame->local_vars[l].s_value->length);
+        if (proc_name_match((*frame_local(frame, l)).name, proc->name) && (*frame_local(frame, l)).s_value) {
+            basic_string_append(out, (*frame_local(frame, l)).s_value->data, (*frame_local(frame, l)).s_value->length);
             break;
         }
     }
@@ -6554,6 +6736,10 @@ static double primary_tok(TokenStream *ts) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return 0;
                 }
+                // RANDOM: last record used; BINARY: last byte used.
+                if (file_mode[fnum] == FILE_MODE_RANDOM || file_mode[fnum] == FILE_MODE_BINARY) {
+                    return (double)file_last_record[fnum];
+                }
                 return (double)ftell(file_handles[fnum]);
             }
             case TOKEN_TIMER: return seconds_since_midnight();
@@ -6607,9 +6793,9 @@ static double term_tok(TokenStream *ts) {
     while (1) {
         TokenType type = ts->tokens[ts->pos].type;
         if (type == TOKEN_STAR) { ts->pos++; val *= unary_tok(ts); }
-        else if (type == TOKEN_SLASH) { ts->pos++; double d = unary_tok(ts); if (d != 0) val /= d; }
-        else if (type == TOKEN_IDIV) { ts->pos++; double d = unary_tok(ts); if (d != 0) val = (long)(val / d); }
-        else if (type == TOKEN_MOD) { ts->pos++; double d = unary_tok(ts); if (d != 0) val = (long)val % (long)d; }
+        else if (type == TOKEN_SLASH) { ts->pos++; val = basic_divide(val, unary_tok(ts)); }
+        else if (type == TOKEN_IDIV) { ts->pos++; val = basic_integer_divide(val, unary_tok(ts), 0); }
+        else if (type == TOKEN_MOD) { ts->pos++; val = basic_integer_divide(val, unary_tok(ts), 1); }
         else break;
     }
     return val;
@@ -6799,9 +6985,9 @@ static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expre
             case CEXPR_ADD: values[stack_size - 1] = left + right; break;
             case CEXPR_SUBTRACT: values[stack_size - 1] = left - right; break;
             case CEXPR_MULTIPLY: values[stack_size - 1] = left * right; break;
-            case CEXPR_DIVIDE: if (right != 0.0) values[stack_size - 1] = left / right; break;
-            case CEXPR_MOD: if (right != 0.0) values[stack_size - 1] = (long)left % (long)right; break;
-            case CEXPR_IDIV: if (right != 0.0) values[stack_size - 1] = (long)(left / right); break;
+            case CEXPR_DIVIDE: values[stack_size - 1] = basic_divide(left, right); break;
+            case CEXPR_MOD: values[stack_size - 1] = basic_integer_divide(left, right, 1); break;
+            case CEXPR_IDIV: values[stack_size - 1] = basic_integer_divide(left, right, 0); break;
             case CEXPR_EQUAL: values[stack_size - 1] = left == right ? -1.0 : 0.0; break;
             case CEXPR_NOT_EQUAL: values[stack_size - 1] = left != right ? -1.0 : 0.0; break;
             case CEXPR_LESS: values[stack_size - 1] = left < right ? -1.0 : 0.0; break;
@@ -7162,6 +7348,10 @@ static double primary(const char **input) {
                     report_runtime_error(ERR_BAD_FILE_NUMBER);
                     return 0;
                 }
+                // RANDOM: last record used; BINARY: last byte used.
+                if (file_mode[fnum] == FILE_MODE_RANDOM || file_mode[fnum] == FILE_MODE_BINARY) {
+                    return (double)file_last_record[fnum];
+                }
                 return (double)ftell(file_handles[fnum]);
             }
             case TOKEN_TIMER: return seconds_since_midnight();
@@ -7244,26 +7434,22 @@ static double term(const char **input) {
         }
         if (*p == '/') {
             *input = p + 1;
-            double d = unary(input);
-            if (d != 0.0) val /= d;
+            val = basic_divide(val, unary(input));
             continue;
         }
         if (match_identifier_fast(p, "MOD")) {
             *input = p + 3;
-            double d = unary(input);
-            if (d != 0.0) val = (long)val % (long)d;
+            val = basic_integer_divide(val, unary(input), 1);
             continue;
         }
         if (match_identifier_fast(p, "DIV")) {
             *input = p + 3;
-            double d = unary(input);
-            if (d != 0.0) val = (long)(val / d);
+            val = basic_integer_divide(val, unary(input), 0);
             continue;
         }
         if (*p == '\\') {
             *input = p + 1;
-            double d = unary(input);
-            if (d != 0.0) val = (long)(val / d);
+            val = basic_integer_divide(val, unary(input), 0);
             continue;
         }
         break;
@@ -7447,6 +7633,183 @@ static int parse_optional_color(const char **ptr, unsigned int *color) {
     return 1;
 }
 
+/* SHARED name[()] [AS type][, ...] grants a procedure access to module
+ * variables; STATIC name[()] [AS type][, ...] keeps the named locals between
+ * calls. Both are no-ops outside a procedure. */
+static void execute_shared_or_static(TokenStream *ts, int is_static) {
+    Statement *stmt = ts->statement;
+    if (call_stack_depth == 0) {
+        ts->pos = stmt->token_count;
+        return;
+    }
+    CallFrame *frame = &call_stack[call_stack_depth - 1];
+    while (ts->pos < stmt->token_count && ts->tokens[ts->pos].type != TOKEN_COLON &&
+           ts->tokens[ts->pos].type != TOKEN_EOF) {
+        if (ts->tokens[ts->pos].type == TOKEN_IDENTIFIER) {
+            char norm[64];
+            snprintf(norm, sizeof(norm), "%s", ts->tokens[ts->pos].text);
+            for (int c = 0; norm[c]; c++) norm[c] = (char)toupper((unsigned char)norm[c]);
+            /* Optional "()" for arrays and "AS type" clause. */
+            int look = ts->pos + 1;
+            if (look + 1 < stmt->token_count &&
+                ts->tokens[look].type == TOKEN_LPAREN &&
+                ts->tokens[look + 1].type == TOKEN_RPAREN) look += 2;
+            const char *suffix = NULL;
+            if (look + 1 < stmt->token_count && ts->tokens[look].type == TOKEN_AS) {
+                const char *type_name = ts->tokens[look + 1].text;
+                look += 2;
+                if (strcasecmp(type_name, "_UNSIGNED") == 0 &&
+                    look < stmt->token_count &&
+                    strcasecmp(ts->tokens[look].text, "LONG") == 0) {
+                    type_name = "_UNSIGNED LONG";
+                    look++;
+                }
+                suffix = primitive_type_suffix(type_name);
+            }
+            size_t len = strlen(norm);
+            if (len > 0 && !is_type_suffix_char(norm[len-1])) {
+                if (!suffix && !is_static) {
+                    for (int d = 0; d < declared_type_count; d++) {
+                        if (declared_types[d].scope == NULL &&
+                            strcmp(declared_types[d].name, norm) == 0) {
+                            suffix = declared_types[d].suffix;
+                            break;
+                        }
+                    }
+                }
+                if (!suffix && is_static) suffix = find_declared_suffix(norm);
+                if (suffix) {
+                    declare_variable_type(norm, suffix, frame->proc, 0);
+                    if (len + strlen(suffix) < sizeof(norm)) strcat(norm, suffix);
+                } else if (norm[0] >= 'A' && norm[0] <= 'Z') {
+                    char default_suffix = default_type_map[norm[0] - 'A'];
+                    if (default_suffix != '\0') {
+                        norm[len] = default_suffix;
+                        norm[len+1] = '\0';
+                    }
+                }
+            }
+            if (is_static) {
+                add_static_name(frame->proc, norm);
+            } else if (frame->shared_count < 32) {
+                snprintf(frame->shared_var_names[frame->shared_count++],
+                         sizeof(frame->shared_var_names[0]), "%s", norm);
+            }
+            ts->pos = look - 1;
+        }
+        ts->pos++;
+        if (ts->pos < stmt->token_count && ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
+    }
+    clear_resolved_variables(frame);
+}
+
+/* There is no hardware to read, so I/O ports are simulated: &H3DA (the VGA
+ * input status register) reports vertical retrace (bits 8 and 1) during the
+ * first millisecond of every 1/60-second frame; every other port reads 0. */
+#define VGA_STATUS_PORT 0x3DA
+#define RETRACE_FRAME_SECONDS (1.0 / 60.0)
+#define RETRACE_SECONDS 0.001
+
+static int simulated_port_value(int port, double now) {
+    if (port != VGA_STATUS_PORT) return 0;
+    double phase = fmod(now, RETRACE_FRAME_SECONDS);
+    return phase < RETRACE_SECONDS ? (8 | 1) : 0;
+}
+
+/* WAIT port, and_mask[, xor_mask]: pause until
+ * (port XOR xor_mask) AND and_mask is nonzero. A condition the simulated
+ * port can never meet returns at once instead of hanging. */
+static void execute_wait(int port, int and_mask, int xor_mask) {
+    if (port != VGA_STATUS_PORT) return;
+    if (((0 ^ xor_mask) & and_mask) == 0 && (((8 | 1) ^ xor_mask) & and_mask) == 0) return;
+    double now = wall_time_seconds();
+    if (((simulated_port_value(port, now) ^ xor_mask) & and_mask) == 0) {
+        // The status has two states, so the condition holds after its next
+        // change: the start or end of a retrace. Sleep until then (a late
+        // wake-up must not miss the short retrace window).
+        double frame_start = floor(now / RETRACE_FRAME_SECONDS) * RETRACE_FRAME_SECONDS;
+        double change = (now - frame_start < RETRACE_SECONDS)
+            ? frame_start + RETRACE_SECONDS : frame_start + RETRACE_FRAME_SECONDS;
+        while (!stop_running && (now = wall_time_seconds()) < change) {
+            if (graphics_is_active()) handle_events();
+            double remaining = change - now;
+            usleep((useconds_t)(remaining * 1000000.0) + 1);
+        }
+    }
+    // A program that waits for retrace has finished drawing its frame.
+    if (graphics_is_active()) graphics_present_if_autodisplay();
+}
+
+static void execute_statements(Statement *curr, const char *resume_ptr, int resume_ts_pos);
+static void run_program_from(Statement *start);
+static unsigned int scanned_generation;
+static int cont_valid;
+static Statement *cont_stmt;
+static const char *cont_resume_ptr;
+static int cont_resume_ts_pos;
+static unsigned int cont_generation;
+
+/* Runs a line typed without a line number through the same statement loop
+ * as programs, so colons, one-line loops and GOSUB work, and GOTO continues
+ * into the stored program without clearing variables. */
+static void execute_direct_line(const char *text) {
+    if (scanned_generation != program_edit_generation()) {
+        if (!scan_user_types()) return;
+        scan_procedures();
+        scanned_generation = program_edit_generation();
+    }
+    Statement *stmt = calloc(1, sizeof(Statement));
+    if (!stmt) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return;
+    }
+    stmt->line_number = DIRECT_LINE_NUMBER;
+    snprintf(stmt->raw_command, sizeof(stmt->raw_command), "%s", text);
+    tokenize_line(stmt);
+    stop_running = 0;
+    break_requested = 0;
+    runtime_error_occurred = 0;
+    execute_statements(stmt, NULL, -1);
+    for (int i = 0; i < for_ptr; i++) {
+        if (for_stack[i].start_stmt == stmt) { for_ptr = i; break; }
+    }
+    free(stmt->tokens);
+    free(stmt);
+}
+
+static void close_file_number(int fnum) {
+    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) return;
+    fclose(file_handles[fnum]);
+    file_handles[fnum] = NULL;
+    reset_file_field_state(fnum);
+}
+
+/* Byte offset of record `record` for PUT/GET on a RANDOM (LEN-byte records)
+ * or BINARY (1-based byte position) file; reports Bad record number below 1. */
+static int file_record_offset(int fnum, double record, long *offset) {
+    if (record < 1.0 || record > 2147483647.0) {
+        report_runtime_error(ERR_BAD_RECORD_NUMBER);
+        return 0;
+    }
+    long position = (long)record;
+    *offset = file_mode[fnum] == FILE_MODE_BINARY
+        ? position - 1 : (position - 1) * (long)file_record_length[fnum];
+    return 1;
+}
+
+/* Parses the optional record argument of PUT #n/GET #n. An omitted record
+ * means the record (or byte) after the last one used. */
+static double parse_record_number(const char **ptr, int fnum, int *has_more) {
+    double record = -1;
+    *has_more = 0;
+    if (next_graphics_comma(ptr)) {
+        if (graphics_arg_present(ptr)) record = evaluate_expression(ptr);
+        *has_more = next_graphics_comma(ptr);
+    }
+    if (record < 0 && fnum >= 1 && fnum < 16) record = (double)file_last_record[fnum] + 1;
+    return record;
+}
+
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num) {
     const char *ptr = *ptr_addr;
     Token t = get_next_token(&ptr);
@@ -7459,11 +7822,18 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
     if (is_direct) {
         if (t.type == TOKEN_NUMBER) {
             if (last_line_num) *last_line_num = t.int_val;
-            add_line(t.int_val, ptr, current_source_line_number, 1);
+            // Typing a line number alone deletes that line, as in BASICA.
+            if (!last_line_num && *skip_whitespace_fast(ptr) == '\0') delete_line(t.int_val);
+            else add_line(t.int_val, ptr, current_source_line_number, 1);
             return;
         } else if (last_line_num) {
             *last_line_num += 10;
             add_line(*last_line_num, *ptr_addr, current_source_line_number, 0);
+            return;
+        } else if (t.type != TOKEN_LIST && t.type != TOKEN_RUN && t.type != TOKEN_NEW &&
+                   t.type != TOKEN_CONT) {
+            execute_direct_line(*ptr_addr);
+            *ptr_addr += strlen(*ptr_addr);
             return;
         }
     }
@@ -7556,13 +7926,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         }
                         *ptr_addr = ptr;
                         return;
-                    } else if (mode.type == TOKEN_IDENTIFIER && strcasecmp(mode.text, "STOP") == 0) {
+                    } else if (mode.type == TOKEN_STOP) {
                         if (k >= 1 && k < 32) key_state[k] = 2;
                         *ptr_addr = ptr;
                         return;
                     }
                 }
-            } else if (first.type == TOKEN_ON || first.type == TOKEN_OFF || (first.type == TOKEN_IDENTIFIER && strcasecmp(first.text, "STOP") == 0)) {
+            } else if (first.type == TOKEN_ON || first.type == TOKEN_OFF || (first.type == TOKEN_STOP)) {
                 *ptr_addr = ptr;
                 return;
             }
@@ -7582,7 +7952,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 timer_event_active = 0;
                 *ptr_addr = ptr;
                 return;
-            } else if (mode.type == TOKEN_IDENTIFIER && strcasecmp(mode.text, "STOP") == 0) {
+            } else if (mode.type == TOKEN_STOP) {
                 timer_state = 2;
                 *ptr_addr = ptr;
                 return;
@@ -7598,7 +7968,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 for (int i = 0; i < 8; i++) strig_event_pending[i] = 0;
                 *ptr_addr = ptr;
                 return;
-            } else if (mode.type == TOKEN_IDENTIFIER && strcasecmp(mode.text, "STOP") == 0) {
+            } else if (mode.type == TOKEN_STOP) {
                 strig_state = 2;
                 *ptr_addr = ptr;
                 return;
@@ -7665,6 +8035,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     ptr = item_saved;
                     last_expression_is_double = 0;
                     double val = evaluate_expression(&ptr); 
+                    if (runtime_error_occurred) break; // the failed item is not printed
                     int prec = last_expression_is_double ? 16 : 7;
 
                     if (using_mode) apply_basika_using(using_fmt, val, val_buf, sizeof(val_buf));
@@ -7726,9 +8097,72 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             Token var_token = (t.type == TOKEN_LET) ? get_next_token(&ptr) : t;
             execute_assignment(&ptr, var_token);
         } else if (t.type == TOKEN_LIST && is_direct) {
-            list_program();
+            // LIST [first][-[last]]
+            int first = 0, last = 0x7FFFFFFF;
+            const char *saved = ptr;
+            Token from = get_next_token(&ptr);
+            if (from.type == TOKEN_NUMBER) {
+                first = last = from.int_val;
+                saved = ptr;
+                from = get_next_token(&ptr);
+            }
+            if (from.type == TOKEN_MINUS) {
+                last = 0x7FFFFFFF;
+                saved = ptr;
+                Token to = get_next_token(&ptr);
+                if (to.type == TOKEN_NUMBER) last = to.int_val;
+                else ptr = saved;
+            } else {
+                ptr = saved;
+            }
+            list_program_range(first, last);
+        } else if (t.type == TOKEN_CONT && is_direct) {
+            if (!cont_valid || cont_generation != program_edit_generation()) {
+                current_executing_line = DIRECT_LINE_NUMBER;
+                report_runtime_error(ERR_CANT_CONTINUE);
+            } else {
+                stop_running = 0;
+                break_requested = 0;
+                runtime_error_occurred = 0;
+                execute_statements(cont_stmt, cont_resume_ptr, cont_resume_ts_pos);
+            }
+        } else if (t.type == TOKEN_WAIT) {
+            int port = (int)evaluate_expression(&ptr);
+            int and_mask = 0, xor_mask = 0;
+            if (get_next_token(&ptr).type != TOKEN_COMMA) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            and_mask = (int)evaluate_expression(&ptr);
+            const char *saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_COMMA) xor_mask = (int)evaluate_expression(&ptr);
+            else ptr = saved;
+            if (port < 0 || port > 65535 || and_mask < 0 || and_mask > 255 || xor_mask < 0 || xor_mask > 255) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                return;
+            }
+            execute_wait(port, and_mask, xor_mask);
+        } else if (t.type == TOKEN_STOP) {
+            // STOP reached outside the main run loop (inside a FUNCTION); the break
+            // is reported when the calling statement finishes.
+            break_requested = 1;
+            stop_running = 1;
         } else if (t.type == TOKEN_RUN && is_direct) {
-            run_program();
+            // RUN [line]
+            const char *saved = ptr;
+            Token start = get_next_token(&ptr);
+            if (start.type == TOKEN_NUMBER) {
+                Statement *start_stmt = find_line(start.int_val);
+                if (!start_stmt) {
+                    current_executing_line = DIRECT_LINE_NUMBER;
+                    report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+                } else {
+                    run_program_from(start_stmt);
+                }
+            } else {
+                ptr = saved;
+                run_program();
+            }
         } else if (t.type == TOKEN_NEW && is_direct) {
             clear_program();
             clear_variables(0); // Full reset for NEW
@@ -7969,26 +8403,101 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
             }
         } else if (t.type == TOKEN_OPEN) {
+            // OPEN file$ [FOR mode] [ACCESS ...] [lock] AS [#]n [LEN = reclen]
+            // or the GW-BASIC form OPEN mode$, [#]n, file$[, reclen]
+            char first[256] = "";
             char path_buf[256] = "";
-            parse_string_expression(&ptr, path_buf, sizeof(path_buf));
-            get_next_token(&ptr); // FOR
-            Token mode = get_next_token(&ptr);
-            get_next_token(&ptr); // AS
-            get_next_token(&ptr); // #
-            int fnum = (int)evaluate_expression(&ptr);
-            if (fnum >= 1 && fnum < 16) {
-                const char *m = mode.text;
-                const char *mode_str = "r";
-                if (strcasecmp(m, "OUTPUT") == 0) mode_str = "w";
-                else if (strcasecmp(m, "INPUT") == 0) mode_str = "r";
-                else if (strcasecmp(m, "RANDOM") == 0) mode_str = "w+";
-                else if (strcasecmp(m, "RWB") == 0 || strcasecmp(m, "RW") == 0) mode_str = "w+";
-                reset_file_field_state(fnum);
-                file_handles[fnum] = fopen(path_buf, mode_str);
-                if (!file_handles[fnum]) {
-                    report_runtime_error(ERR_FILE_NOT_FOUND);
+            parse_string_expression(&ptr, first, sizeof(first));
+            int mode = FILE_MODE_RANDOM;
+            int reclen = 128;
+            int fnum = 0;
+            const char *saved = ptr;
+            Token sep = get_next_token(&ptr);
+            if (sep.type == TOKEN_COMMA) {
+                switch (toupper((unsigned char)first[0])) {
+                    case 'I': mode = FILE_MODE_INPUT; break;
+                    case 'O': mode = FILE_MODE_OUTPUT; break;
+                    case 'A': mode = FILE_MODE_APPEND; break;
+                    case 'B': mode = FILE_MODE_BINARY; break;
+                    case 'R': mode = FILE_MODE_RANDOM; break;
+                    default: report_runtime_error(ERR_BAD_FILE_MODE); return;
+                }
+                const char *hash_saved = ptr;
+                if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
+                fnum = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_COMMA) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                parse_string_expression(&ptr, path_buf, sizeof(path_buf));
+                saved = ptr;
+                if (get_next_token(&ptr).type == TOKEN_COMMA) reclen = (int)evaluate_expression(&ptr);
+                else ptr = saved;
+            } else {
+                snprintf(path_buf, sizeof(path_buf), "%s", first);
+                if (sep.type == TOKEN_FOR) {
+                    Token m = get_next_token(&ptr);
+                    if (m.type == TOKEN_INPUT) mode = FILE_MODE_INPUT;
+                    else if (strcasecmp(m.text, "OUTPUT") == 0) mode = FILE_MODE_OUTPUT;
+                    else if (strcasecmp(m.text, "APPEND") == 0) mode = FILE_MODE_APPEND;
+                    else if (strcasecmp(m.text, "BINARY") == 0) mode = FILE_MODE_BINARY;
+                    else if (strcasecmp(m.text, "RANDOM") == 0 || strcasecmp(m.text, "RWB") == 0 ||
+                             strcasecmp(m.text, "RW") == 0) mode = FILE_MODE_RANDOM;
+                    else {
+                        report_runtime_error(ERR_BAD_FILE_MODE);
+                        return;
+                    }
+                } else {
+                    ptr = saved;
+                }
+                // ACCESS and LOCK clauses are accepted; files are not shared.
+                Token as_tok = get_next_token(&ptr);
+                while (as_tok.type != TOKEN_AS && as_tok.type != TOKEN_EOF && as_tok.type != TOKEN_COLON) {
+                    as_tok = get_next_token(&ptr);
+                }
+                if (as_tok.type != TOKEN_AS) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                const char *hash_saved = ptr;
+                if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
+                fnum = (int)evaluate_expression(&ptr);
+                saved = ptr;
+                if (get_next_token(&ptr).type == TOKEN_LEN && get_next_token(&ptr).type == TOKEN_EQUALS) {
+                    reclen = (int)evaluate_expression(&ptr);
+                } else {
+                    ptr = saved;
                 }
             }
+            if (fnum < 1 || fnum >= 16) {
+                report_runtime_error(ERR_BAD_FILE_NUMBER);
+                return;
+            }
+            if (file_handles[fnum]) {
+                report_runtime_error(ERR_FILE_ALREADY_OPEN);
+                return;
+            }
+            if (reclen < 1 || reclen > 32767) {
+                report_runtime_error(ERR_BAD_RECORD_LENGTH);
+                return;
+            }
+            const char *mode_str = "r";
+            if (mode == FILE_MODE_OUTPUT) mode_str = "w";
+            else if (mode == FILE_MODE_APPEND) mode_str = "a";
+            else if (mode == FILE_MODE_RANDOM || mode == FILE_MODE_BINARY) mode_str = "r+b";
+            reset_file_field_state(fnum);
+            file_handles[fnum] = fopen(path_buf, mode_str);
+            // RANDOM and BINARY create the file when it does not exist yet.
+            if (!file_handles[fnum] && (mode == FILE_MODE_RANDOM || mode == FILE_MODE_BINARY)) {
+                file_handles[fnum] = fopen(path_buf, "w+b");
+            }
+            if (!file_handles[fnum]) {
+                report_runtime_error(ERR_FILE_NOT_FOUND);
+                return;
+            }
+            file_mode[fnum] = mode;
+            file_record_length[fnum] = reclen;
+            file_last_record[fnum] = 0;
         } else if (t.type == TOKEN_FIELD) {
             Token hash = get_next_token(&ptr);
             if (hash.type != TOKEN_HASH) {
@@ -8051,6 +8560,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
 
             reset_file_field_state(fnum);
+            if (total_len > file_record_length[fnum]) {
+                report_runtime_error(ERR_FIELD_OVERFLOW);
+                return;
+            }
             file_field_state[fnum].buffer = malloc((size_t)total_len + 1);
             if (!file_field_state[fnum].buffer) {
                 report_runtime_error(ERR_OUT_OF_MEMORY);
@@ -8079,17 +8592,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             parse_string_expression(&ptr, value, sizeof(value));
             set_string_variable_with_align(idx, array_idx, value, t.type == TOKEN_RSET);
         } else if (t.type == TOKEN_CLOSE) {
-            const char *saved = ptr;
-            Token hash = get_next_token(&ptr);
-            if (hash.type == TOKEN_HASH) {
-                int fnum = (int)evaluate_expression(&ptr);
-                if (fnum >= 1 && fnum < 16 && file_handles[fnum]) {
-                    fclose(file_handles[fnum]);
-                    file_handles[fnum] = NULL;
-                    reset_file_field_state(fnum);
-                }
+            // CLOSE [[#]n[, [#]n ...]]; with no file numbers every file is closed.
+            if (graphics_statement_end(&ptr)) {
+                for (int fnum = 1; fnum < 16; fnum++) close_file_number(fnum);
             } else {
-                ptr = saved;
+                do {
+                    const char *hash_saved = ptr;
+                    if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
+                    close_file_number((int)evaluate_expression(&ptr));
+                } while (next_graphics_comma(&ptr));
             }
         } else if (t.type == TOKEN_KILL) {
             char path_buf[256] = "";
@@ -8544,6 +9055,18 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         }
                         if (dim_err) break;
 
+                        // STATIC procedures allocate their arrays once and keep them.
+                        if (dim_scope && is_static_local(dim_scope, target->name) &&
+                            (target->array || target->s_array) && target->array_size == total_size) {
+                            snprintf(shared_full, sizeof(shared_full), "%s", vars[idx].name);
+                            saved = ptr;
+                            if (get_next_token(&ptr).type != TOKEN_COMMA) {
+                                ptr = saved;
+                                break;
+                            }
+                            continue;
+                        }
+
                         if (is_string_var(var.text)) {
                             if (target->s_array) {
                                 report_runtime_error(ERR_DUPLICATE_DEFINITION);
@@ -8990,19 +9513,20 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
             } else if (next.type == TOKEN_HASH) {
                 int fnum = (int)evaluate_expression(&ptr);
-                Token sep = get_next_token(&ptr);
-                if (sep.type != TOKEN_COMMA) { ptr = saved; }
-                else {
-                    double rec = evaluate_expression(&ptr);
-                    Token mode_sep = get_next_token(&ptr);
-                    if (mode_sep.type != TOKEN_COMMA) {
+                Token sep;
+                int has_more = 0;
+                double rec = parse_record_number(&ptr, fnum, &has_more);
+                {
+                    if (!has_more) {
                         if (fnum < 1 || fnum >= 16 || !file_handles[fnum] || !file_field_state[fnum].buffer || file_field_state[fnum].size <= 0) {
                             report_runtime_error(ERR_BAD_FILE_NUMBER);
                         } else {
-                            long offset = (long)((rec - 1) * file_field_state[fnum].size);
+                            long offset;
+                            if (!file_record_offset(fnum, rec, &offset)) return;
                             fseek(file_handles[fnum], offset, SEEK_SET);
                             fwrite(file_field_state[fnum].buffer, 1, file_field_state[fnum].size, file_handles[fnum]);
                             fflush(file_handles[fnum]);
+                            file_last_record[fnum] = (long)rec;
                         }
                     } else {
                         const char *argument_start = ptr;
@@ -9044,6 +9568,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                             } else {
                                 long offset = (long)((rec - 1) * len);
                                 fseek(file_handles[fnum], offset, SEEK_SET);
+                                file_last_record[fnum] = (long)rec;
                                 char buf[BASIC_STRING_MAX];
                                 memset(buf, ' ', len);
                                 strncpy(buf, data, len);
@@ -9095,17 +9620,18 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
             } else if (next.type == TOKEN_HASH) {
                 int fnum = (int)evaluate_expression(&ptr);
-                Token sep = get_next_token(&ptr);
-                if (sep.type != TOKEN_COMMA) { ptr = saved; }
-                else {
-                    double rec = evaluate_expression(&ptr);
-                    Token mode_sep = get_next_token(&ptr);
-                    if (mode_sep.type != TOKEN_COMMA) {
+                Token sep;
+                int has_more = 0;
+                double rec = parse_record_number(&ptr, fnum, &has_more);
+                {
+                    if (!has_more) {
                         if (fnum < 1 || fnum >= 16 || !file_handles[fnum] || !file_field_state[fnum].buffer || file_field_state[fnum].size <= 0) {
                             report_runtime_error(ERR_BAD_FILE_NUMBER);
                         } else {
-                            long offset = (long)((rec - 1) * file_field_state[fnum].size);
+                            long offset;
+                            if (!file_record_offset(fnum, rec, &offset)) return;
                             fseek(file_handles[fnum], offset, SEEK_SET);
+                            file_last_record[fnum] = (long)rec;
                             size_t r = fread(file_field_state[fnum].buffer, 1, file_field_state[fnum].size, file_handles[fnum]);
                             if (r < (size_t)file_field_state[fnum].size) {
                                 for (size_t i = r; i < (size_t)file_field_state[fnum].size; i++) file_field_state[fnum].buffer[i] = ' ';
@@ -9140,6 +9666,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                                     } else {
                                         long offset = (long)((rec - 1) * len);
                                         fseek(file_handles[fnum], offset, SEEK_SET);
+                                        file_last_record[fnum] = (long)rec;
                                         char buf[BASIC_STRING_MAX];
                                         size_t r = fread(buf, 1, len, file_handles[fnum]);
                                         if (r < (size_t)len) {
@@ -9291,7 +9818,30 @@ void interpret_line(const char *input, int is_direct, int *last_line_num, int so
     interpret_line_at_ptr(&ptr, is_direct, last_line_num);
 }
 
+static BlockIfFrame block_if_stack[MAX_BLOCK_IF_DEPTH];
+static int block_if_depth = 0;
+static SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
+static int select_case_depth = 0;
+
+/* Where CONT resumes after STOP or Ctrl+C, valid until the program is edited. */
+static int cont_valid = 0;
+static Statement *cont_stmt = NULL;
+static const char *cont_resume_ptr = NULL;
+static int cont_resume_ts_pos = -1;
+static unsigned int cont_generation = 0;
+/* Program edit generation at the last procedure/TYPE scan. */
+static unsigned int scanned_generation = 0;
+
+static void execute_statements(Statement *curr, const char *resume_ptr, int resume_ts_pos);
+
+static void run_program_from(Statement *start);
+
 void run_program() {
+    run_program_from(get_head());
+}
+
+/* RUN [line]: clears variables and runs from the start or from that line. */
+static void run_program_from(Statement *start) {
     clear_variables(1); // Keep registry for RUN to maintain pre-tokenized indices
     stop_running = 0;
     runtime_error_occurred = 0;
@@ -9304,10 +9854,11 @@ void run_program() {
     do_ptr = 0;
     call_stack_depth = 0;
     scan_procedures();
+    scanned_generation = program_edit_generation();
     print_col = 0;
     print_row = 0;
     clear_data_pointer();
-    Statement *curr = get_head();
+    Statement *curr = start;
     const char *resume_ptr = NULL;
     int resume_ts_pos = -1;
     error_stmt = NULL;
@@ -9328,11 +9879,46 @@ void run_program() {
         reset_file_field_state(i);
     }
 
+    block_if_depth = 0;
+    select_case_depth = 0;
+    execute_statements(curr, resume_ptr, resume_ts_pos);
+}
+
+/* Records where CONT should resume and reports "Break in N". */
+static void note_break(Statement *exec_stmt, const TokenStream *ts, int jumped,
+                       Statement *next_stmt, const char *next_ptr, int next_ts_pos) {
+    break_requested = 0;
+    if (jumped) {
+        cont_stmt = next_stmt;
+        cont_resume_ptr = next_ptr;
+        cont_resume_ts_pos = next_ts_pos;
+    } else if (ts->pos < exec_stmt->token_count) {
+        cont_stmt = exec_stmt;
+        cont_resume_ptr = NULL;
+        cont_resume_ts_pos = ts->pos;
+    } else {
+        cont_stmt = exec_stmt->next;
+        cont_resume_ptr = NULL;
+        cont_resume_ts_pos = -1;
+    }
+    // A break inside a direct-mode line cannot be continued.
+    cont_valid = exec_stmt->line_number != DIRECT_LINE_NUMBER;
+    cont_generation = program_edit_generation();
+    char message[64];
+    if (exec_stmt->line_number == DIRECT_LINE_NUMBER) {
+        snprintf(message, sizeof(message), "Break\n");
+    } else {
+        int display_line = exec_stmt->has_explicit_line_number || exec_stmt->source_line_number <= 0
+            ? exec_stmt->line_number : exec_stmt->source_line_number;
+        snprintf(message, sizeof(message), "Break in %d\n", display_line);
+    }
+    basic_output(message);
+}
+
+/* Runs statements from curr (optionally mid-line) until the program ends,
+ * stops on an error, or breaks; used by RUN, CONT and direct-mode lines. */
+static void execute_statements(Statement *curr, const char *resume_ptr, int resume_ts_pos) {
     int poll_counter = 0;
-    BlockIfFrame block_if_stack[MAX_BLOCK_IF_DEPTH];
-    int block_if_depth = 0;
-    SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
-    int select_case_depth = 0;
     while (curr && !stop_running) {
 
         if (curr->token_count >= 2 && curr->tokens[0].type == TOKEN_TYPE) {
@@ -9370,6 +9956,8 @@ void run_program() {
         current_executing_line = exec_stmt->line_number;
         current_source_line_number = exec_stmt->source_line_number;
         current_has_explicit_line_number = exec_stmt->has_explicit_line_number;
+        // Running any program line ends the chance to CONT an earlier break.
+        if (exec_stmt->line_number != DIRECT_LINE_NUMBER) cont_valid = 0;
         
         int start_pos = 0;
         if (resume_ptr || resume_ts_pos >= 0) {
@@ -9972,68 +10560,16 @@ void run_program() {
                 ts.pos = exec_stmt->token_count;
                 continue;
 
-            case TOKEN_SHARED: {
-                if (call_stack_depth > 0) {
-                    CallFrame *frame = &call_stack[call_stack_depth - 1];
-                    while (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type != TOKEN_COLON && ts.tokens[ts.pos].type != TOKEN_EOF) {
-                        if (ts.tokens[ts.pos].type == TOKEN_IDENTIFIER) {
-                            if (frame->shared_count < 32) {
-                                char norm[32];
-                                strncpy(norm, ts.tokens[ts.pos].text, 31);
-                                norm[31] = '\0';
-                                for (int c = 0; norm[c]; c++) norm[c] = (char)toupper((unsigned char)norm[c]);
-                                /* Optional "()" for arrays and "AS type" clause. */
-                                int look = ts.pos + 1;
-                                if (look + 1 < exec_stmt->token_count &&
-                                    ts.tokens[look].type == TOKEN_LPAREN &&
-                                    ts.tokens[look + 1].type == TOKEN_RPAREN) look += 2;
-                                const char *suffix = NULL;
-                                if (look + 1 < exec_stmt->token_count && ts.tokens[look].type == TOKEN_AS) {
-                                    const char *type_name = ts.tokens[look + 1].text;
-                                    look += 2;
-                                    if (strcasecmp(type_name, "_UNSIGNED") == 0 &&
-                                        look < exec_stmt->token_count &&
-                                        strcasecmp(ts.tokens[look].text, "LONG") == 0) {
-                                        type_name = "_UNSIGNED LONG";
-                                        look++;
-                                    }
-                                    suffix = primitive_type_suffix(type_name);
-                                }
-                                size_t len = strlen(norm);
-                                if (len > 0 && !is_type_suffix_char(norm[len-1])) {
-                                    if (!suffix) {
-                                        for (int d = 0; d < declared_type_count; d++) {
-                                            if (declared_types[d].scope == NULL &&
-                                                strcmp(declared_types[d].name, norm) == 0) {
-                                                suffix = declared_types[d].suffix;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if (suffix) {
-                                        declare_variable_type(norm, suffix, frame->proc, 0);
-                                        if (len + strlen(suffix) < sizeof(norm)) strcat(norm, suffix);
-                                    } else if (norm[0] >= 'A' && norm[0] <= 'Z') {
-                                        char default_suffix = default_type_map[norm[0] - 'A'];
-                                        if (default_suffix != '\0') {
-                                            norm[len] = default_suffix;
-                                            norm[len+1] = '\0';
-                                        }
-                                    }
-                                }
-                                strncpy(frame->shared_var_names[frame->shared_count++], norm, 31);
-                                ts.pos = look - 1;
-                            }
-                        }
-                        ts.pos++;
-                        if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COMMA) ts.pos++;
-                    }
-                    clear_resolved_variables(frame);
-                } else {
-                    ts.pos = exec_stmt->token_count;
-                }
+            case TOKEN_SHARED:
+            case TOKEN_STATIC:
+                execute_shared_or_static(&ts, t->type == TOKEN_STATIC);
                 continue;
-            }
+
+            case TOKEN_STOP:
+                // Pause like a Ctrl+C break; CONT resumes after this statement.
+                break_requested = 1;
+                stop_running = 1;
+                continue;
 
             case TOKEN_EXIT: {
                 if (ts.pos < exec_stmt->token_count) {
@@ -10186,7 +10722,9 @@ void run_program() {
                         }
                         basic_string_release(&value);
                     } else {
-                        set_numeric_variable(idx, array_idx, evaluate_expression_tok(&ts));
+                        double value = evaluate_expression_tok(&ts);
+                        // An error while evaluating aborts the assignment, as in QBasic.
+                        if (!runtime_error_occurred) set_numeric_variable(idx, array_idx, value);
                     }
                     continue;
                 }
@@ -10244,6 +10782,10 @@ void run_program() {
             } else {
                 error_next_ptr = exec_stmt->raw_command + strlen(exec_stmt->raw_command);
             }
+        }
+
+        if (stop_running && break_requested && !runtime_error_occurred) {
+            note_break(exec_stmt, &ts, jumped, curr, resume_ptr, resume_ts_pos);
         }
 
         if (!stop_running && !jumped) {

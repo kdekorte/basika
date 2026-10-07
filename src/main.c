@@ -29,6 +29,7 @@ static void print_usage(const char *prog) {
  * interrupt a running BASIC program gracefully */
 void handle_sigint(int sig) {
     (void)sig;
+    break_requested = 1;
     stop_running = 1;
 }
 
@@ -46,7 +47,8 @@ void repl() {
     }
 
     while (1) {
-        stop_running = 0; // Reset flag for new input
+        stop_running = 0; // Reset flags for new input
+        break_requested = 0;
         if (graphics_is_active()) {
             if (!quiet_mode) graphics_print("Ok\n> ");
             graphics_readline(buffer, sizeof(buffer));

@@ -4,6 +4,8 @@
 
 void add_line(int line_num, const char *text, int source_line_number, int has_explicit_line_number);
 void list_program();
+void list_program_range(int first_line, int last_line);
+unsigned int program_edit_generation(void);
 Statement* find_label(const char *label);
 void clear_program();
 Statement* get_head();

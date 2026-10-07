@@ -151,6 +151,13 @@ TESTS=(
   "tests/procedures/const_arguments"
   "tests/procedures/string_locals_release"
   "tests/procedures/local_arrays"
+  "tests/procedures/static_locals"
+  "tests/procedures/local_record_arrays"
+  "tests/system/direct_mode"
+  "tests/control_flow/stop_statement"
+  "tests/math/integer_division"
+  "tests/file_io/random_records"
+  "tests/system/wait_retrace"
   "tests/control_flow/if_sub_call"
   "tests/system/system_in_program"
   "tests/strings/string_compare_logic"
@@ -254,6 +261,9 @@ for t in "${TESTS[@]}"; do
       exit 2
     fi
     rm -f "tests/$name.result" "tests/$name.png"
+  elif [ -f "$t.input" ]; then
+    # Direct-mode (REPL) tests feed their commands on standard input.
+    OUT=$(./basika -q < "$t.input" 2>&1)
   elif [ "$t" = "tests/audio/asc_chr_beep" ]; then
     OUT=$(./basika "$t.bas" 2>&1)
   elif [[ "$t" == tests/audio/* ]]; then

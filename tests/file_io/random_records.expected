@@ -1,0 +1,11 @@
+LOF 69 LOC 3 
+-2 [AB   ] 1.5   70000   0.3333333333333333 
+next record 7 LOC 3 
+FE FF 41 42 20 20 20 0 0 C0 3F 70 11 1 
+binary-2   70000 LOC 46 
+default LEN 151 
+error 59 
+error 63 
+error 50 
+error 55 
+Deleted

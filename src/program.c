@@ -9,6 +9,10 @@ static Statement *head = NULL;
 static Statement **line_index = NULL;
 static int line_index_count = 0;
 static int index_dirty = 1;
+/* Bumped by every edit, so CONT can refuse to resume a changed program. */
+static unsigned int edit_generation = 1;
+
+unsigned int program_edit_generation(void) { return edit_generation; }
 
 static void free_statement_expressions(Statement *stmt) {
     if (!stmt->compiled_expressions) return;
@@ -59,6 +63,7 @@ static void update_line_index() {
  * extracts a label (e.g. "myLabel:") from the first token if present */
 void add_line(int line_num, const char *text, int source_line_number, int has_explicit_line_number) {
     index_dirty = 1;
+    edit_generation++;
     Statement **curr = &head;
     while (*curr && (*curr)->line_number < line_num) {
         curr = &((*curr)->next);
@@ -145,22 +150,32 @@ Statement* find_next_statement(int line_num) {
     return NULL;
 }
 
-/* list_program - Print all stored program lines in order via basic_output,
- * implementing the LIST command */
-void list_program() {
+/* list_program_range - Print the stored lines numbered first_line through
+ * last_line via basic_output, implementing LIST [first][-[last]] */
+void list_program_range(int first_line, int last_line) {
     Statement *curr = head;
     while (curr) {
-        char out_buf[256 + 16]; // Enough for line number + command + newline
-        sprintf(out_buf, "%d %s\n", curr->line_number, curr->raw_command);
-        basic_output(out_buf);
+        if (curr->line_number >= first_line && curr->line_number <= last_line) {
+            const char *text = curr->raw_command;
+            if (*text == ' ') text++; // stored text keeps the space after the number
+            char out_buf[256 + 16]; // Enough for line number + command + newline
+            snprintf(out_buf, sizeof(out_buf), "%d %s\n", curr->line_number, text);
+            basic_output(out_buf);
+        }
         curr = curr->next;
     }
+}
+
+/* list_program - Print all stored program lines in order */
+void list_program() {
+    list_program_range(0, 0x7FFFFFFF);
 }
 
 /* clear_program - Free all statements and reset the program storage,
  * implementing the NEW command */
 void clear_program() {
     index_dirty = 1;
+    edit_generation++;
     Statement *curr = head;
     while (curr) {
         Statement *next = curr->next;
@@ -176,6 +191,7 @@ void clear_program() {
  * Frees the statement and its tokens */
 void delete_line(int line_num) {
     index_dirty = 1;
+    edit_generation++;
     Statement **curr = &head;
     while (*curr) {
         if ((*curr)->line_number == line_num) {

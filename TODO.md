@@ -32,12 +32,7 @@
 
 ## Interpreter correctness
 
-- `STATIC` procedures and `STATIC` variables are parsed but locals are not preserved between calls.
-- Arrays of records `DIM`med inside a procedure are still module-level (numeric and string arrays are local).
-- Each field of each `TYPE` array element uses one of the 8192 variable-table entries.
-- Add support for `CONT`, `STOP`, and better direct-mode behavior.
-- Implement `WAIT` for port monitoring (or a simulated equivalent).
-- Verify remaining QBASIC random-record binary-layout edge cases.
+- Each field of each `TYPE` array element uses one of the 8192 variable-table entries; storing records as contiguous blocks would remove that limit and speed up record I/O.
 
 ## Lexer and interpreter performance
 

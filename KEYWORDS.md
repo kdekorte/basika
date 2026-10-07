@@ -17,7 +17,7 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `!` suffix keeps it SINGLE.
 
 `ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CHDIR`,
-`CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COS`, `CVD`, `CVI`,
+`CHR$`, `CIRCLE`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `CONST`, `CONT`, `COS`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
 `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
@@ -28,9 +28,9 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `POKE`, `PRESET`, `PRINT`, `PSET`, `PUT`, `QUIT`, `RANDOMIZE`, `READ`, `REM`, `RESTORE`,
 `RESUME`, `RETURN`, `REVERSE`, `RIGHT$`, `RMDIR`, `RND`, `RSET`, `RTRIM$`, `RUN`,
 `SCREEN`, `SCREENSHOT`, `SEEK`, `SELECT`, `SGN`, `SHARED`, `SHELL`, `SIN`, `SLEEP`, `SOUND`, `SPACE$`,
-`SPC`, `SQR`, `STATIC`, `STEP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
+`SPC`, `SQR`, `STATIC`, `STEP`, `STOP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UCASE$`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
-`VIEW`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DISPLAY`, `_FONT`,
+`VIEW`, `WAIT`, `WEND`, `WHILE`, `WINDOW`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DISPLAY`, `_FONT`,
 `_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`,
 `_DEFLATE$`, `_INFLATE$`.
 
@@ -91,12 +91,13 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 `IF...THEN`, and `ON ERROR GOTO`.
 
 ## Subroutines and Functions (QBasic Procedures)
-- `SUB subname[(param1[, param2...])] [STATIC] ... END SUB`: Defines a QBasic-style subroutine procedure with isolated local variable scope. A parameter may be declared `name AS type` with `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING` or a user-defined type; values passed in are converted to that type.
+- `SUB subname[(param1[, param2...])] [STATIC] ... END SUB`: Defines a QBasic-style subroutine procedure with isolated local variable scope. With `STATIC`, every local variable, array and record keeps its value between calls. A parameter may be declared `name AS type` with `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING` or a user-defined type; values passed in are converted to that type.
 - `FUNCTION funcname[(param1[, param2...])] [STATIC] ... END FUNCTION`: Defines a QBasic-style function procedure that returns a value by assigning `funcname = expression`. Supports recursion.
 - `CALL subname[(arg1[, arg2...])]` or `subname arg1[, arg2...]`: Invokes a subroutine procedure. Simple variable arguments are passed by reference; parenthesized expressions `((x))` are passed by value.
 - `DECLARE {SUB | FUNCTION} name[(params)]`: Declare procedure signatures (procedures are also pre-scanned automatically).
 - `SHARED var1[()] [AS type][, var2...]`: Grants access to main program global variables from within a procedure block.
-- `STATIC var1[, var2...]`: Declares static local variables preserved across procedure calls.
+- `STATIC var1[()] [AS type][, var2...]`: Inside a `SUB` or `FUNCTION`, keeps the listed local variables (and arrays) between calls.
+- Arrays and records `DIM`med in a procedure are local and created on each call; in a `STATIC` procedure they are allocated once.
 - `EXIT {SUB | FUNCTION}`: Exits the active procedure prematurely.
 
 ## Control Flow and Program Structure
@@ -110,7 +111,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `ON TIMER(n) GOSUB line`: Enables a periodic timer trap.
 - `ON ERROR GOTO line`: Error trapping.
 - `RESUME [0 | NEXT | line | label]`: Error recovery.
-- `STOP`: Halts execution (can be resumed with `CONT`).
+- `STOP`: Pauses the program with `Break in N`. In direct mode, `CONT` resumes after the `STOP` with variables, loops and `GOSUB`s intact; Ctrl+C breaks the same way. Run from a file, the program ends there.
+- `CONT`: Continues after `STOP` or a Ctrl+C break. Editing the program, or running program lines after the break, gives "Can't continue".
 - `WHILE condition ... WEND`: Conditional loop.
 - `DO ... LOOP`: Infinite loop; exit with `EXIT DO` or a `GOTO`.
 - `DO WHILE condition ... LOOP`: Pre-test loop that repeats while `condition` is true, checked before each iteration.
@@ -166,21 +168,23 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 
 ## File and System Operations
 - `CHDIR "path"`: Changes current directory.
-- `CLOSE [#n]`: Closes files.
+- `CLOSE [[#]n[, [#]n...]]`: Closes the listed files, or every open file when none are given.
 - `DELETE "file" | line`: Deletes a file or program line.
 - `ENVIRON "VAR=VALUE"`: Sets environment variables.
 - `FILES ["pattern"] [, "output_file"]`: Lists files (wildcards supported). Output shows modification date/time, size (or `<DIR>`), and filename — formatted similar to DOS/BASICA. If `"output_file"` is provided, filenames are written to that file (one per line).
 - `FIELD #n, len AS var$[, len AS var$...]`: Defines record fields for random-file buffers.
-- `GET #n, record[, length, var$]`: Binary/Random file input. If length and `var$` are omitted, the current field buffer for `#n` is read.
+- `GET #n[, [record][, variable]]`: Reads a record into a `TYPE` variable or, with no variable, into the `FIELD` buffer. An omitted record number reads the next record. BASIKA also accepts `GET #n, record, length, var$`, which reads `length` bytes at record stride `length`.
 - `KILL "pattern"`: Deletes files using wildcards.
 - `MKDIR "path"`: Creates a directory.
 - `NAME "old" AS "new"`: Renames a file.
-- `OPEN "file" FOR mode AS #n`: Opens a file (INPUT, OUTPUT, RANDOM, RWB).
-- `PUT #n, record[, length, data$]`: Binary/Random file output. If length and `data$` are omitted, the current field buffer for `#n` is written.
+- `OPEN file$ [FOR mode] [ACCESS ...] AS [#]n [LEN = reclen]`: Opens a file for `INPUT`, `OUTPUT`, `APPEND`, `RANDOM` (the default; `RWB` is a synonym) or `BINARY`. RANDOM files hold records of `reclen` bytes (default 128): record n starts at byte (n - 1) × reclen, and a `TYPE` record larger than `reclen` is a "Bad record length". BINARY files are addressed by byte position (starting at 1). RANDOM and BINARY files are created if missing and never truncated. `ACCESS` and lock clauses are accepted and ignored. The GW-BASIC form `OPEN mode$, [#]n, file$[, reclen]` (mode `I`, `O`, `A`, `R` or `B`) is also accepted.
+- Records are stored packed and little-endian: INTEGER 2 bytes, LONG and `_UNSIGNED LONG` 4, SINGLE 4 (IEEE), DOUBLE 8, `STRING * n` n bytes padded with spaces; reading past the end of the file gives zeros.
+- `PUT #n[, [record][, variable]]`: Writes a `TYPE` variable or, with no variable, the `FIELD` buffer (which may not exceed the record length). An omitted record number writes the next record; record numbers below 1 are a "Bad record number". BASIKA also accepts `PUT #n, record, length, data$`.
 - `RMDIR "path"`: Removes a directory.
 - `SEEK #n, pos`: Sets file position.
 - `SHELL ["command"]`: Executes a system command.
-- `SYSTEM` / `QUIT`: Exits the interpreter.
+- `SYSTEM` / `QUIT`: Ends the program and exits the interpreter, from direct mode or a running program.
+- `WAIT port, and_mask[, xor_mask]`: Pauses until `(port XOR xor_mask) AND and_mask` is nonzero. Ports are simulated: `&H3DA` reports a 60 Hz vertical retrace in bits 8 and 1, so `WAIT &H3DA, 8` syncs animation to frames; every other port reads 0, and a `WAIT` that could never end returns at once.
 
 ## Graphics and Sound
 Coordinates written `STEP(dx, dy)` are relative to the last point referenced,
@@ -231,7 +235,7 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `CVI(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a binary string to integer, single, or double precision.
 - `EOF(n)`: Returns nonzero when file #n is at end of file.
 - `LOF(n)`: Length of file #n in bytes.
-- `LOC(n)`: Current position in file #n.
+- `LOC(n)`: For RANDOM files, the last record read or written; for BINARY files, the last byte; otherwise the current byte position in file #n.
 - `ASC(s$)`: ASCII value of first character.
 - `INSTR([start,] s1$, s2$)`: String search.
 - `LEN(s$)`: String length.
@@ -266,5 +270,6 @@ dynamic strings.
 
 ## Misc
 - `REM` or `'`: Comments.
-- `LIST`: Lists the program.
-- `RUN`: Starts program execution.
+- `LIST [first][-[last]]`: Lists the program, a single line, or a range (`LIST 20-40`, `LIST -40`, `LIST 20-`).
+- `RUN [line]`: Clears variables and runs the program from the start or from `line`.
+- Direct mode: lines typed without a number run immediately, with colons, one-line loops, `GOSUB` and calls; `GOTO line` continues into the program without clearing variables. Typing a line number alone deletes that line. Errors in direct mode are reported without a line number.

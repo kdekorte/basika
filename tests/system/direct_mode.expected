@@ -1,0 +1,26 @@
+10 A = 5
+20 PRINT "A is"; A
+30 STOP
+40 PRINT "after stop"; A
+50 END
+A is 5 
+Break in 30
+ 5 
+after stop 9 
+Can't continue
+hi
+ 1  2  3 
+after stop 9 
+20 PRINT "A is"; A
+30 STOP
+10 A = 5
+20 PRINT "A is"; A
+40 PRINT "after stop"; A
+50 END
+10 A = 5
+20 PRINT "A is"; A
+40 PRINT "after stop"; A
+50 END
+after stop 0 
+Division by zero
+Syntax error
