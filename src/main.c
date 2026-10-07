@@ -49,19 +49,41 @@ void repl() {
     while (1) {
         stop_running = 0; // Reset flags for new input
         break_requested = 0;
+        // AUTO offers the next line number; EDIT offers a line to change.
+        int auto_line = basika_auto_line(0);
+        const char *edit = basika_take_edit_text();
+        char prefix[16] = "";
+        if (auto_line >= 0) snprintf(prefix, sizeof(prefix), "%d ", auto_line);
+        const char *initial = edit[0] ? edit : prefix;
         if (graphics_is_active()) {
-            if (!quiet_mode) graphics_print("Ok\n> ");
-            graphics_readline(buffer, sizeof(buffer));
+            if (!quiet_mode && auto_line < 0) graphics_print("Ok\n> ");
+            graphics_readline_initial(buffer, sizeof(buffer), initial);
         } else {
             handle_events();
-            if (!quiet_mode) printf("Ok\n> ");
-            if (!fgets(buffer, sizeof(buffer), stdin)) break;
+            if (!quiet_mode && auto_line < 0) printf("Ok\n> ");
+            if (edit[0]) printf("%s\n", edit);
+            if (auto_line >= 0) printf("%s", prefix);
+            fflush(stdout);
+            char typed[256];
+            if (!fgets(typed, sizeof(typed), stdin)) break;
+            typed[strcspn(typed, "\n")] = 0;
+            snprintf(buffer, sizeof(buffer), "%s%s", auto_line >= 0 ? prefix : "", typed);
         }
-        
+        buffer[strcspn(buffer, "\n")] = 0;
+
+        if (auto_line >= 0) {
+            // An empty line (just the offered number) or Ctrl+C ends AUTO.
+            const char *rest = buffer + strspn(buffer, "0123456789");
+            rest += strspn(rest, " ");
+            if (stop_running || *rest == '\0') {
+                basika_auto_cancel();
+                continue;
+            }
+        }
         if (stop_running) continue;
 
-        buffer[strcspn(buffer, "\n")] = 0;
         interpret_line(buffer, 1, NULL, 0);
+        if (auto_line >= 0) basika_auto_line(1);
     }
 }
 

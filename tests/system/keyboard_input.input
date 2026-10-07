@@ -1,0 +1,11 @@
+10 INPUT "Values"; X, Y$, Z
+20 PRINT X; "["; Y$; "]"; Z
+30 LINE INPUT "Line: "; L$
+40 PRINT "["; L$; "]"
+50 K$ = INPUT$(2)
+60 PRINT "["; K$; "]"
+RUN
+bad, "q,r", 3
+1, "q,r", 3
+hello, "world"
+ab

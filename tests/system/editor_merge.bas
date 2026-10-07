@@ -1,0 +1,2 @@
+1015 PRINT "merged"
+9000 END

@@ -16,6 +16,14 @@ static void render_canvas_to_window(void); // Forward declaration
 static SDL_Texture **get_active_glyph_cache(void); // Forward declaration
 static SDL_Texture *glyph_cache[128] = {NULL};
 static SDL_Texture *canvas = NULL;
+/* Screen pages: drawing goes to the active page (canvas), and the window
+ * shows the visual page; SCREEN ..., apage, vpage and PCOPY manage them. */
+#define MAX_SCREEN_PAGES 8
+static SDL_Texture *pages[MAX_SCREEN_PAGES] = {NULL};
+static int page_count = 1;
+static int visual_page = 0;
+/* Where the canvas was last drawn in the window, to map mouse positions. */
+static SDL_FRect presented_area = {0, 0, 0, 0};
 static SDL_Color current_text_color = {255, 255, 255, 255};
 static int canvas_width = 1280;
 static int canvas_height = 400;
@@ -60,6 +68,7 @@ static int current_screen_mode = 2;
 static unsigned int fg_color = 15;
 static unsigned int bg_color = 0;
 static void reset_draw_colors(int mode);
+static void restore_default_palette(void);
 
 static int view_active = 0;
 static int view_screen = 0;
@@ -226,6 +235,64 @@ static void reload_font(int target_height) {
     }
 }
 
+/* Replaces the screen pages with count blank pages at the canvas size. */
+static void allocate_pages(int count) {
+    for (int i = 0; i < MAX_SCREEN_PAGES; i++) {
+        if (pages[i]) SDL_DestroyTexture(pages[i]);
+        pages[i] = NULL;
+    }
+    canvas = NULL;
+    page_count = count < 1 ? 1 : (count > MAX_SCREEN_PAGES ? MAX_SCREEN_PAGES : count);
+    visual_page = 0;
+    if (!renderer) return;
+    for (int i = 0; i < page_count; i++) {
+        pages[i] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                     canvas_width, canvas_height);
+        if (!pages[i]) continue;
+        SDL_SetTextureBlendMode(pages[i], SDL_BLENDMODE_NONE);
+        SDL_SetTextureScaleMode(pages[i], SDL_SCALEMODE_NEAREST); // Pixel-perfect retro graphics
+        SDL_SetRenderTarget(renderer, pages[i]);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+    }
+    canvas = pages[0];
+}
+
+/* Pages per mode, as on a VGA card. */
+static int pages_for_mode(int mode) {
+    switch (mode) {
+        case 0: case 7: return 8;
+        case 8: return 4;
+        case 9: case 10: return 2;
+        default: return 1;
+    }
+}
+
+int graphics_page_count(void) {
+    return page_count;
+}
+
+/* SCREEN ..., apage, vpage: returns 0 if either page does not exist. */
+int graphics_set_pages(int active, int visual) {
+    if (active < 0 || active >= page_count || visual < 0 || visual >= page_count) return 0;
+    canvas = pages[active];
+    visual_page = visual;
+    graphics_present_if_autodisplay();
+    return 1;
+}
+
+/* PCOPY source, destination. */
+int graphics_copy_page(int source, int destination) {
+    if (source < 0 || source >= page_count || destination < 0 || destination >= page_count) return 0;
+    if (!renderer || source == destination) return 1;
+    SDL_SetRenderTarget(renderer, pages[destination]);
+    SDL_SetRenderClipRect(renderer, NULL);
+    SDL_RenderTexture(renderer, pages[source], NULL, NULL);
+    SDL_SetRenderTarget(renderer, canvas);
+    if (destination == visual_page) graphics_present_if_autodisplay();
+    return 1;
+}
+
 void set_screen_mode(int mode) {
     current_screen_mode = mode;
     switch(mode) {
@@ -244,6 +311,7 @@ void set_screen_mode(int mode) {
     canvas_height = mode_res_h * 2;
     color_mode_32 = 0;
     palette_mode_256 = (mode == 13);
+    restore_default_palette();
     reset_draw_colors(mode);
     view_active = 0;
     window_active = 0;
@@ -268,13 +336,8 @@ void set_screen_mode(int mode) {
     
     if (current_row_height < 1) current_row_height = 1;
 
-    // Recreate the canvas at the new doubled resolution
-    if (renderer) {
-        if (canvas) SDL_DestroyTexture(canvas);
-        canvas = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, canvas_width, canvas_height);
-        SDL_SetTextureBlendMode(canvas, SDL_BLENDMODE_NONE);
-        SDL_SetTextureScaleMode(canvas, SDL_SCALEMODE_NEAREST); // Pixel-perfect retro graphics
-    }
+    // Recreate the pages at the new doubled resolution
+    allocate_pages(pages_for_mode(mode));
 
     if (renderer && canvas) {
         SDL_SetRenderTarget(renderer, canvas);
@@ -320,12 +383,7 @@ void set_screen_newimage(int width, int height, int colors) {
     window_active = 0;
     view_x1 = 0; view_y1 = 0; view_x2 = mode_res_w - 1; view_y2 = mode_res_h - 1;
 
-    if (renderer) {
-        if (canvas) SDL_DestroyTexture(canvas);
-        canvas = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, canvas_width, canvas_height);
-        SDL_SetTextureBlendMode(canvas, SDL_BLENDMODE_NONE);
-        SDL_SetTextureScaleMode(canvas, SDL_SCALEMODE_NEAREST);
-    }
+    allocate_pages(1);
 
     if (renderer && canvas) {
         SDL_SetRenderTarget(renderer, canvas);
@@ -333,6 +391,20 @@ void set_screen_newimage(int width, int height, int colors) {
         SDL_RenderClear(renderer);
         if (window) render_canvas_to_window();
     }
+}
+
+/* WIDTH columns, rows: re-lays the text grid over the current screen. */
+void graphics_set_text_size(int columns, int rows) {
+    if (columns < 1 || rows < 1) return;
+    text_columns = columns;
+    text_rows = rows;
+    current_col_width = canvas_width / text_columns;
+    current_row_height = canvas_height / text_rows;
+    if (current_col_width < 1) current_col_width = 1;
+    if (current_row_height < 1) current_row_height = 1;
+    if (font_path[0] != '\0') reload_font(current_row_height);
+    cursor_x = 0;
+    cursor_y = 0;
 }
 
 int graphics_get_text_rows(void) {
@@ -859,6 +931,7 @@ int init_graphics() {
         setenv("SDL_VIDEODRIVER", "dummy", 1);
     }
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
+    SDL_InitSubSystem(SDL_INIT_JOYSTICK); // optional: STICK/STRIG work without a joystick
     if (!TTF_Init()) return 0;
     
     // Create a 4:3 Window (1024x768)
@@ -953,10 +1026,11 @@ static void render_canvas_to_window(void) {
         dest_w = (int)(dest_h * target_aspect + 0.5);
     }
     SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
+    presented_area = dst;
     SDL_SetRenderTarget(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
-    SDL_RenderTexture(renderer, canvas, NULL, &dst);
+    SDL_RenderTexture(renderer, pages[visual_page] ? pages[visual_page] : canvas, NULL, &dst);
     SDL_RenderPresent(renderer);
     last_present = SDL_GetTicks();
     SDL_SetRenderTarget(renderer, canvas);
@@ -995,6 +1069,8 @@ void set_text_color(unsigned int color_value) {
 
 static SDL_Color palette256[256];
 static int palette_initialized = 0;
+
+static SDL_Color default_palette256[256];
 
 static void init_palette256(void) {
     if (palette_initialized) return;
@@ -1036,6 +1112,7 @@ static void init_palette256(void) {
         }
         palette256[i] = (SDL_Color){(Uint8)r, (Uint8)g, (Uint8)b, 255};
     }
+    memcpy(default_palette256, palette256, sizeof(palette256));
     palette_initialized = 1;
 }
 
@@ -1046,6 +1123,120 @@ static SDL_Color get_graphics_color(unsigned int color_value) {
     }
     if (!palette_initialized) init_palette256();
     return palette256[color_value & 0xFF];
+}
+
+/* Color for a PALETTE value in the current mode: VGA modes (12, 13 and
+ * 256-color images) take red + 256*green + 65536*blue with 0-63 components;
+ * SCREEN 0 and 9 take a 6-bit EGA rgbRGB value; other modes take one of the
+ * 16 default colors. Returns 0 for an out-of-range value. */
+static int palette_value_to_color(long value, SDL_Color *out) {
+    if (!palette_initialized) init_palette256();
+    if (palette_mode_256 || current_screen_mode == 12) {
+        if (value < 0 || value > 0x3F3F3F || (value & 0xC0C0C0)) return 0;
+        out->r = (Uint8)((value & 0x3F) * 255 / 63);
+        out->g = (Uint8)(((value >> 8) & 0x3F) * 255 / 63);
+        out->b = (Uint8)(((value >> 16) & 0x3F) * 255 / 63);
+    } else if (current_screen_mode == 0 || current_screen_mode == 9) {
+        if (value < 0 || value > 63) return 0;
+        out->r = (Uint8)(((value >> 2) & 1) * 170 + ((value >> 5) & 1) * 85);
+        out->g = (Uint8)(((value >> 1) & 1) * 170 + ((value >> 4) & 1) * 85);
+        out->b = (Uint8)((value & 1) * 170 + ((value >> 3) & 1) * 85);
+    } else {
+        if (value < 0 || value > 15) return 0;
+        *out = default_palette256[value];
+    }
+    out->a = 255;
+    return 1;
+}
+
+/* A new SCREEN mode starts with the default palette. */
+static void restore_default_palette(void) {
+    if (palette_initialized) memcpy(palette256, default_palette256, sizeof(palette256));
+}
+
+int graphics_palette_size(void) {
+    return palette_mode_256 ? 256 : 16;
+}
+
+/* Pixels on screen keep their palette attribute, so after entries change
+ * the canvas is recolored: every pixel showing an old color takes the new
+ * color of the first entry that had it. */
+static void apply_palette_change(const SDL_Color *old_palette) {
+    if (!renderer || !canvas) return;
+    SDL_SetRenderTarget(renderer, canvas);
+    SDL_SetRenderClipRect(renderer, NULL);
+    SDL_Surface *raw = SDL_RenderReadPixels(renderer, NULL);
+    if (!raw) return;
+    SDL_Surface *surf = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA8888);
+    SDL_DestroySurface(raw);
+    if (!surf) return;
+    const SDL_PixelFormatDetails *details = SDL_GetPixelFormatDetails(surf->format);
+    int limit = graphics_palette_size();
+    /* Small open-addressed map from old RGB to the new pixel value. */
+    enum { MAP_SIZE = 1024 };
+    Uint32 keys[MAP_SIZE], values[MAP_SIZE];
+    Uint8 used[MAP_SIZE] = {0};
+    int changed = 0;
+    for (int i = 0; i < limit; i++) {
+        Uint32 key = ((Uint32)old_palette[i].r << 16) | ((Uint32)old_palette[i].g << 8) | old_palette[i].b;
+        unsigned slot = (key * 2654435761u) % MAP_SIZE;
+        while (used[slot] && keys[slot] != key) slot = (slot + 1) % MAP_SIZE;
+        if (used[slot]) continue; // the first entry with this color owns it
+        used[slot] = 1;
+        keys[slot] = key;
+        values[slot] = SDL_MapRGBA(details, NULL, palette256[i].r, palette256[i].g, palette256[i].b, 255);
+        if (memcmp(&old_palette[i], &palette256[i], sizeof(SDL_Color)) != 0) changed = 1;
+    }
+    if (changed) {
+        int pitch = surf->pitch / 4;
+        Uint32 *pixels = (Uint32 *)surf->pixels;
+        for (int y = 0; y < surf->h; y++) {
+            for (int x = 0; x < surf->w; x++) {
+                Uint8 r, g, b;
+                SDL_GetRGB(pixels[y * pitch + x], details, NULL, &r, &g, &b);
+                Uint32 key = ((Uint32)r << 16) | ((Uint32)g << 8) | b;
+                unsigned slot = (key * 2654435761u) % MAP_SIZE;
+                while (used[slot] && keys[slot] != key) slot = (slot + 1) % MAP_SIZE;
+                if (used[slot]) pixels[y * pitch + x] = values[slot];
+            }
+        }
+        SDL_UpdateTexture(canvas, NULL, surf->pixels, surf->pitch);
+        graphics_present_if_autodisplay();
+    }
+    SDL_DestroySurface(surf);
+}
+
+/* PALETTE attribute, value for count entries (a value of -1 leaves its entry
+ * unchanged). Returns 0 if an attribute or value is out of range. */
+int graphics_set_palette(int count, const int *attributes, const long *values) {
+    if (color_mode_32) return 0;
+    if (!palette_initialized) init_palette256();
+    SDL_Color old_palette[256];
+    memcpy(old_palette, palette256, sizeof(palette256));
+    for (int i = 0; i < count; i++) {
+        if (attributes[i] < 0 || attributes[i] >= graphics_palette_size()) return 0;
+        if (values[i] == -1) continue;
+        SDL_Color c;
+        if (!palette_value_to_color(values[i], &c)) {
+            memcpy(palette256, old_palette, sizeof(palette256));
+            return 0;
+        }
+        palette256[attributes[i]] = c;
+    }
+    current_text_color = get_graphics_color(fg_color);
+    apply_palette_change(old_palette);
+    return 1;
+}
+
+/* PALETTE with no arguments restores the default colors. */
+void graphics_reset_palette(void) {
+    if (color_mode_32) return;
+    if (!palette_initialized) init_palette256();
+    SDL_Color old_palette[256];
+    memcpy(old_palette, palette256, sizeof(palette256));
+    memcpy(palette256, default_palette256, sizeof(palette256));
+    current_text_color = get_graphics_color(fg_color);
+    apply_palette_change(old_palette);
 }
 
 static void reset_draw_colors(int mode) {
@@ -1582,7 +1773,8 @@ void draw_paint_tile(double ux, double uy, const unsigned char *tile, int tile_l
 int graphics_save_screenshot(const char *filename) {
     if (!renderer || !canvas || !filename) return 0;
 
-    SDL_SetRenderTarget(renderer, canvas);
+    // Capture what is on screen: the visual page.
+    SDL_SetRenderTarget(renderer, pages[visual_page] ? pages[visual_page] : canvas);
     SDL_Surface *surf = SDL_RenderReadPixels(renderer, &(SDL_Rect){0, 0, canvas_width, canvas_height});
     if (!surf) {
         fprintf(stderr, "RenderReadPixels failed: %s\n", SDL_GetError());
@@ -1629,13 +1821,19 @@ void update_graphics() {
 }
 
 void graphics_readline(char *buffer, int size) {
-    int pos = 0;
-    buffer[0] = '\0';
+    graphics_readline_initial(buffer, size, "");
+}
+
+/* Reads a line in the window, starting with editable text (used by EDIT). */
+void graphics_readline_initial(char *buffer, int size, const char *initial) {
+    snprintf(buffer, (size_t)size, "%s", initial ? initial : "");
+    int pos = (int)strlen(buffer);
     SDL_StartTextInput(window);
     
     // Store the starting position for the current input line
     int line_start_x = cursor_x;
     int line_start_y = cursor_y;
+    if (pos > 0) graphics_print(buffer);
 
     while (!stop_running) {
         SDL_Event e;
@@ -1689,6 +1887,73 @@ void graphics_readline(char *buffer, int size) {
     SDL_StopTextInput(window);
 }
 
+/* ---- Mouse as light pen (PEN) and joysticks (STICK/STRIG) ---- */
+
+static int pen_x = 0, pen_y = 0;           /* current position, screen pixels */
+static int pen_down_x = 0, pen_down_y = 0; /* position of the last press */
+static int pen_is_down = 0;
+static int pen_pressed_since_poll = 0;
+#define MAX_STICKS 2
+static SDL_Joystick *sticks[MAX_STICKS] = {NULL};
+
+static void update_pen_position(float window_x, float window_y) {
+    if (presented_area.w <= 0 || presented_area.h <= 0) return;
+    double fx = (window_x - presented_area.x) / presented_area.w;
+    double fy = (window_y - presented_area.y) / presented_area.h;
+    if (fx < 0) fx = 0;
+    if (fx > 1) fx = 1;
+    if (fy < 0) fy = 0;
+    if (fy > 1) fy = 1;
+    pen_x = (int)(fx * (mode_res_w - 1) + 0.5);
+    pen_y = (int)(fy * (mode_res_h - 1) + 0.5);
+}
+
+/* PEN(n): 0 pressed since the last PEN(0); 1/2 x/y of the last press;
+ * 3 button down now; 4/5 current x/y; 6/7 text row/column of the last press;
+ * 8/9 current text row/column. Pixel values are screen coordinates. */
+int graphics_pen(int n) {
+    handle_events();
+    double ys = (double)canvas_height / mode_res_h, xs = (double)canvas_width / mode_res_w;
+    int row_height = current_row_height > 0 ? current_row_height : 16;
+    int col_width = current_col_width > 0 ? current_col_width : 8;
+    switch (n) {
+        case 0: {
+            int pressed = pen_pressed_since_poll;
+            pen_pressed_since_poll = 0;
+            return pressed ? -1 : 0;
+        }
+        case 1: return pen_down_x;
+        case 2: return pen_down_y;
+        case 3: return pen_is_down ? -1 : 0;
+        case 4: return pen_x;
+        case 5: return pen_y;
+        case 6: return (int)(pen_down_y * ys) / row_height + 1;
+        case 7: return (int)(pen_down_x * xs) / col_width + 1;
+        case 8: return (int)(pen_y * ys) / row_height + 1;
+        case 9: return (int)(pen_x * xs) / col_width + 1;
+    }
+    return 0;
+}
+
+/* STICK(n): x (even n) or y (odd n) of joystick A (0, 1) or B (2, 3),
+ * scaled to QBasic's 1-200 range with 100 at rest; 0 when none is attached. */
+int graphics_stick(int n) {
+    handle_events();
+    int index = n / 2;
+    if (n < 0 || n > 3 || !sticks[index]) return 0;
+    Sint16 axis = SDL_GetJoystickAxis(sticks[index], n % 2);
+    return 1 + (int)((axis + 32768) * 199L / 65535);
+}
+
+/* Joystick buttons feed STRIG: button 1 of A and B is trigger 0 and 2,
+ * button 2 is trigger 4 and 6. */
+static void handle_stick_button(SDL_JoystickID id, int button, int pressed) {
+    for (int i = 0; i < MAX_STICKS; i++) {
+        if (!sticks[i] || SDL_GetJoystickID(sticks[i]) != id || button > 1) continue;
+        basika_trigger_strig_event(button * 4 + i * 2, pressed);
+    }
+}
+
 void handle_events() {
     if (!window) return;
     SDL_Event e;
@@ -1696,6 +1961,35 @@ void handle_events() {
         if (e.type == SDL_EVENT_QUIT) exit(0);
         if (e.type == SDL_EVENT_TEXT_INPUT) {
             if (e.text.text[0]) last_key_char = (unsigned char)e.text.text[0];
+        }
+        if (e.type == SDL_EVENT_MOUSE_MOTION) update_pen_position(e.motion.x, e.motion.y);
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+            update_pen_position(e.button.x, e.button.y);
+            pen_down_x = pen_x;
+            pen_down_y = pen_y;
+            pen_is_down = 1;
+            pen_pressed_since_poll = 1;
+            basika_trigger_pen_event();
+        }
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) pen_is_down = 0;
+        if (e.type == SDL_EVENT_JOYSTICK_ADDED) {
+            for (int i = 0; i < MAX_STICKS; i++) {
+                if (!sticks[i]) {
+                    sticks[i] = SDL_OpenJoystick(e.jdevice.which);
+                    break;
+                }
+            }
+        }
+        if (e.type == SDL_EVENT_JOYSTICK_REMOVED) {
+            for (int i = 0; i < MAX_STICKS; i++) {
+                if (sticks[i] && SDL_GetJoystickID(sticks[i]) == e.jdevice.which) {
+                    SDL_CloseJoystick(sticks[i]);
+                    sticks[i] = NULL;
+                }
+            }
+        }
+        if (e.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN || e.type == SDL_EVENT_JOYSTICK_BUTTON_UP) {
+            handle_stick_button(e.jbutton.which, e.jbutton.button, e.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN);
         }
         if (e.type == SDL_EVENT_KEY_DOWN) {
             int trap_idx = map_key_to_trap_index(e.key.key);
@@ -1779,7 +2073,11 @@ void close_graphics() {
         image_slots[i].in_use = 0;
     }
     if (font) TTF_CloseFont(font);
-    if (canvas) SDL_DestroyTexture(canvas);
+    for (int i = 0; i < MAX_SCREEN_PAGES; i++) {
+        if (pages[i]) SDL_DestroyTexture(pages[i]);
+        pages[i] = NULL;
+    }
+    canvas = NULL;
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();

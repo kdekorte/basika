@@ -1,0 +1,20 @@
+AUTO 100, 5
+PRINT "a"
+GOTO 105
+PRINT "c"
+
+LIST
+20 GOSUB 105: IF X THEN 110 ELSE 100
+30 ON X GOTO 100, 105, 110
+RENUM 1000, , 10
+LIST
+SAVE "tests/editor_test"
+NEW
+LIST
+LOAD "tests/editor_test"
+LIST 1010
+EDIT 1010
+MERGE "tests/system/editor_merge"
+LIST
+RENUM 5, 1030
+KILL "tests/editor_test.bas"

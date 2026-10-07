@@ -1,6 +1,6 @@
-10 width = 640
+10 screenWidth = 640
 20 height = 480
-30 SCREEN _NEWIMAGE(width, height, 256)
+30 SCREEN _NEWIMAGE(screenWidth, height, 256)
 40 COLOR 15
 50 _PRINTSTRING (20, 20), "=== _LOADFONT & _FONT Demo (3 Fonts) ==="
 60 fontHandle1% = _LOADFONT("fonts/ModernDOS8x16.ttf", 24)

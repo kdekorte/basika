@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/select.h>
 #include <zlib.h>
+#include <fcntl.h>
 #include "interpreter.h"
 #include "lexer.h"
 #include "program.h"
@@ -1512,6 +1513,8 @@ static inline double basic_integer_divide(double left, double right, int want_re
     return want_remainder ? fmod(a, b) : trunc(a / b);
 }
 
+static int read_input_chars(int count, int fnum, BasicString *out);
+
 static void basic_string_release(BasicString *value) {
     if (!value) return;
     free(value->data);
@@ -2670,7 +2673,8 @@ typedef enum {
     EVENT_NONE = 0,
     EVENT_KEY,
     EVENT_TIMER,
-    EVENT_STRIG
+    EVENT_STRIG,
+    EVENT_PEN
 } TrappedEventType;
 
 typedef struct {
@@ -2702,6 +2706,11 @@ static int strig_event_pending[8];
 static int strig_event_active[8];
 static int strig_button_pressed_since[8];
 static int strig_button_currently_pressed[8];
+
+static int on_pen_line = 0;
+static int pen_state = 0; // 0=OFF, 1=ON, 2=STOP
+static int pen_event_pending = 0;
+static int pen_event_active = 0;
 
 static double wall_time_seconds(void) {
     struct timeval tv;
@@ -2786,6 +2795,45 @@ static int dispatch_pending_key_event(Statement *exec_stmt, TokenStream *ts, Sta
     return 0;
 }
 
+/* Jumps to an ON STRIG or ON PEN handler as a GOSUB once its event is pending. */
+static int enter_event_handler(Statement *exec_stmt, TokenStream *ts, Statement **curr,
+                               const char **resume_ptr, int line, int event_type, int index) {
+    Statement *target = find_line(line);
+    if (!target) {
+        report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+        return 1;
+    }
+    if (gosub_ptr >= 32) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 1;
+    }
+    gosub_call_stack[gosub_ptr].stmt = exec_stmt;
+    gosub_call_stack[gosub_ptr].ptr = ts->pos < exec_stmt->token_count
+        ? exec_stmt->tokens[ts->pos].start_ptr
+        : exec_stmt->raw_command + strlen(exec_stmt->raw_command);
+    gosub_call_stack[gosub_ptr].event_type = event_type;
+    gosub_call_stack[gosub_ptr].event_index = index;
+    gosub_ptr++;
+    *curr = target;
+    *resume_ptr = NULL;
+    return 1;
+}
+
+static int dispatch_pending_device_event(Statement *exec_stmt, TokenStream *ts, Statement **curr, const char **resume_ptr) {
+    if (pen_event_pending && pen_state == 1 && !pen_event_active && on_pen_line) {
+        pen_event_pending = 0;
+        pen_event_active = 1;
+        return enter_event_handler(exec_stmt, ts, curr, resume_ptr, on_pen_line, EVENT_PEN, 0);
+    }
+    for (int s = 0; s < 8; s += 2) {
+        if (!strig_event_pending[s] || strig_state != 1 || strig_event_active[s] || !on_strig_line[s]) continue;
+        strig_event_pending[s] = 0;
+        strig_event_active[s] = 1;
+        return enter_event_handler(exec_stmt, ts, curr, resume_ptr, on_strig_line[s], EVENT_STRIG, s);
+    }
+    return 0;
+}
+
 static void maybe_queue_timer_event(void) {
     if (timer_state == 0 || on_timer_line == 0 || timer_interval <= 0.0 || timer_pending || timer_event_active) return;
 
@@ -2801,6 +2849,10 @@ static void maybe_queue_timer_event(void) {
         timer_pending = 1;
         timer_last_trigger_time = now;
     }
+}
+
+void basika_trigger_pen_event(void) {
+    if (pen_state == 1 || pen_state == 2) pen_event_pending = 1;
 }
 
 void basika_trigger_strig_event(int strig_idx, int pressed) {
@@ -3431,6 +3483,19 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             int trim = len - 1;
             while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
             basic_string_append(&term, buf, strlen(buf));
+        } else if (t.type == TOKEN_INPUTS) {
+            // INPUT$(n[, [#]file])
+            ts->pos++;
+            if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
+            int count = (int)evaluate_expression_tok(ts);
+            int fnum = -1;
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+                ts->pos++;
+                if (ts->tokens[ts->pos].type == TOKEN_HASH) ts->pos++;
+                fnum = (int)evaluate_expression_tok(ts);
+            }
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            if (!read_input_chars(count, fnum, &term)) return 0;
         } else if (t.type == TOKEN_INKEY) {
             ts->pos++;
             if (graphics_is_active()) {
@@ -3764,6 +3829,21 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             int trim = len - 1;
             while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
             basic_string_append(&term, buf, strlen(buf));
+        } else if (t.type == TOKEN_INPUTS) {
+            // INPUT$(n[, [#]file])
+            get_next_token(input);
+            int count = (int)evaluate_expression(input);
+            int fnum = -1;
+            const char *saved = *input;
+            if (get_next_token(input).type == TOKEN_COMMA) {
+                const char *hash_saved = *input;
+                if (get_next_token(input).type != TOKEN_HASH) *input = hash_saved;
+                fnum = (int)evaluate_expression(input);
+                saved = *input;
+            }
+            *input = saved;
+            if (get_next_token(input).type != TOKEN_RPAREN) *input = saved;
+            if (!read_input_chars(count, fnum, &term)) return 0;
         } else if (t.type == TOKEN_INKEY) {
             if (graphics_is_active()) {
                 update_graphics();
@@ -3956,14 +4036,6 @@ static void set_string_variable(int idx, int array_idx, const char *value) {
     set_string_variable_with_align(idx, array_idx, value, 0);
 }
 
-static void trim_string(char *s) {
-    char *start = s;
-    while (*start && isspace((unsigned char)*start)) start++;
-    if (start != s) memmove(s, start, strlen(start) + 1);
-    char *end = s + strlen(s) - 1;
-    while (end >= s && isspace((unsigned char)*end)) *end-- = '\0';
-}
-
 static void assign_input_value(int idx, int array_idx, int is_string, const char *value) {
     if (is_string) {
         if (array_idx >= 0 && vars[idx].s_array && array_idx < vars[idx].array_size) {
@@ -3974,6 +4046,124 @@ static void assign_input_value(int idx, int array_idx, int is_string, const char
     } else {
         set_numeric_variable(idx, array_idx, atof(value));
     }
+}
+
+#define INPUT_LINE_MAX 4096
+#define MAX_INPUT_FIELDS 16
+
+/* Reads one line for INPUT/LINE INPUT from a file, the window or stdin.
+ * Returns 0 at end of input. */
+static int read_input_line(int fnum, char *line, size_t size) {
+    line[0] = '\0';
+    if (fnum != -1) {
+        if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+            report_runtime_error(ERR_BAD_FILE_NUMBER);
+            return 0;
+        }
+        if (!fgets(line, (int)size, file_handles[fnum])) {
+            report_runtime_error(ERR_INPUT_PAST_END);
+            return 0;
+        }
+    } else if (graphics_is_active()) {
+        graphics_readline(line, (int)size);
+    } else {
+        fflush(stdout);
+        if (!fgets(line, (int)size, stdin)) return 0;
+    }
+    line[strcspn(line, "\r\n")] = '\0';
+    return 1;
+}
+
+/* INPUT$: appends count characters from a file or, without echo, from the
+ * keyboard (Enter is CHR$(13)). Returns 0 on error. */
+static int read_input_chars(int count, int fnum, BasicString *out) {
+    if (count < 1 || count > 32767) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return 0;
+    }
+    if (fnum != -1) {
+        if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+            report_runtime_error(ERR_BAD_FILE_NUMBER);
+            return 0;
+        }
+        char buf[512];
+        while (count > 0) {
+            size_t want = count < (int)sizeof(buf) ? (size_t)count : sizeof(buf);
+            size_t got = fread(buf, 1, want, file_handles[fnum]);
+            if (got == 0) {
+                report_runtime_error(ERR_INPUT_PAST_END);
+                return 0;
+            }
+            basic_string_append(out, buf, got);
+            count -= (int)got;
+        }
+        return 1;
+    }
+    while (count > 0 && !stop_running) {
+        int c;
+        if (graphics_is_active()) {
+            c = get_graphics_char();
+            if (!c) {
+                graphics_sleep(5);
+                continue;
+            }
+        } else {
+            c = getchar();
+            if (c == EOF) {
+                report_runtime_error(ERR_INPUT_PAST_END);
+                return 0;
+            }
+            if (c == '\n') c = 13;
+        }
+        char ch = (char)c;
+        basic_string_append(out, &ch, 1);
+        count--;
+    }
+    return 1;
+}
+
+/* Splits an INPUT reply at commas. A field may be a quoted string that
+ * contains commas; spaces around unquoted fields are dropped. Returns the
+ * number of fields, or -1 if a quoted field is followed by junk. */
+static int split_input_fields(const char *line, char (*fields)[INPUT_LINE_MAX], int max_fields) {
+    int count = 0;
+    const char *p = line;
+    while (1) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (count >= max_fields) return count + 1;
+        char *out = fields[count];
+        size_t n = 0;
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"' && n < INPUT_LINE_MAX - 1) out[n++] = *p++;
+            if (*p == '"') p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p && *p != ',') return -1;
+        } else {
+            while (*p && *p != ',' && n < INPUT_LINE_MAX - 1) out[n++] = *p++;
+            while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t')) n--;
+        }
+        out[n] = '\0';
+        count++;
+        if (*p != ',') break;
+        p++;
+    }
+    return count;
+}
+
+/* True when text is a valid numeric INPUT reply (empty counts as 0). */
+static int is_numeric_input(const char *text) {
+    if (!*text) return 1;
+    char *end = NULL;
+    strtod(text, &end);
+    while (end && (*end == ' ' || *end == '!' || *end == '#' || *end == '%' || *end == '&')) end++;
+    return end && *end == '\0';
+}
+
+/* Formats a number the way PRINT does, without the surrounding spaces
+ * (used by WRITE and STR$-style output). */
+static void format_number_plain(double value, int is_double, char *out, size_t size) {
+    snprintf(out, size, "%.*g", is_double ? 16 : 7, value);
 }
 
 static void apply_basika_using(const char *fmt, double val, char *out, int out_size) {
@@ -4849,7 +5039,7 @@ static int is_string_token(const Token *t) {
             t->type == TOKEN_TRIM || t->type == TOKEN_LTRIM || t->type == TOKEN_RTRIM ||
             t->type == TOKEN_STR || t->type == TOKEN_HEX || t->type == TOKEN_OCT ||
             t->type == TOKEN_MKI || t->type == TOKEN_MKS || t->type == TOKEN_MKD ||
-            t->type == TOKEN_STRING_FUNC || t->type == TOKEN_DEFLATE || t->type == TOKEN_INFLATE || t->type == TOKEN_INKEY || t->type == TOKEN_GETS || t->type == TOKEN_ENVIRON ||
+            t->type == TOKEN_STRING_FUNC || t->type == TOKEN_DEFLATE || t->type == TOKEN_INFLATE || t->type == TOKEN_INKEY || t->type == TOKEN_INPUTS || t->type == TOKEN_GETS || t->type == TOKEN_ENVIRON ||
             t->type == TOKEN_TIME || t->type == TOKEN_DATE || t->type == TOKEN_TAB ||
             t->type == TOKEN_SPACE || t->type == TOKEN_SPC ||
             t->type == TOKEN_ARGVS || t->type == TOKEN_COMMANDS);
@@ -6439,6 +6629,8 @@ static double primary_tok(TokenStream *ts) {
     if (token->type == TOKEN_IDENTIFIER) {
         if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERR") == 0) return (double)last_runtime_error_code;
         if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERL") == 0) return (double)last_runtime_error_line;
+        // No device drivers are simulated, so there is never a device error.
+        if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERDEV") == 0) return 0;
 
         if (token->text[0] == '_') {
             int function_id = qb64_function_id(token->text);
@@ -6599,7 +6791,7 @@ static double primary_tok(TokenStream *ts) {
         }
          return 0;
      }
-     if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
+     if ((token->type >= TOKEN_ABS && token->type <= TOKEN_SGN) || token->type == TOKEN_EOF_FUNC || token->type == TOKEN_TIMER || token->type == TOKEN_KEY || token->type == TOKEN_STRIG || token->type == TOKEN_PEN || token->type == TOKEN_STICK || token->type == TOKEN_ASC || token->type == TOKEN_LEN || token->type == TOKEN_INSTR || token->type == TOKEN_VAL || token->type == TOKEN_PEEK || token->type == TOKEN_VARPTR || token->type == TOKEN_LOF || token->type == TOKEN_LOC || token->type == TOKEN_CVI || token->type == TOKEN_CVS || token->type == TOKEN_CVD || token->type == TOKEN_PRINTWIDTH) {
         TokenType ft = token->type;
         int has_arg = 0;
         double arg = 0;
@@ -6744,6 +6936,18 @@ static double primary_tok(TokenStream *ts) {
             }
             case TOKEN_TIMER: return seconds_since_midnight();
             case TOKEN_KEY: return (double)get_graphics_key();
+            case TOKEN_PEN:
+                if (arg < 0 || arg > 9) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return 0;
+                }
+                return graphics_is_active() ? graphics_pen((int)arg) : 0;
+            case TOKEN_STICK:
+                if (arg < 0 || arg > 3) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return 0;
+                }
+                return graphics_is_active() ? graphics_stick((int)arg) : 0;
             case TOKEN_STRIG: {
                 int s = (int)arg;
                 if (s >= 0 && s < 8) {
@@ -7036,6 +7240,7 @@ static double primary(const char **input) {
     if (t.type == TOKEN_IDENTIFIER) {
         if (strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
         if (strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
+        if (strcasecmp(t.text, "ERDEV") == 0) return 0;
 
         if (t.text[0] == '_') {
             int function_id = qb64_function_id(t.text);
@@ -7204,7 +7409,7 @@ static double primary(const char **input) {
         }
         return 0;
      }
-     if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
+     if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_PEN || t.type == TOKEN_STICK || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
          TokenType ft = t.type;
         const char *saved = *input;
         Token next = get_next_token(input);
@@ -7356,6 +7561,18 @@ static double primary(const char **input) {
             }
             case TOKEN_TIMER: return seconds_since_midnight();
             case TOKEN_KEY: return (double)get_graphics_key();
+            case TOKEN_PEN:
+                if (arg < 0 || arg > 9) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return 0;
+                }
+                return graphics_is_active() ? graphics_pen((int)arg) : 0;
+            case TOKEN_STICK:
+                if (arg < 0 || arg > 3) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return 0;
+                }
+                return graphics_is_active() ? graphics_stick((int)arg) : 0;
             case TOKEN_STRIG: {
                 int s = (int)arg;
                 if (s >= 0 && s < 8) {
@@ -7603,6 +7820,13 @@ static int parse_graphics_point(const char **ptr, double base_x, double base_y, 
     return 1;
 }
 
+/* The mode set by the last SCREEN statement (-1 for _NEWIMAGE, -2 before any). */
+static int current_screen_mode = -2;
+
+static TokenType peek_token_type(const char *ptr) {
+    return get_next_token(&ptr).type;
+}
+
 /* Consumes a comma separating optional arguments; returns 0 if there is none. */
 static int next_graphics_comma(const char **ptr) {
     const char *saved = *ptr;
@@ -7749,6 +7973,240 @@ static const char *cont_resume_ptr;
 static int cont_resume_ts_pos;
 static unsigned int cont_generation;
 
+/* ---- Program editing commands typed in direct mode ----
+ * SAVE, LOAD, MERGE, RENUM, AUTO and EDIT are not reserved words, so they
+ * are recognized only as the first word of a direct-mode line. */
+
+static int auto_next_line = -1;
+static int auto_increment = 10;
+static char edit_text[300] = "";
+
+/* AUTO: the line number the REPL should offer next, or -1. advance moves on. */
+int basika_auto_line(int advance) {
+    if (advance && auto_next_line >= 0) auto_next_line += auto_increment;
+    return auto_next_line;
+}
+
+void basika_auto_cancel(void) {
+    auto_next_line = -1;
+}
+
+/* EDIT: text the REPL should offer for editing on its next prompt. */
+const char *basika_take_edit_text(void) {
+    static char taken[300];
+    snprintf(taken, sizeof(taken), "%s", edit_text);
+    edit_text[0] = '\0';
+    return taken;
+}
+
+/* Opens file, or file.bas when the name has no extension. */
+static FILE *open_program_file(const char *name, const char *mode, char *resolved, size_t size) {
+    snprintf(resolved, size, "%s", name);
+    FILE *file = fopen(resolved, mode);
+    const char *base = strrchr(name, '/');
+    if (!file && !strchr(base ? base : name, '.')) {
+        snprintf(resolved, size, "%s.bas", name);
+        file = fopen(resolved, mode);
+    }
+    return file;
+}
+
+static void format_program_line(const Statement *stmt, char *out, size_t size) {
+    if (stmt->has_explicit_line_number) {
+        snprintf(out, size, "%d%s%s", stmt->line_number,
+                 stmt->raw_command[0] == ' ' ? "" : " ", stmt->raw_command);
+    } else {
+        snprintf(out, size, "%s", stmt->raw_command);
+    }
+}
+
+/* Rewrites the line numbers referenced in text (after GOTO, GOSUB, THEN,
+ * ELSE, RESTORE, RESUME and RUN, and in ON ... GOTO/GOSUB lists). */
+static void renumber_references(const char *text, const int *old_numbers, const int *new_numbers,
+                                int count, char *out, size_t size) {
+    size_t used = 0;
+    out[0] = '\0';
+    const char *p = text;
+    int expect_line = 0, in_list = 0;
+    while (*p) {
+        const char *start = p;
+        Token t = get_next_token(&p);
+        if (t.type == TOKEN_EOF) break;
+        const char *token_start = start;
+        while (token_start < p && isspace((unsigned char)*token_start)) token_start++;
+        const char *replacement = NULL;
+        char number[16];
+        if (t.type == TOKEN_NUMBER && expect_line) {
+            for (int i = 0; i < count; i++) {
+                if (old_numbers[i] == t.int_val) {
+                    snprintf(number, sizeof(number), "%d", new_numbers[i]);
+                    replacement = number;
+                    break;
+                }
+            }
+        }
+        if (replacement) {
+            used += (size_t)snprintf(out + used, used < size ? size - used : 0, "%.*s%s",
+                                     (int)(token_start - start), start, replacement);
+        } else {
+            used += (size_t)snprintf(out + used, used < size ? size - used : 0, "%.*s",
+                                     (int)(p - start), start);
+        }
+        if (t.type == TOKEN_GOTO || t.type == TOKEN_GOSUB) { expect_line = 1; in_list = 1; }
+        else if (t.type == TOKEN_THEN || t.type == TOKEN_ELSE || t.type == TOKEN_RESTORE ||
+                 t.type == TOKEN_RESUME || t.type == TOKEN_RUN) { expect_line = 1; in_list = 0; }
+        else if (t.type == TOKEN_COMMA && in_list) expect_line = 1;
+        else if (t.type == TOKEN_NUMBER && in_list) expect_line = 0;
+        else { expect_line = 0; in_list = 0; }
+        if (used >= size) break;
+    }
+    if (used < size) snprintf(out + used, size - used, "%s", p);
+}
+
+/* RENUM [new][, [old][, increment]] */
+static void renumber_program(int new_start, int old_start, int increment) {
+    int count = 0;
+    for (Statement *s = get_head(); s; s = s->next) count++;
+    if (count == 0) return;
+    int *old_numbers = malloc(sizeof(int) * (size_t)count);
+    int *new_numbers = malloc(sizeof(int) * (size_t)count);
+    char (*texts)[300] = malloc(sizeof(*texts) * (size_t)count);
+    int *sources = malloc(sizeof(int) * (size_t)count);
+    int *explicit_numbers = malloc(sizeof(int) * (size_t)count);
+    if (!old_numbers || !new_numbers || !texts || !sources || !explicit_numbers) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        goto done;
+    }
+    int i = 0, next = new_start, highest_kept = -1;
+    for (Statement *s = get_head(); s; s = s->next, i++) {
+        old_numbers[i] = s->line_number;
+        sources[i] = s->source_line_number;
+        explicit_numbers[i] = s->has_explicit_line_number;
+        if (s->line_number < old_start) {
+            new_numbers[i] = s->line_number;
+            highest_kept = s->line_number;
+        } else {
+            new_numbers[i] = next;
+            next += increment;
+        }
+    }
+    // Renumbered lines may not move in front of the lines that stay put.
+    if (new_start <= highest_kept || next - increment > 65529) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        goto done;
+    }
+    i = 0;
+    for (Statement *s = get_head(); s; s = s->next, i++) {
+        renumber_references(s->raw_command, old_numbers, new_numbers, count, texts[i], sizeof(texts[i]));
+    }
+    clear_program();
+    for (i = 0; i < count; i++) {
+        int renumbered = old_numbers[i] >= old_start;
+        add_line(new_numbers[i], texts[i], sources[i], renumbered ? 1 : explicit_numbers[i]);
+    }
+done:
+    free(old_numbers);
+    free(new_numbers);
+    free(texts);
+    free(sources);
+    free(explicit_numbers);
+}
+
+/* Handles a direct-mode editing command; returns 0 if the line is not one. */
+static int execute_editor_command(const char *line) {
+    const char *ptr = line;
+    Token command = get_next_token(&ptr);
+    if (command.type != TOKEN_IDENTIFIER || peek_token_type(ptr) == TOKEN_EQUALS) return 0;
+    current_executing_line = DIRECT_LINE_NUMBER;
+    char path[256] = "", resolved[512];
+    if (strcasecmp(command.text, "SAVE") == 0) {
+        parse_string_expression(&ptr, path, sizeof(path));
+        if (next_graphics_comma(&ptr)) get_next_token(&ptr); // ,A: always ASCII
+        snprintf(resolved, sizeof(resolved), "%s", path);
+        const char *base = strrchr(path, '/');
+        if (!strchr(base ? base : path, '.')) snprintf(resolved, sizeof(resolved), "%s.bas", path);
+        FILE *file = fopen(resolved, "w");
+        if (!path[0] || !file) {
+            report_runtime_error(path[0] ? ERR_PATH_FILE_ACCESS_ERROR : ERR_BAD_FILE_NAME);
+            return 1;
+        }
+        char text[320];
+        for (Statement *s = get_head(); s; s = s->next) {
+            format_program_line(s, text, sizeof(text));
+            fprintf(file, "%s\n", text);
+        }
+        fclose(file);
+    } else if (strcasecmp(command.text, "LOAD") == 0 || strcasecmp(command.text, "MERGE") == 0) {
+        int merging = toupper((unsigned char)command.text[0]) == 'M';
+        parse_string_expression(&ptr, path, sizeof(path));
+        int run_after = 0;
+        if (!merging && next_graphics_comma(&ptr)) {
+            Token flag = get_next_token(&ptr);
+            run_after = flag.type == TOKEN_IDENTIFIER && strcasecmp(flag.text, "R") == 0;
+        }
+        FILE *file = open_program_file(path, "r", resolved, sizeof(resolved));
+        if (!file) {
+            report_runtime_error(ERR_FILE_NOT_FOUND);
+            return 1;
+        }
+        int last_line_num = 0;
+        if (merging) {
+            for (Statement *s = get_head(); s; s = s->next) last_line_num = s->line_number;
+        } else {
+            clear_program();
+            clear_variables(0);
+            clear_data_pointer();
+        }
+        char buffer[256];
+        int first_line = 1, source_line_number = 0;
+        while (fgets(buffer, sizeof(buffer), file)) {
+            source_line_number++;
+            buffer[strcspn(buffer, "\r\n")] = 0;
+            if (first_line) {
+                first_line = 0;
+                if (buffer[0] == '#' && buffer[1] == '!') continue;
+            }
+            interpret_line(buffer, 1, &last_line_num, source_line_number);
+        }
+        fclose(file);
+        if (run_after) run_program();
+    } else if (strcasecmp(command.text, "RENUM") == 0) {
+        int values[3] = {10, 0, 10};
+        int index = 0;
+        while (index < 3) {
+            if (graphics_arg_present(&ptr)) values[index] = (int)evaluate_expression(&ptr);
+            index++;
+            if (!next_graphics_comma(&ptr)) break;
+        }
+        if (values[0] < 0 || values[1] < 0 || values[2] < 1) {
+            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            return 1;
+        }
+        renumber_program(values[0], values[1], values[2]);
+    } else if (strcasecmp(command.text, "AUTO") == 0) {
+        int start = 10, increment = 10;
+        if (graphics_arg_present(&ptr)) start = (int)evaluate_expression(&ptr);
+        if (next_graphics_comma(&ptr)) increment = (int)evaluate_expression(&ptr);
+        if (start < 0 || increment < 1) {
+            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            return 1;
+        }
+        auto_next_line = start;
+        auto_increment = increment;
+    } else if (strcasecmp(command.text, "EDIT") == 0) {
+        Token number = get_next_token(&ptr);
+        Statement *stmt = number.type == TOKEN_NUMBER ? find_line(number.int_val) : NULL;
+        if (!stmt) {
+            report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+            return 1;
+        }
+        format_program_line(stmt, edit_text, sizeof(edit_text));
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 /* Runs a line typed without a line number through the same statement loop
  * as programs, so colons, one-line loops and GOSUB work, and GOTO continues
  * into the stored program without clearing variables. */
@@ -7810,6 +8268,225 @@ static double parse_record_number(const char **ptr, int fnum, int *has_more) {
     return record;
 }
 
+/* CLEAR: zero every variable and array (keeping their dimensions), empty
+ * strings, close all files and reset the GOSUB/FOR/WHILE/DO stacks. CONST
+ * values, TYPE declarations and DEF FN functions are kept. */
+static void clear_statement(void) {
+    for (int i = 0; i < var_count; i++) {
+        Variable *v = &vars[i];
+        v->value = 0;
+        if (v->array) memset(v->array, 0, (size_t)v->array_size * sizeof(*v->array));
+        if (v->s_array) {
+            for (int j = 0; j < v->array_size; j++) {
+                basic_string_destroy(v->s_array[j]);
+                v->s_array[j] = NULL;
+            }
+        }
+        if (v->s_value) {
+            basic_string_destroy(v->s_value);
+            v->s_value = NULL;
+        }
+        if (v->string_declared && v->num_dims == 0) assign_string_variable_value(i, -1, NULL, 0);
+    }
+    for (int i = 0; i < static_local_count; i++) {
+        release_variable_storage(&static_locals[i].var);
+        static_locals[i].var.value = 0;
+    }
+    for (int fnum = 1; fnum < 16; fnum++) close_file_number(fnum);
+    gosub_ptr = 0;
+    for_ptr = 0;
+    while_ptr = 0;
+    do_ptr = 0;
+}
+
+/* CHAIN passes the variables listed in COMMON to the next program by
+ * position: their values are copied here, and the new program's COMMON
+ * statements take them in the same order. */
+#define MAX_COMMON_VALUES 128
+static Variable chain_values[MAX_COMMON_VALUES];
+static int chain_is_string[MAX_COMMON_VALUES];
+static int chain_value_count = 0;
+static int chain_value_next = 0;
+static int common_variable_count = 0;
+static int common_variables[MAX_COMMON_VALUES];
+static char pending_chain_path[512] = "";
+
+static void release_chain_values(void) {
+    for (int i = 0; i < chain_value_count; i++) release_variable_storage(&chain_values[i]);
+    chain_value_count = 0;
+    chain_value_next = 0;
+}
+
+/* COMMON [SHARED] [/block/] var[()] [AS type][, ...] */
+static void execute_common(const char **ptr) {
+    if (call_stack_depth > 0) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return;
+    }
+    int shared = 0;
+    const char *saved = *ptr;
+    if (get_next_token(ptr).type == TOKEN_SHARED) shared = 1;
+    else *ptr = saved;
+    saved = *ptr;
+    if (get_next_token(ptr).type == TOKEN_SLASH) {
+        // Named blocks are accepted; all COMMON variables share one list.
+        get_next_token(ptr);
+        get_next_token(ptr);
+    } else {
+        *ptr = saved;
+    }
+    while (1) {
+        Token var = get_next_token(ptr);
+        if (var.type != TOKEN_IDENTIFIER) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return;
+        }
+        saved = *ptr;
+        if (get_next_token(ptr).type == TOKEN_LPAREN && get_next_token(ptr).type == TOKEN_RPAREN) {
+            saved = *ptr;
+        }
+        *ptr = saved;
+        if (get_next_token(ptr).type == TOKEN_AS) {
+            Token type = get_next_token(ptr);
+            const char *type_name = type.text;
+            const char *unsigned_saved = *ptr;
+            if (strcasecmp(type_name, "_UNSIGNED") == 0) {
+                Token width = get_next_token(ptr);
+                if (strcasecmp(width.text, "LONG") == 0) type_name = "_UNSIGNED LONG";
+                else *ptr = unsigned_saved;
+            }
+            const char *suffix = primitive_type_suffix(type_name);
+            if (!suffix) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return;
+            }
+            declare_variable_type(var.text, suffix, NULL, shared);
+        } else {
+            *ptr = saved;
+        }
+        int idx = find_variable(var.text);
+        if (idx < 0) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            return;
+        }
+        if (shared && global_shared_count < MAX_GLOBAL_SHARED) {
+            GlobalSharedName *entry = &global_shared_names[global_shared_count++];
+            snprintf(entry->full, sizeof(entry->full), "%s", vars[idx].name);
+            snprintf(entry->base, sizeof(entry->base), "%.*s",
+                     (int)numeric_base_length(vars[idx].name, strlen(vars[idx].name)), vars[idx].name);
+        }
+        int listed = 0;
+        for (int i = 0; i < common_variable_count; i++) if (common_variables[i] == idx) listed = 1;
+        if (!listed && common_variable_count < MAX_COMMON_VALUES) common_variables[common_variable_count++] = idx;
+        // Values passed by CHAIN arrive in COMMON order.
+        if (!listed && chain_value_next < chain_value_count) {
+            int is_string = is_string_var(vars[idx].name);
+            if (is_string != chain_is_string[chain_value_next]) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return;
+            }
+            if (!copy_variable_contents(&vars[idx], &chain_values[chain_value_next])) return;
+            chain_value_next++;
+        }
+        if (!next_graphics_comma(ptr)) break;
+    }
+}
+
+/* CHAIN file$[, line]: remembers the COMMON values and stops this program;
+ * run_program_from loads and starts the next one. */
+static void execute_chain(const char **ptr) {
+    char path[256] = "";
+    parse_string_expression(ptr, path, sizeof(path));
+    if (next_graphics_comma(ptr)) (void)evaluate_expression(ptr); // GW-BASIC start line: ignored
+    char resolved[512];
+    snprintf(resolved, sizeof(resolved), "%s", path);
+    FILE *probe = fopen(resolved, "r");
+    if (!probe) {
+        snprintf(resolved, sizeof(resolved), "%s.bas", path);
+        probe = fopen(resolved, "r");
+    }
+    if (!probe) {
+        report_runtime_error(ERR_FILE_NOT_FOUND);
+        return;
+    }
+    fclose(probe);
+    release_chain_values();
+    for (int i = 0; i < common_variable_count && i < MAX_COMMON_VALUES; i++) {
+        Variable *source = &vars[common_variables[i]];
+        memset(&chain_values[i], 0, sizeof(Variable));
+        chain_is_string[i] = is_string_var(source->name);
+        if (!copy_variable_contents(&chain_values[i], source)) return;
+        if (source->s_value && !chain_values[i].s_value) {
+            basic_string_assign(&chain_values[i].s_value, source->s_value->data, source->s_value->length);
+        }
+        chain_value_count++;
+    }
+    snprintf(pending_chain_path, sizeof(pending_chain_path), "%s", resolved);
+    stop_running = 1;
+}
+
+/* Replaces the program with the lines of a .bas file (CHAIN and LOAD). */
+static int load_program_file(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) return 0;
+    clear_program();
+    char buffer[256];
+    int first_line = 1, last_line_num = 0, source_line_number = 0;
+    while (fgets(buffer, sizeof(buffer), file)) {
+        source_line_number++;
+        buffer[strcspn(buffer, "\r\n")] = 0;
+        if (first_line) {
+            first_line = 0;
+            if (buffer[0] == '#' && buffer[1] == '!') continue;
+        }
+        interpret_line(buffer, 1, &last_line_num, source_line_number);
+    }
+    fclose(file);
+    return 1;
+}
+
+/* LOCK/UNLOCK #n[, record | [first] TO last]: POSIX advisory locks, so a
+ * range another process holds is "Permission denied". RANDOM files lock
+ * records, BINARY files bytes, and other files the whole file. */
+static void execute_lock(const char **ptr, int locking) {
+    const char *saved = *ptr;
+    if (get_next_token(ptr).type != TOKEN_HASH) *ptr = saved;
+    int fnum = (int)evaluate_expression(ptr);
+    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+        report_runtime_error(ERR_BAD_FILE_NUMBER);
+        return;
+    }
+    double first = 0, last = 0;
+    int whole_file = 1;
+    if (next_graphics_comma(ptr)) {
+        whole_file = 0;
+        first = 1;
+        if (peek_token_type(*ptr) != TOKEN_TO) first = evaluate_expression(ptr);
+        last = first;
+        if (peek_token_type(*ptr) == TOKEN_TO) {
+            get_next_token(ptr);
+            last = evaluate_expression(ptr);
+        }
+        if (first < 1 || last < first) {
+            report_runtime_error(ERR_BAD_RECORD_NUMBER);
+            return;
+        }
+    }
+    struct flock region;
+    memset(&region, 0, sizeof(region));
+    region.l_type = locking ? F_WRLCK : F_UNLCK;
+    region.l_whence = SEEK_SET;
+    if (!whole_file && (file_mode[fnum] == FILE_MODE_RANDOM || file_mode[fnum] == FILE_MODE_BINARY)) {
+        long unit = file_mode[fnum] == FILE_MODE_BINARY ? 1 : file_record_length[fnum];
+        region.l_start = (off_t)((long)first - 1) * unit;
+        region.l_len = (off_t)((long)last - (long)first + 1) * unit;
+    }
+    fflush(file_handles[fnum]);
+    if (fcntl(fileno(file_handles[fnum]), F_SETLK, &region) != 0 && locking) {
+        report_runtime_error(ERR_PERMISSION_DENIED);
+    }
+}
+
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num) {
     const char *ptr = *ptr_addr;
     Token t = get_next_token(&ptr);
@@ -7832,7 +8509,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             return;
         } else if (t.type != TOKEN_LIST && t.type != TOKEN_RUN && t.type != TOKEN_NEW &&
                    t.type != TOKEN_CONT) {
-            execute_direct_line(*ptr_addr);
+            if (!execute_editor_command(*ptr_addr)) execute_direct_line(*ptr_addr);
             *ptr_addr += strlen(*ptr_addr);
             return;
         }
@@ -7842,7 +8519,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         if (t.type == TOKEN_ON) {
             const char *saved = ptr;
             Token next = get_next_token(&ptr);
-            if (next.type == TOKEN_ERR || (next.type == TOKEN_IDENTIFIER && strcasecmp(next.text, "ERROR") == 0)) {
+            if (next.type == TOKEN_ERR) {
                 Token g = get_next_token(&ptr);
                 if (g.type == TOKEN_GOTO) {
                     Token target = get_next_token(&ptr);
@@ -7853,6 +8530,20 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         return;
                     }
                 }
+            } else if (next.type == TOKEN_PEN) {
+                // ON PEN GOSUB line
+                if (get_next_token(&ptr).type != TOKEN_GOSUB) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                int target_line = resolve_target_line(get_next_token(&ptr));
+                if (target_line == -1) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                on_pen_line = target_line;
+                *ptr_addr = ptr;
+                return;
             } else if (next.type == TOKEN_KEY || next.type == TOKEN_TIMER || next.type == TOKEN_STRIG) {
                 Token lparen = get_next_token(&ptr);
                 double n_val = 0;
@@ -7957,6 +8648,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 *ptr_addr = ptr;
                 return;
             }
+        } else if (t.type == TOKEN_PEN) {
+            // PEN ON | OFF | STOP: enables, disables or holds ON PEN trapping.
+            Token mode = get_next_token(&ptr);
+            if (mode.type == TOKEN_ON) pen_state = 1;
+            else if (mode.type == TOKEN_OFF) { pen_state = 0; pen_event_pending = 0; }
+            else if (mode.type == TOKEN_STOP) pen_state = 2;
+            else report_runtime_error(ERR_SYNTAX_ERROR);
+            *ptr_addr = ptr;
+            return;
         } else if (t.type == TOKEN_STRIG) {
             Token mode = get_next_token(&ptr);
             if (mode.type == TOKEN_ON) {
@@ -8142,6 +8842,105 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 return;
             }
             execute_wait(port, and_mask, xor_mask);
+        } else if (t.type == TOKEN_LOCK || t.type == TOKEN_UNLOCK) {
+            execute_lock(&ptr, t.type == TOKEN_LOCK);
+        } else if (t.type == TOKEN_COMMON) {
+            execute_common(&ptr);
+        } else if (t.type == TOKEN_CHAIN) {
+            execute_chain(&ptr);
+        } else if (t.type == TOKEN_PCOPY) {
+            // PCOPY source_page, destination_page
+            int source = (int)evaluate_expression(&ptr);
+            if (!next_graphics_comma(&ptr)) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            int destination = (int)evaluate_expression(&ptr);
+            if (!graphics_is_active() || !graphics_copy_page(source, destination)) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
+        } else if (t.type == TOKEN_PALETTE) {
+            // PALETTE  |  PALETTE attribute, color  |  PALETTE USING array(start)
+            if (!graphics_is_active()) init_graphics();
+            if (graphics_statement_end(&ptr)) {
+                graphics_reset_palette();
+            } else if (peek_token_type(ptr) == TOKEN_USING) {
+                get_next_token(&ptr);
+                Token array_tok = get_next_token(&ptr);
+                if (array_tok.type != TOKEN_IDENTIFIER) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                int idx = find_variable(array_tok.text);
+                int start = parse_array_index(&ptr, idx);
+                Variable *array = get_variable_ptr(idx);
+                int size = graphics_palette_size();
+                if (!array->array || start < 0 || start + size > array->array_size) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return;
+                }
+                int attributes[256];
+                long values[256];
+                for (int i = 0; i < size; i++) {
+                    attributes[i] = i;
+                    values[i] = (long)array->array[start + i];
+                }
+                if (!graphics_set_palette(size, attributes, values)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            } else {
+                int attribute = (int)evaluate_expression(&ptr);
+                if (!next_graphics_comma(&ptr)) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                long value = (long)evaluate_expression(&ptr);
+                if (!graphics_set_palette(1, &attribute, &value)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
+        } else if (t.type == TOKEN_CLEAR) {
+            // CLEAR [, [memory][, stack]]: the size arguments are accepted and ignored.
+            if (call_stack_depth > 0) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                return;
+            }
+            while (!graphics_statement_end(&ptr)) {
+                Token skip = get_next_token(&ptr);
+                if (skip.type == TOKEN_EOF) break;
+            }
+            clear_statement();
+        } else if (t.type == TOKEN_WIDTH) {
+            // WIDTH [columns][, rows]  |  WIDTH #n, width  |  WIDTH "device", width
+            const char *saved = ptr;
+            Token first = get_next_token(&ptr);
+            if (first.type == TOKEN_HASH || first.type == TOKEN_STRING ||
+                (first.type == TOKEN_IDENTIFIER && strcasecmp(first.text, "LPRINT") == 0)) {
+                // File and device widths are accepted; output is not wrapped.
+                if (first.type == TOKEN_HASH) {
+                    int fnum = (int)evaluate_expression(&ptr);
+                    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+                        report_runtime_error(ERR_BAD_FILE_NUMBER);
+                        return;
+                    }
+                    next_graphics_comma(&ptr);
+                } else if (first.type == TOKEN_STRING) {
+                    next_graphics_comma(&ptr);
+                }
+                int width = (int)evaluate_expression(&ptr);
+                if (width < 1 || width > 255) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            } else {
+                ptr = saved;
+                int columns = graphics_get_text_cols(), rows = graphics_get_text_rows();
+                if (graphics_arg_present(&ptr)) columns = (int)evaluate_expression(&ptr);
+                if (next_graphics_comma(&ptr)) rows = (int)evaluate_expression(&ptr);
+                if ((columns != 40 && columns != 80) ||
+                    (rows != 25 && rows != 30 && rows != 43 && rows != 50 && rows != 60)) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                    return;
+                }
+                if (graphics_is_active()) {
+                    graphics_set_text_size(columns, rows);
+                    print_col = 0;
+                    print_row = 0;
+                }
+            }
         } else if (t.type == TOKEN_STOP) {
             // STOP reached outside the main run loop (inside a FUNCTION); the break
             // is reported when the calling statement finishes.
@@ -8810,10 +9609,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         } else if (t.type == TOKEN_INPUT) {
             const char *saved = ptr;
             int suppress_question = 0;
+            char prompt_text[BASIC_TOKEN_TEXT_MAX] = "";
             Token prompt_tok = get_next_token(&ptr);
             if (prompt_tok.type == TOKEN_STRING) {
-                if (graphics_is_active()) graphics_print(prompt_tok.text);
-                else printf("%s", prompt_tok.text);
+                snprintf(prompt_text, sizeof(prompt_text), "%s", prompt_tok.text);
                 Token sep = get_next_token(&ptr);
                 if (sep.type == TOKEN_COMMA) {
                     suppress_question = 1;
@@ -8837,10 +9636,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
 
             int input_var_count = 0;
-            int var_indices[16];
-            int var_array_idx[16];
-            int var_is_str[16];
-            while (input_var_count < 16) {
+            int var_indices[MAX_INPUT_FIELDS];
+            int var_array_idx[MAX_INPUT_FIELDS];
+            int var_is_str[MAX_INPUT_FIELDS];
+            while (input_var_count < MAX_INPUT_FIELDS) {
                 const char *var_saved = ptr;
                 Token var = get_next_token(&ptr);
                 if (var.type != TOKEN_IDENTIFIER) {
@@ -8849,7 +9648,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 }
                 var_indices[input_var_count] = find_variable(var.text);
                 var_array_idx[input_var_count] = parse_array_index(&ptr, var_indices[input_var_count]);
-                var_is_str[input_var_count] = (var.text[strlen(var.text) - 1] == '$');
+                var_is_str[input_var_count] = is_string_var(var.text);
                 input_var_count++;
                 const char *sep_saved = ptr;
                 Token sep = get_next_token(&ptr);
@@ -8860,35 +9659,45 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             if (input_var_count == 0) return;
 
-            char line[256] = "";
-            if (fnum != -1) {
-                if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                    report_runtime_error(ERR_BAD_FILE_NUMBER);
-                } else if (fgets(line, sizeof(line), file_handles[fnum])) {
-                    line[strcspn(line, "\r\n")] = 0;
-                }
-            } else {
-                if (!suppress_question) basic_output("? ");
-                fflush(stdout);
-                if (graphics_is_active()) {
-                    graphics_readline(line, sizeof(line));
-                } else if (fgets(line, sizeof(line), stdin)) {
-                    line[strcspn(line, "\r\n")] = 0;
-                }
+            char line[INPUT_LINE_MAX];
+            char (*fields)[INPUT_LINE_MAX] = malloc(sizeof(*fields) * (MAX_INPUT_FIELDS + 1));
+            if (!fields) {
+                report_runtime_error(ERR_OUT_OF_MEMORY);
+                return;
             }
-
-            char *saveptr = NULL;
-            char *value_token = strtok_r(line, ",;", &saveptr);
-            for (int i = 0; i < input_var_count; i++) {
-                char value[BASIC_STRING_MAX] = "";
-                if (value_token) {
-                    strncpy(value, value_token, sizeof(value) - 1);
-                    value[sizeof(value) - 1] = '\0';
-                    trim_string(value);
-                    value_token = strtok_r(NULL, ",;", &saveptr);
+            while (1) {
+                if (fnum == -1) {
+                    // The prompt is shown again after "Redo from start".
+                    if (prompt_text[0]) basic_output(prompt_text);
+                    if (!suppress_question) basic_output("? ");
                 }
-                assign_input_value(var_indices[i], var_array_idx[i], var_is_str[i], value);
+                if (!read_input_line(fnum, line, sizeof(line))) {
+                    if (fnum == -1) line[0] = '\0';
+                    else break;
+                }
+                int count = split_input_fields(line, fields, MAX_INPUT_FIELDS);
+                int valid = count == input_var_count;
+                for (int i = 0; valid && i < input_var_count; i++) {
+                    if (!var_is_str[i] && !is_numeric_input(fields[i])) valid = 0;
+                }
+                // A file supplies values as they come; the keyboard must match exactly.
+                if (fnum != -1) {
+                    for (int i = 0; i < input_var_count; i++) {
+                        const char *value = i < count && count > 0 ? fields[i] : "";
+                        assign_input_value(var_indices[i], var_array_idx[i], var_is_str[i], value);
+                    }
+                    break;
+                }
+                if (valid || feof(stdin)) {
+                    for (int i = 0; i < input_var_count; i++) {
+                        const char *value = valid && i < count ? fields[i] : "";
+                        assign_input_value(var_indices[i], var_array_idx[i], var_is_str[i], value);
+                    }
+                    break;
+                }
+                basic_output("?Redo from start\n");
             }
+            free(fields);
         } else if (t.type == TOKEN_REVERSE) {
             Token var = get_next_token(&ptr);
             int idx = find_variable(var.text);
@@ -9136,6 +9945,97 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             set_pixel(x, y, col);
             update_graphics();
+        } else if (t.type == TOKEN_LINE && peek_token_type(ptr) == TOKEN_INPUT) {
+            // LINE INPUT [;] ["prompt";] [#n,] var$ reads a whole line, commas and all.
+            get_next_token(&ptr);
+            const char *saved = ptr;
+            if (get_next_token(&ptr).type != TOKEN_SEMICOLON) ptr = saved;
+            saved = ptr;
+            Token prompt = get_next_token(&ptr);
+            if (prompt.type == TOKEN_STRING) {
+                basic_output(prompt.text);
+                Token sep = get_next_token(&ptr);
+                if (sep.type != TOKEN_SEMICOLON && sep.type != TOKEN_COMMA) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+            } else {
+                ptr = saved;
+            }
+            int fnum = -1;
+            saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_HASH) {
+                fnum = (int)evaluate_expression(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_COMMA) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+            } else {
+                ptr = saved;
+            }
+            Token var = get_next_token(&ptr);
+            if (var.type != TOKEN_IDENTIFIER || !is_string_var(var.text)) {
+                report_runtime_error(ERR_TYPE_MISMATCH);
+                return;
+            }
+            int idx = find_variable(var.text);
+            int array_idx = parse_array_index(&ptr, idx);
+            char line[INPUT_LINE_MAX];
+            if (!read_input_line(fnum, line, sizeof(line)) && runtime_error_occurred) return;
+            assign_string_variable_value(idx, array_idx, line, strlen(line));
+        } else if (t.type == TOKEN_WRITE) {
+            // WRITE [#n,] expr[, expr...]: strings quoted, numbers without padding,
+            // items separated by commas, then a newline.
+            int fnum = -1;
+            const char *saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_HASH) {
+                fnum = (int)evaluate_expression(&ptr);
+                if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+                    report_runtime_error(ERR_BAD_FILE_NUMBER);
+                    return;
+                }
+                saved = ptr;
+                if (get_next_token(&ptr).type != TOKEN_COMMA) ptr = saved;
+            } else {
+                ptr = saved;
+            }
+            BasicString out = {0};
+            int first = 1;
+            while (!graphics_statement_end(&ptr)) {
+                if (!first) basic_string_append(&out, ",", 1);
+                first = 0;
+                const char *peek = ptr;
+                Token next = get_next_token(&peek);
+                if (is_string_token(&next) || is_string_member_reference_text(ptr)) {
+                    BasicString value = {0};
+                    parse_string_expression_heap(&ptr, &value);
+                    basic_string_append(&out, "\"", 1);
+                    if (value.length) basic_string_append(&out, value.data, value.length);
+                    basic_string_append(&out, "\"", 1);
+                    basic_string_release(&value);
+                } else {
+                    last_expression_is_double = 0;
+                    double value = evaluate_expression(&ptr);
+                    if (runtime_error_occurred) break;
+                    char number[64];
+                    format_number_plain(value, last_expression_is_double, number, sizeof(number));
+                    basic_string_append(&out, number, strlen(number));
+                }
+                if (!next_graphics_comma(&ptr)) {
+                    const char *semi = ptr;
+                    if (get_next_token(&semi).type == TOKEN_SEMICOLON) ptr = semi;
+                    else break;
+                }
+            }
+            if (!runtime_error_occurred) {
+                basic_string_append(&out, "\n", 1);
+                if (fnum != -1) {
+                    fwrite(out.data, 1, out.length, file_handles[fnum]);
+                } else {
+                    basic_output((const char *)out.data);
+                }
+            }
+            basic_string_release(&out);
         } else if (t.type == TOKEN_LINE) {
             // LINE [[STEP](x1,y1)]-[STEP](x2,y2)[,[color][,[B|BF][,style]]]
             double cx, cy, x1, y1, x2, y2;
@@ -9314,6 +10214,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         } else {
                             init_graphics();
                             set_screen_newimage(w, h, colors);
+                            current_screen_mode = -1;
                         }
                     } else {
                         report_runtime_error(ERR_SYNTAX_ERROR);
@@ -9322,10 +10223,29 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     report_runtime_error(ERR_SYNTAX_ERROR);
                 }
             } else {
+                // SCREEN [mode][, [colorswitch][, [apage][, [vpage]]]]
                 ptr = saved_screen;
-                int mode = (int)evaluate_expression(&ptr);
                 init_graphics();
-                set_screen_mode(mode); 
+                int mode = current_screen_mode;
+                if (graphics_arg_present(&ptr)) mode = (int)evaluate_expression(&ptr);
+                int args[3] = {0, 0, 0};
+                int has_arg[3] = {0, 0, 0};
+                for (int a = 0; a < 3 && next_graphics_comma(&ptr); a++) {
+                    if (graphics_arg_present(&ptr)) {
+                        args[a] = (int)evaluate_expression(&ptr);
+                        has_arg[a] = 1;
+                    }
+                }
+                // Repeating the current mode (to flip pages) keeps the screen.
+                if (mode != current_screen_mode) {
+                    set_screen_mode(mode);
+                    current_screen_mode = mode;
+                }
+                if (has_arg[1] || has_arg[2]) {
+                    int active = has_arg[1] ? args[1] : 0;
+                    int visual = has_arg[2] ? args[2] : active;
+                    if (!graphics_set_pages(active, visual)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                }
             }
         } else if (t.type == TOKEN_WINDOW) {
             const char *saved = ptr;
@@ -9875,13 +10795,27 @@ static void run_program_from(Statement *start) {
         strig_event_pending[i] = 0;
         strig_event_active[i] = 0;
     }
+    pen_event_pending = 0;
+    pen_event_active = 0;
     for (int i = 1; i < 16; i++) {
         reset_file_field_state(i);
     }
 
     block_if_depth = 0;
     select_case_depth = 0;
+    common_variable_count = 0;
     execute_statements(curr, resume_ptr, resume_ts_pos);
+    if (pending_chain_path[0] && !runtime_error_occurred) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s", pending_chain_path);
+        pending_chain_path[0] = '\0';
+        if (load_program_file(path)) {
+            run_program_from(get_head());
+        } else {
+            report_runtime_error(ERR_FILE_NOT_FOUND);
+        }
+    }
+    release_chain_values();
 }
 
 /* Records where CONT should resume and reports "Break in N". */
@@ -10337,7 +11271,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
             case TOKEN_ON: {
                 const char *command_start_ptr = t->start_ptr;
                 Token next_on = ts.tokens[ts.pos];
-                if (next_on.type == TOKEN_ERR || (next_on.type == TOKEN_IDENTIFIER && strcasecmp(next_on.text, "ERROR") == 0)) {
+                if (next_on.type == TOKEN_ERR || next_on.type == TOKEN_PEN) {
                     const char *temp_ptr = command_start_ptr;
                     interpret_line_at_ptr(&temp_ptr, 0, NULL);
                     // We need to advance ts.pos to match where interpret_line_at_ptr left off
@@ -10473,6 +11407,8 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     } else if (gosub_call_stack[gosub_ptr].event_type == EVENT_STRIG) {
                         int s = gosub_call_stack[gosub_ptr].event_index;
                         if (s >= 0 && s < 8) strig_event_active[s] = 0;
+                    } else if (gosub_call_stack[gosub_ptr].event_type == EVENT_PEN) {
+                        pen_event_active = 0;
                     }
                     if (graphics_is_active()) {
                         graphics_present_if_autodisplay();
@@ -10760,6 +11696,10 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 break;
             }
             if (!jumped && !runtime_error_occurred && dispatch_pending_key_event(exec_stmt, &ts, &curr, &resume_ptr)) {
+                jumped = 1;
+                break;
+            }
+            if (!jumped && !runtime_error_occurred && dispatch_pending_device_event(exec_stmt, &ts, &curr, &resume_ptr)) {
                 jumped = 1;
                 break;
             }

@@ -142,6 +142,8 @@ TESTS=(
   "tests/graphics/autodisplay"
   "tests/graphics/qbasic_primitives"
   "tests/graphics/rgb_functions"
+  "tests/graphics/palette_pages"
+  "tests/graphics/pen_stick"
   "tests/control_flow/labels_no_lines"
   "tests/procedures/qbasic_sub"
   "tests/procedures/qbasic_function"
@@ -157,6 +159,11 @@ TESTS=(
   "tests/control_flow/stop_statement"
   "tests/math/integer_division"
   "tests/file_io/random_records"
+  "tests/file_io/line_input_write"
+  "tests/system/keyboard_input"
+  "tests/system/editor_commands"
+  "tests/procedures/chain_common"
+  "tests/file_io/lock_unlock"
   "tests/system/wait_retrace"
   "tests/control_flow/if_sub_call"
   "tests/system/system_in_program"
@@ -250,7 +257,8 @@ for t in "${TESTS[@]}"; do
     fi
     rm -f tests/point_test.png
     rm -f tests/point_test.result
-  elif [ "$t" = "tests/graphics/qbasic_primitives" ] || [ "$t" = "tests/graphics/rgb_functions" ]; then
+  elif [ "$t" = "tests/graphics/qbasic_primitives" ] || [ "$t" = "tests/graphics/rgb_functions" ] ||
+       [ "$t" = "tests/graphics/palette_pages" ] || [ "$t" = "tests/graphics/pen_stick" ]; then
     # Headless graphics tests write their assertion result to tests/<name>.result.
     name=$(basename "$t")
     rm -f "tests/$name.result" "tests/$name.png"
