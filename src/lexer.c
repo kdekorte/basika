@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "lexer.h"
 
 typedef struct {
@@ -107,6 +108,7 @@ static const KeywordMap keyword_table[] = {
     {"PEEK", TOKEN_PEEK},
     {"PLAY", TOKEN_PLAY},
     {"POKE", TOKEN_POKE},
+    {"PRESET", TOKEN_PRESET},
     {"PRINT", TOKEN_PRINT},
     {"PSET", TOKEN_PSET},
     {"PUT", TOKEN_PUT},
@@ -164,11 +166,13 @@ static const KeywordMap keyword_table[] = {
     {"WINDOW", TOKEN_WINDOW},
     {"XOR", TOKEN_XOR},
     {"_AUTODISPLAY", TOKEN_AUTODISPLAY},
+    {"_DELAY", TOKEN_DELAY},
     {"_DISPLAY", TOKEN_DISPLAY},
     {"_FONT", TOKEN_FONT},
     {"_FREEFONT", TOKEN_FREEFONT},
     {"_FREEIMAGE", TOKEN_FREEIMAGE},
     {"_LOADFONT", TOKEN_LOADFONT},
+    {"_LIMIT", TOKEN_LIMIT},
     {"_LOADIMAGE", TOKEN_LOADIMAGE},
     {"_NEWIMAGE", TOKEN_NEWIMAGE},
     {"_PRINTSTRING", TOKEN_PRINTSTRING},
@@ -259,9 +263,12 @@ Token get_next_token(const char **input) {
         }
         
         // Handle suffixes
-        if (**input == '!') { (*input)++; } 
+        int single_suffix = 0;
+        int long_suffix = 0;
+        if (**input == '!') { (*input)++; single_suffix = 1; }
         else if (**input == '#') { (*input)++; is_double = 1; }
         else if (**input == '%') { (*input)++; }
+        else if (**input == '&' && !isalnum((unsigned char)(*input)[1])) { (*input)++; long_suffix = 1; }
         
         // Rule: numbers with more than 7 digits or a dot are double in some dialects,
         // but IBM BASICA treats any number with # or D as double. 
@@ -271,12 +278,66 @@ Token get_next_token(const char **input) {
         token.double_val = atof(buffer);
         token.is_double = is_double;
         
-        if (!is_double) {
+        // Whole-number literals in LONG range are exact INTEGER/LONG constants,
+        // as in QBasic; anything else is single precision unless marked double.
+        int is_whole = strpbrk(buffer, ".eE") == NULL && !single_suffix;
+        if (is_whole && token.double_val <= 9007199254740992.0) {
+            if (long_suffix || token.double_val > 9999999.0) token.is_double = 1;
+        } else if (!is_double) {
             // Force single precision truncation
             token.double_val = (double)((float)token.double_val);
         }
         token.int_val = (int)token.double_val;
         return token;
+    }
+
+    // &H, &O and &B literals follow QBasic typing: up to 16 significant bits
+    // is a signed INTEGER, wider values are a signed LONG, and an & suffix
+    // forces LONG so &HFFFF& is 65535.
+    if (**input == '&') {
+        int radix = 0;
+        char prefix = (char)toupper((unsigned char)(*input)[1]);
+        if (prefix == 'H') radix = 16;
+        else if (prefix == 'O') radix = 8;
+        else if (prefix == 'B') radix = 2;
+        if (radix) {
+            const char *p = *input + 2;
+            unsigned long long value = 0;
+            int bits = 0;
+            int digit_count = 0;
+            while (1) {
+                int d;
+                char c = (char)toupper((unsigned char)*p);
+                if (c >= '0' && c <= '9') d = c - '0';
+                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                else break;
+                if (d >= radix) break;
+                value = value * (unsigned long long)radix + (unsigned long long)d;
+                if (value > 0xFFFFFFFFULL) value &= 0xFFFFFFFFULL;
+                digit_count++;
+                p++;
+            }
+            if (digit_count > 0) {
+                for (unsigned long long v = value; v; v >>= 1) bits++;
+                int force_long = 0;
+                if (*p == '&') { force_long = 1; p++; }
+                else if (*p == '%') { p++; }
+                double result;
+                if (!force_long && bits <= 16) {
+                    result = (double)(int16_t)(uint16_t)value;
+                } else if (force_long && bits <= 16) {
+                    result = (double)value;
+                } else {
+                    result = (double)(int32_t)(uint32_t)value;
+                }
+                *input = p;
+                token.type = TOKEN_NUMBER;
+                token.double_val = result;
+                token.int_val = (int)result;
+                token.is_double = bits > 16 || force_long;
+                return token;
+            }
+        }
     }
 
     if (**input == '.') {
@@ -333,6 +394,15 @@ Token get_next_token(const char **input) {
             buffer[i++] = *(*input)++;
         } else {
             break;
+        }
+    }
+    // LONG (&) and _UNSIGNED LONG (~&) suffixes end an identifier.
+    if (i > 0 && i < BASIC_TOKEN_TEXT_MAX - 2) {
+        if (**input == '~' && (*input)[1] == '&') {
+            buffer[i++] = *(*input)++;
+            buffer[i++] = *(*input)++;
+        } else if (**input == '&' && !isalnum((unsigned char)(*input)[1])) {
+            buffer[i++] = *(*input)++;
         }
     }
     buffer[i] = '\0';

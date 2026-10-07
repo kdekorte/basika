@@ -2,7 +2,7 @@
 20 COLOR 15: PRINT "Graphics GET/PUT Demo"
 30 ' Draw a source pattern
 40 LINE (10,30)-(50,70), 2, BF : ' Green box
-50 CIRCLE (30,50), 15, 14, 2   : ' Yellow circle inside
+50 CIRCLE (30,50), 15, 14: PAINT (30,50), 14, 14 : ' Yellow circle inside
 60 ' Capture the 41x41 area
 70 ' Size needed: 2 + (width * height) = 2 + (41 * 41) = 1683
 80 DIM IMG(1682)
@@ -18,11 +18,12 @@
 180 PUT (490, 130), IMG, XOR
 190 ' Demonstrate XOR animation
 200 LOCATE 20, 1: PRINT "Press any key to see XOR animation..."
-210 K$ = INKEY$: IF K$ = "" THEN SLEEP 1: GOTO 210
+210 SLEEP: K$ = INKEY$
 220 FOR X = 0 TO 590 STEP 10
-230   PUT (X, 300), IMG, XOR
-240   SLEEP 50
-250   PUT (X, 300), IMG, XOR : ' Erase by XORing again
+230   PUT (X, 380), IMG, XOR
+240   _DELAY .05
+250   PUT (X, 380), IMG, XOR : ' Erase by XORing again
 260 NEXT X
-270 PUT (300, 300), IMG, PSET
+270 PUT (300, 380), IMG, PSET
 280 PRINT "Demo Complete. Press any key."
+290 SLEEP
