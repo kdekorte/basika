@@ -51,26 +51,56 @@ typedef enum {
     TOKEN_INPUTS, TOKEN_WRITE, TOKEN_CLEAR, TOKEN_WIDTH,
     TOKEN_PALETTE, TOKEN_PCOPY, TOKEN_CHAIN, TOKEN_COMMON,
     TOKEN_LOCK, TOKEN_UNLOCK, TOKEN_PEN, TOKEN_STICK,
-    TOKEN_DEFLNG, TOKEN_TITLE, TOKEN_DEST, TOKEN_SOURCE
+    TOKEN_DEFLNG, TOKEN_TITLE, TOKEN_DEST, TOKEN_SOURCE,
+    TOKEN_CINT, TOKEN_CLNG, TOKEN_CSNG, TOKEN_CDBL
 } TokenType;
+
+#include <stdint.h>
+
+/* The type of a numeric value in an expression. Integer kinds hold an exact
+ * 64-bit value; the floating kinds hold a double. Mixing two kinds gives the
+ * larger one, as in QBasic. */
+typedef enum {
+    NUM_INTEGER = 1, /* 16-bit INTEGER */
+    NUM_LONG,        /* 32-bit LONG (also _BYTE, _UNSIGNED _BYTE/INTEGER) */
+    NUM_INT64,       /* _INTEGER64 (also _UNSIGNED LONG) */
+    NUM_UINT64,      /* _UNSIGNED _INTEGER64 */
+    NUM_SINGLE,
+    NUM_DOUBLE
+} NumKind;
+
+typedef struct {
+    union {
+        double d;
+        int64_t i;
+    };
+    int kind;
+} Num;
 
 typedef struct {
     TokenType type;
     char text[BASIC_TOKEN_TEXT_MAX];
     int int_val;
     double double_val;
+    int64_t int64_val;  /* exact value of an integer literal */
+    int num_kind;       /* NumKind of a TOKEN_NUMBER */
     int is_double;
     const char *start_ptr;
     int var_idx;
     unsigned int type_generation;
     void *proc_cache;
     unsigned int proc_generation;
+    int const_cache;               /* CONST index for this name, or -1 */
+    unsigned int const_generation; /* constant_generation when const_cache was set */
+    int string_cache;              /* is_string_var(text), or -1 if not cacheable */
+    unsigned int string_generation; /* default_type_generation when string_cache was set */
 } Token;
 
 typedef struct {
     unsigned char opcode;
     int token_index;
-    double number;
+    Num number;      /* value of a CEXPR_NUMBER */
+    int is_double;   /* the literal makes PRINT show 16 digits */
 } CompiledExpressionInstruction;
 
 typedef struct {
@@ -104,11 +134,21 @@ typedef struct {
 int basic_string_assign(BasicString **target, const void *data, size_t length);
 int basic_string_append(BasicString *target, const void *data, size_t length);
 
+/* Numeric variables of an integer type keep an exact int64_t in ivalue and
+ * iarray; the others use value and array. var_type caches the VarType of the
+ * name (0 until first use, so zeroed variables need no extra setup). */
 typedef struct {
     char name[128];
-    double value;
+    union {
+        double value;
+        int64_t ivalue;
+    };
     BasicString *s_value;
-    double *array;
+    union {
+        double *array;
+        int64_t *iarray;
+    };
+    unsigned char var_type;
     BasicString **s_array;
     int array_size;
     int num_dims;

@@ -146,6 +146,8 @@ TESTS=(
   "tests/graphics/pen_stick"
   "tests/graphics/offscreen_images"
   "tests/math/qb64_types"
+  "tests/math/integer_math"
+  "tests/math/restore_label"
   "tests/control_flow/labels_no_lines"
   "tests/procedures/qbasic_sub"
   "tests/procedures/qbasic_function"

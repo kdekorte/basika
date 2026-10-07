@@ -13,11 +13,15 @@
 
 ## QB64 extensions
 
-- `_UNSIGNED _INTEGER64` and `_INTEGER64` values above 2^53 lose precision because variables are doubles.
 - `_CLEARCOLOR`, `_SETALPHA`, `_BLEND`/`_DONTBLEND`, `_SCREENIMAGE`, `_DISPLAY` as a handle function, `_PRINTMODE`, and `_TITLE$` are not implemented.
 
 ## Interpreter correctness
 
+- Array subscripts truncate floating-point indexes (`a(1.5)` is `a(1)`); QBasic rounds them.
+- `SQR`, `LOG` and other math functions return NaN or infinity for invalid arguments instead of QBasic's "Illegal function call".
+- `PRINT` and `STR$` show a leading zero for fractions (`0.5`); QBasic prints `.5`.
+- `EQV` and `IMP` operators are not implemented.
+- `MKL$` and `CVL` are not implemented.
 - Each field of each `TYPE` array element uses one of the 8192 variable-table entries; storing records as contiguous blocks would remove that limit and speed up record I/O.
 
 ## Lexer and interpreter performance

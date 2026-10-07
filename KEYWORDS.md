@@ -10,14 +10,17 @@ with `DIM name AS STRING * n` and `DIM name(size) AS STRING * n`.
 
 Numeric literals may be written in hexadecimal, octal or binary: `&HFF`, `&O17`,
 `&B1011`. As in QBasic, a literal of up to 16 significant bits is a signed
-INTEGER (`&HFFFF` is -1), a wider one is a signed LONG, and a trailing `&`
-forces LONG (`&HFFFF&` is 65535). Whole-number decimal literals are exact.
+INTEGER (`&HFFFF` is -1), up to 32 bits a signed LONG and wider ones a signed
+`_INTEGER64`; a type suffix picks the type (`&HFFFF&` is 65535,
+`&HFFFFFFFFFFFFFFFF~&&` is the largest `_UNSIGNED _INTEGER64`). Whole-number
+decimal literals are exact: INTEGER up to 32767, LONG up to 2147483647 and
+`_INTEGER64` beyond, unless a suffix (`%`, `&`, `&&`, `~&&`, ...) widens them.
 A decimal literal with more than 7 significant digits (`3.14159265358979`) is
 DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `!` suffix keeps it SINGLE.
 
-`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CHAIN`, `CHDIR`,
-`CHR$`, `CIRCLE`, `CLEAR`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COMMON`, `CONST`, `CONT`, `COS`, `CVD`, `CVI`,
+`ABS`, `AND`, `ARGC`, `ARGV$`, `AS`, `ASC`, `ATN`, `BASE`, `BEEP`, `CALL`, `CASE`, `CDBL`, `CHAIN`, `CHDIR`,
+`CHR$`, `CINT`, `CIRCLE`, `CLNG`, `CLEAR`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COMMON`, `CONST`, `CONT`, `COS`, `CSNG`, `CVD`, `CVI`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
 `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
@@ -141,20 +144,23 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`.
 - `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
 - `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
-- Type suffixes: `%%` _BYTE (8-bit), `%` INTEGER (16-bit), `&` LONG (32-bit), `&&` _INTEGER64, `!` SINGLE, `#` DOUBLE, `$` STRING; a `~` before an integer suffix (`~%%`, `~%`, `~&`, `~&&`) makes it `_UNSIGNED`. The `AS` names are `_BYTE`, `INTEGER`, `LONG`, `_INTEGER64`, each optionally preceded by `_UNSIGNED`. Unsigned values wrap around like QB64; values are held as doubles, so `_INTEGER64` values are exact only up to 2^53. Integer assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range. `AND`, `OR`, `XOR` and `NOT` keep all 32 bits of LONG values.
+- Type suffixes: `%%` _BYTE (8-bit), `%` INTEGER (16-bit), `&` LONG (32-bit), `&&` _INTEGER64, `!` SINGLE, `#` DOUBLE, `$` STRING; a `~` before an integer suffix (`~%%`, `~%`, `~&`, `~&&`) makes it `_UNSIGNED`. The `AS` names are `_BYTE`, `INTEGER`, `LONG`, `_INTEGER64`, each optionally preceded by `_UNSIGNED`. Integer variables hold exact 64-bit values, so `_INTEGER64` is exact over its whole range. Unsigned values wrap around like QB64. Integer assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range.
 - `DIM name AS STRING * n`: Declares a fixed-width scalar string padded with spaces.
 - `DIM name(size) AS STRING * n`: Declares a fixed-width string array; assignments are padded or truncated to `n` characters.
 - `ERASE var`: Reinitializes variables or arrays.
 - `LET var = expression`: Assignment (keyword is optional).
 - `OPTION BASE {0 | 1}`: Sets minimum array subscript.
-- `READ var1[, var2...]`: Reads from `DATA` statements.
+- `READ var1[, var2...]`: Reads from `DATA` statements. Unquoted items are taken as written, so whole numbers keep every digit and words read as strings.
 - `RESTORE [line | label]`: Resets the `DATA` pointer, or points it at the first `DATA` at or after the given line or label.
 - `SWAP var1, var2`: Exchanges values of two variables or array elements.
 
 ## Operators
-- `AND`: Bitwise logical AND.
-- `OR`: Bitwise logical OR.
-- `XOR`: Bitwise logical XOR.
+- Precedence, from tightest to loosest, as in QBasic: `^` (left to right, so `2 ^ 3 ^ 2` is 64), negation (`-2 ^ 2` is -4), `*` and `/`, `\`, `MOD`, `+` and `-`, the relations `=`, `<>`, `<`, `<=`, `>`, `>=`, then `NOT`, `AND`, `OR`, `XOR`.
+- Arithmetic types follow QBasic: an operation takes the larger of its operands' types (INTEGER < LONG < `_INTEGER64` < `_UNSIGNED _INTEGER64` < SINGLE < DOUBLE). An INTEGER, LONG or `_INTEGER64` result that does not fit its type is an Overflow error even when it is assigned to a wider variable, so `a% * b%` with 200 and 200 overflows; write `CLNG(a%) * b%`. `_UNSIGNED _INTEGER64` arithmetic wraps around. `_BYTE` and the smaller unsigned types compute as LONG.
+- `/` and `^` always give a floating-point result. `\` and `MOD` round floating-point operands to whole numbers first (`7.6 \ 2` is 4) and keep integer types.
+- Comparisons between integers are exact, including against floating-point values, and give -1 (true) or 0 (false).
+- `AND`, `OR`, `XOR`, `NOT`: Bitwise operations on whole numbers (floating-point operands are rounded) at the width of their operand types.
+- A `FOR` loop with an integer counter counts in whole steps; stepping past the counter type's range (`FOR i% = 1 TO 32767`) is an Overflow, as in QBasic.
 
 ## Input and Output
 - `BEEP`: Sounds the speaker.
@@ -255,7 +261,9 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 
 ## Numeric Functions
 - `ABS(n)`, `SQR(n)`, `SIN(n)`, `COS(n)`, `TAN(n)`, `ATN(n)`
-- `EXP(n)`, `LOG(n)`, `INT(n)`, `FIX(n)`, `RND[(n)]`, `SGN(n)`
+- `EXP(n)`, `LOG(n)`, `INT(n)`, `FIX(n)`, `RND[(n)]`, `SGN(n)`; `ABS`, `INT` and `FIX` keep integer types exact.
+- `CINT(n)`, `CLNG(n)`: Convert to INTEGER or LONG, rounding half to even (`CINT(2.5)` is 2); Overflow when out of range.
+- `CSNG(n)`, `CDBL(n)`: Convert to SINGLE or DOUBLE precision.
 - `ARGC`: Number of command-line arguments.
 - `ARGV$(index)`: Returns a command-line argument by index.
 - `CVI(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a binary string to integer, single, or double precision.
@@ -280,7 +288,7 @@ dynamic strings.
 - `DATE$`: Current system date.
 - `ENVIRON$(name | index)`: Retrieve environment variable.
 - `GET$(#n, record, length)`: Read string from file.
-- `HEX$(n)` / `OCT$(n)`: Hex/Octal representation. Negative values use 16-bit two's complement when they fit an INTEGER (`HEX$(-1)` is `FFFF`) and 32-bit otherwise; positive values up to 32 bits print in full, so `HEX$` shows `&HAARRGGBB` colors.
+- `HEX$(n)` / `OCT$(n)`: Hex/Octal representation. Negative values print in two's complement at the width of their type: 16 bits for INTEGER (`HEX$(-1)` is `FFFF`), 32 for LONG (`HEX$(-1&)` is `FFFFFFFF`) and 64 for `_INTEGER64`. Positive values print in full, so `HEX$` shows `&HAARRGGBB` colors.
 - `INKEY$`: Read single keypress.
 - `INPUT$(n[, [#]file])`: Reads n characters from a file, or waits for n keys without echoing them (Enter is `CHR$(13)`).
 - `ERDEV`, `ERDEV$`: Device error code and device name; no devices are simulated, so they are always 0 and "".
@@ -290,7 +298,7 @@ dynamic strings.
 - `MKD$(n)`, `MKI$(n)`, `MKS$(n)`: Convert numeric values to binary strings.
 - `REVERSE(s$)`: Reverses a string.
 - `SPACE$(n)`: Returns string of spaces.
-- `STR$(n)`: Converts number to string.
+- `STR$(n)`: Converts a number to the text `PRINT` shows, with a leading space for positive values (`STR$(1234567)` is `" 1234567"`).
 - `TIME$`: Current system time.
 
 ## Memory and Special

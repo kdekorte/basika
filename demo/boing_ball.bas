@@ -1,8 +1,11 @@
 REM BOING BALL - AN AMIGA-STYLE RED AND WHITE CHECKER SPHERE
 REM Press Space to pause/resume; press another key to quit.
 REM Run with: basika -w demo/boing_ball.bas
-SCREEN _NEWIMAGE(640, 480, 32): CLS
+SCREEN _NEWIMAGE(1024, 768, 32): CLS
 _AUTODISPLAY OFF
+REM The scene is laid out in 640x480 coordinates; WINDOW SCREEN maps them onto
+REM the 1024x768 screen, so lines, circles and fills are drawn at full size.
+WINDOW SCREEN (0, 0)-(639, 479)
 
 CONST GREY = _RGB32(170, 170, 170)
 CONST CYAN = _RGB32(85, 255, 255)
@@ -10,6 +13,8 @@ CONST RED = _RGB32(255, 85, 85)
 CONST DARK_RED = _RGB32(170, 0, 0)
 CONST WHITE = _RGB32(255, 255, 255)
 CONST DARK_GREY = _RGB32(85, 85, 85)
+REM One screen pixel, in scene units.
+CONST PX = 639 / 1023
 LINE (0, 0)-(639, 479), GREY, BF
 
 DIM SHARED SIN_ANGLE(96), COS_ANGLE(96)
@@ -55,11 +60,32 @@ WHILE 1
 		OLD_Y = BALL_Y
 		FRAME = FRAME + 1
 
+		CALL DrawFps
 		_DISPLAY
 	END IF
 	_LIMIT 55
 WEND
 END
+
+SUB DrawFps
+	REM Frames per second, updated twice a second, in the bottom-right corner.
+	STATIC Frames AS LONG, StartTime AS DOUBLE, Shown AS STRING
+	Frames = Frames + 1
+	Elapsed# = TIMER - StartTime
+	IF StartTime = 0 OR Elapsed# < 0 THEN
+		StartTime = TIMER: Frames = 0: Shown = "-- FPS"
+	ELSEIF Elapsed# >= .5 THEN
+		Shown = LTRIM$(STR$(INT(Frames / Elapsed# + .5))) + " FPS"
+		StartTime = TIMER: Frames = 0
+	END IF
+	REM Plain WINDOW returns to pixel coordinates for the text.
+	WINDOW
+	TextWidth = _PRINTWIDTH(Shown)
+	LINE (_WIDTH - TextWidth - 14, _HEIGHT - 26)-(_WIDTH - 1, _HEIGHT - 1), GREY, BF
+	COLOR DARK_GREY, GREY
+	_PRINTSTRING (_WIDTH - TextWidth - 8, _HEIGHT - 22), Shown
+	WINDOW SCREEN (0, 0)-(639, 479)
+END SUB
 
 SUB InitializeTextureAngles(PiValue)
 	FOR Index = 0 TO 96
@@ -70,32 +96,32 @@ SUB InitializeTextureAngles(PiValue)
 END SUB
 
 SUB DrawBackdrop(FloorY)
-	REM Bright cyan, doubled strokes stay visible after the canvas is scaled down.
+	REM Bright cyan strokes, two screen pixels wide.
 	LINE (76, 20)-(564, FloorY), CYAN, B
-	LINE (77, 21)-(563, FloorY - 1), CYAN, B
+	LINE (76 + PX, 20 + PX)-(564 - PX, FloorY - PX), CYAN, B
 	FOR GridX = 101 TO 539 STEP 25
 		LINE (GridX, 20)-(GridX, FloorY), CYAN
-		LINE (GridX + 1, 20)-(GridX + 1, FloorY), CYAN
+		LINE (GridX + PX, 20)-(GridX + PX, FloorY), CYAN
 	NEXT GridX
 	FOR GridY = 45 TO 305 STEP 25
 		LINE (76, GridY)-(564, GridY), CYAN
-		LINE (76, GridY + 1)-(564, GridY + 1), CYAN
+		LINE (76, GridY + PX)-(564, GridY + PX), CYAN
 	NEXT GridY
 	LINE (76, FloorY)-(22, 465), CYAN
-	LINE (77, FloorY)-(23, 465), CYAN
+	LINE (76 + PX, FloorY)-(22 + PX, 465), CYAN
 	LINE (564, FloorY)-(618, 465), CYAN
-	LINE (563, FloorY)-(617, 465), CYAN
+	LINE (564 - PX, FloorY)-(618 - PX, 465), CYAN
 	FOR GridX = 76 TO 564 STEP 25
 		BottomX = 22 + (GridX - 76) * 600 / 488
 		LINE (GridX, FloorY)-(BottomX, 465), CYAN
-		LINE (GridX + 1, FloorY)-(BottomX + 1, 465), CYAN
+		LINE (GridX + PX, FloorY)-(BottomX + PX, 465), CYAN
 	NEXT GridX
 	FOR Row = 1 TO 8
 		GridY = FloorY + Row * Row * 135 / 64
 		LeftX = 76 - (GridY - FloorY) * 54 / 135
 		RightX = 564 + (GridY - FloorY) * 54 / 135
 		LINE (LeftX, GridY)-(RightX, GridY), CYAN
-		LINE (LeftX, GridY + 1)-(RightX, GridY + 1), CYAN
+		LINE (LeftX, GridY + PX)-(RightX, GridY + PX), CYAN
 	NEXT Row
 END SUB
 
@@ -128,11 +154,14 @@ SUB DrawBall(BallX, BallY, Radius, Frame, PiValue, ContactY)
 END SUB
 
 SUB FillEllipse(CenterX, CenterY, RadiusX, RadiusY, FillColor AS _UNSIGNED LONG)
-	REM One horizontal span per row, so translucent colors blend evenly.
-	FOR Row = -INT(RadiusY) TO INT(RadiusY)
-		HalfWidth = RadiusX * SQR(1 - (Row / RadiusY) * (Row / RadiusY))
-		LINE (CenterX - HalfWidth, CenterY + Row)-(CenterX + HalfWidth, CenterY + Row), FillColor
-	NEXT Row
+	REM One horizontal span per screen row, so translucent colors blend evenly.
+	FOR ScreenY = INT((CenterY - RadiusY) / PX + .5) TO INT((CenterY + RadiusY) / PX + .5)
+		Row = ScreenY * PX - CenterY
+		IF ABS(Row) <= RadiusY THEN
+			HalfWidth = RadiusX * SQR(1 - (Row / RadiusY) * (Row / RadiusY))
+			LINE (CenterX - HalfWidth, ScreenY * PX)-(CenterX + HalfWidth, ScreenY * PX), FillColor
+		END IF
+	NEXT ScreenY
 END SUB
 
 SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
@@ -155,7 +184,10 @@ SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
 			X1 = INT(HalfWidth * SIN_ANGLE(Segment))
 			X2 = INT(HalfWidth * SIN_ANGLE(Segment + 1))
 			DeltaX = INT((X1 + X2) / 2)
-			Depth = SQR(Radius * Radius - DeltaX * DeltaX - DeltaY * DeltaY)
+			' INT can round DeltaX just past the rim, so keep SQR's argument >= 0.
+			DepthSquared = Radius * Radius - DeltaX * DeltaX - DeltaY * DeltaY
+			IF DepthSquared < 0 THEN DepthSquared = 0
+			Depth = SQR(DepthSquared)
 
 			U0 = DeltaX * CosPhase + Depth * SinPhase
 			Z1 = Depth * CosPhase - DeltaX * SinPhase

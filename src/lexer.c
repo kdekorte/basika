@@ -4,7 +4,34 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <errno.h>
+#include <math.h>
 #include "lexer.h"
+
+/* Reads a numeric literal's type suffix (!, #, %, &, %%, && or one of the
+ * ~ unsigned forms) and returns the NumKind it implies, or 0 if there is none. */
+static int read_number_suffix(const char **input) {
+    const char *p = *input;
+    int is_unsigned = 0;
+    if (p[0] == '~' && (p[1] == '%' || p[1] == '&')) {
+        is_unsigned = 1;
+        p++;
+    }
+    int kind = 0;
+    if (!is_unsigned && *p == '!') { kind = NUM_SINGLE; p++; }
+    else if (!is_unsigned && *p == '#') { kind = NUM_DOUBLE; p++; }
+    else if (p[0] == '%' && p[1] == '%') { kind = NUM_LONG; p += 2; }
+    else if (p[0] == '%') { kind = is_unsigned ? NUM_LONG : NUM_INTEGER; p++; }
+    else if (p[0] == '&' && p[1] == '&' && !isalnum((unsigned char)p[2])) {
+        kind = is_unsigned ? NUM_UINT64 : NUM_INT64;
+        p += 2;
+    } else if (p[0] == '&' && p[1] != '&' && !isalnum((unsigned char)p[1])) {
+        kind = is_unsigned ? NUM_INT64 : NUM_LONG;
+        p++;
+    }
+    if (kind) *input = p;
+    return kind;
+}
 
 typedef struct {
     const char *keyword;
@@ -27,6 +54,10 @@ static const KeywordMap keyword_table[] = {
     {"CHDIR", TOKEN_CHDIR},
     {"CHR$", TOKEN_CHR},
     {"CIRCLE", TOKEN_CIRCLE},
+    {"CINT", TOKEN_CINT},
+    {"CLNG", TOKEN_CLNG},
+    {"CSNG", TOKEN_CSNG},
+    {"CDBL", TOKEN_CDBL},
     {"CLEAR", TOKEN_CLEAR},
     {"CLOSE", TOKEN_CLOSE},
     {"CLS", TOKEN_CLS},
@@ -250,10 +281,16 @@ Token get_next_token(const char **input) {
     token.is_double = 0;
     token.int_val = 0;
     token.double_val = 0.0;
+    token.int64_val = 0;
+    token.num_kind = 0;
     token.var_idx = -1;
     token.type_generation = 0;
     token.proc_cache = NULL;
     token.proc_generation = 0;
+    token.const_cache = -1;
+    token.const_generation = 0;
+    token.string_cache = -1;
+    token.string_generation = 0;
 
     while (isspace(**input)) (*input)++;
 
@@ -268,7 +305,8 @@ Token get_next_token(const char **input) {
         int i = 0;
         int is_double = 0;
         int single_exponent = 0;
-        while (isdigit(**input) || **input == '.' || toupper(**input) == 'E' || toupper(**input) == 'D') {
+        while ((isdigit(**input) || **input == '.' || toupper(**input) == 'E' || toupper(**input) == 'D') &&
+               i < (int)sizeof(buffer) - 3) {
             char c = **input;
             if (toupper(c) == 'D') is_double = 1;
             if (toupper(c) == 'E') single_exponent = 1;
@@ -284,13 +322,11 @@ Token get_next_token(const char **input) {
         }
         
         // Handle suffixes
-        int single_suffix = 0;
-        int long_suffix = 0;
-        if (**input == '!') { (*input)++; single_suffix = 1; }
-        else if (**input == '#') { (*input)++; is_double = 1; }
-        else if (**input == '%') { (*input)++; }
-        else if (**input == '&' && !isalnum((unsigned char)(*input)[1])) { (*input)++; long_suffix = 1; }
-        
+        int suffix_kind = read_number_suffix(input);
+        int single_suffix = suffix_kind == NUM_SINGLE;
+        int long_suffix = suffix_kind != 0 && suffix_kind != NUM_INTEGER && suffix_kind < NUM_SINGLE;
+        if (suffix_kind == NUM_DOUBLE) is_double = 1;
+
         buffer[i] = '\0';
         // As in QBasic, an unsuffixed literal with more than 7 significant
         // digits is DOUBLE; an E exponent or ! suffix keeps it SINGLE.
@@ -307,23 +343,46 @@ Token get_next_token(const char **input) {
         token.type = TOKEN_NUMBER;
         token.double_val = atof(buffer);
         token.is_double = is_double;
-        
-        // Whole-number literals in LONG range are exact INTEGER/LONG constants,
-        // as in QBasic; anything else is single precision unless marked double.
-        int is_whole = strpbrk(buffer, ".eE") == NULL && !single_suffix;
-        if (is_whole && token.double_val <= 9007199254740992.0) {
-            if (long_suffix || token.double_val > 9999999.0) token.is_double = 1;
+
+        // Whole-number literals are exact: INTEGER up to 32767 and LONG up
+        // to 2147483647 as in QBasic, then _INTEGER64 (or _UNSIGNED
+        // _INTEGER64) as in QB64. A suffix can widen the type. Other
+        // literals are SINGLE unless DOUBLE.
+        int is_whole = strpbrk(buffer, ".eE") == NULL && suffix_kind < NUM_SINGLE;
+        errno = 0;
+        unsigned long long whole = is_whole ? strtoull(buffer, NULL, 10) : 0;
+        if (is_whole && errno != ERANGE) {
+            int kind;
+            if (whole <= 32767ULL) kind = NUM_INTEGER;
+            else if (whole <= 2147483647ULL) kind = NUM_LONG;
+            else if (whole <= 9223372036854775807ULL) kind = NUM_INT64;
+            else kind = NUM_UINT64;
+            if (suffix_kind > kind) kind = suffix_kind;
+            token.num_kind = kind;
+            token.int64_val = (int64_t)whole;
+            token.double_val = kind == NUM_UINT64 ? (double)whole : (double)(int64_t)whole;
+            if (long_suffix || whole > 9999999ULL) token.is_double = 1;
+        } else if (suffix_kind && suffix_kind < NUM_SINGLE) {
+            // 2.5% rounds to a whole number of the suffix's type.
+            token.num_kind = suffix_kind;
+            token.int64_val = (int64_t)nearbyint(token.double_val);
+            token.double_val = (double)token.int64_val;
+            if (long_suffix) token.is_double = 1;
         } else if (!is_double) {
             // Force single precision truncation
             token.double_val = (double)((float)token.double_val);
+            token.num_kind = NUM_SINGLE;
+        } else {
+            token.num_kind = NUM_DOUBLE;
         }
-        token.int_val = (int)token.double_val;
+        token.int_val = fabs(token.double_val) < 2147483648.0 ? (int)token.double_val : 0;
         return token;
     }
 
     // &H, &O and &B literals follow QBasic typing: up to 16 significant bits
-    // is a signed INTEGER, wider values are a signed LONG, and an & suffix
-    // forces LONG so &HFFFF& is 65535.
+    // is a signed INTEGER, up to 32 a signed LONG and wider values a signed
+    // _INTEGER64. A suffix picks the type, so &HFFFF& is 65535 and
+    // &HFFFFFFFFFFFFFFFF~&& is the largest _UNSIGNED _INTEGER64.
     if (**input == '&') {
         int radix = 0;
         char prefix = (char)toupper((unsigned char)(*input)[1]);
@@ -343,28 +402,35 @@ Token get_next_token(const char **input) {
                 else break;
                 if (d >= radix) break;
                 value = value * (unsigned long long)radix + (unsigned long long)d;
-                if (value > 0xFFFFFFFFULL) value &= 0xFFFFFFFFULL;
                 digit_count++;
                 p++;
             }
             if (digit_count > 0) {
                 for (unsigned long long v = value; v; v >>= 1) bits++;
-                int force_long = 0;
-                if (*p == '&') { force_long = 1; p++; }
-                else if (*p == '%') { p++; }
-                double result;
-                if (!force_long && bits <= 16) {
-                    result = (double)(int16_t)(uint16_t)value;
-                } else if (force_long && bits <= 16) {
-                    result = (double)value;
+                const char *suffix_start = p;
+                int suffix_kind = read_number_suffix(&p);
+                if (suffix_kind >= NUM_SINGLE) {
+                    // &H10# is not a typed hex literal; leave the suffix alone.
+                    p = suffix_start;
+                    suffix_kind = 0;
+                }
+                int kind = bits <= 16 ? NUM_INTEGER : bits <= 32 ? NUM_LONG : NUM_INT64;
+                if (suffix_kind > kind) kind = suffix_kind;
+                int64_t result;
+                if (kind == NUM_INTEGER) {
+                    result = (int16_t)(uint16_t)value;
+                } else if (kind == NUM_LONG) {
+                    result = bits <= 16 ? (int64_t)value : (int32_t)(uint32_t)value;
                 } else {
-                    result = (double)(int32_t)(uint32_t)value;
+                    result = (int64_t)value; // &HFFFFFFFF&& is 4294967295
                 }
                 *input = p;
                 token.type = TOKEN_NUMBER;
-                token.double_val = result;
-                token.int_val = (int)result;
-                token.is_double = bits > 16 || force_long;
+                token.num_kind = kind;
+                token.int64_val = result;
+                token.double_val = kind == NUM_UINT64 ? (double)value : (double)result;
+                token.int_val = (int)(int32_t)result;
+                token.is_double = bits > 16 || kind != NUM_INTEGER;
                 return token;
             }
         }

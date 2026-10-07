@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <signal.h>
 #include <math.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/time.h>
 #include <stddef.h>
@@ -42,11 +43,14 @@ static int var_count = 0;
 #define MAX_NAMED_CONSTANTS 256
 typedef struct {
     char name[64];
-    double value;
+    Num value;
     int is_wide; /* LONG/DOUBLE-valued constants print with full precision */
 } NamedConstant;
 static NamedConstant named_constants[MAX_NAMED_CONSTANTS];
 static int named_constant_count = 0;
+/* Bumped when a constant is added or the table is cleared, so the per-token
+ * lookup cache (find_named_constant_tok) knows to look again. */
+static unsigned int constant_generation = 1;
 
 #define MAX_USER_TYPES 64
 #define MAX_TYPE_FIELDS 64
@@ -329,15 +333,8 @@ static size_t numeric_base_length(const char *name, size_t len) {
     return len - type_suffix_length(name, len);
 }
 
-/* LONG and DOUBLE values print with full precision. */
-static int name_has_wide_suffix(const char *name) {
-    size_t len = strlen(name);
-    return len > 0 && (name[len - 1] == '#' || name[len - 1] == '&');
-}
-
 /* Primitive types: name in DIM/TYPE/parameters, variable suffix, record
- * size in bytes, and integer range. Values are held as doubles, so 64-bit
- * integers are exact only up to 2^53. */
+ * size in bytes, and integer range. */
 typedef struct {
     const char *name;
     const char *suffix;
@@ -460,9 +457,12 @@ static const char *find_declared_suffix(const char *name) {
     if (declared_type_count == 0) return NULL;
     const ProcedureDef *scope = current_declaration_scope();
     const char *shared_match = NULL;
+    // Entries are uppercase; compare the first letter before calling strcasecmp.
+    int first = (unsigned char)name[0];
+    if (first >= 'a' && first <= 'z') first -= 'a' - 'A';
     for (int i = 0; i < declared_type_count; i++) {
         DeclaredType *entry = &declared_types[i];
-        if (strcasecmp(entry->name, name) != 0) continue;
+        if ((unsigned char)entry->name[0] != first || strcasecmp(entry->name, name) != 0) continue;
         if (entry->scope == scope) return entry->suffix;
         if (entry->shared && !shared_match) shared_match = entry->suffix;
     }
@@ -507,6 +507,8 @@ static void clear_procedure_declared_types(void) {
         if (declared_types[i].scope == NULL) declared_types[kept++] = declared_types[i];
     }
     declared_type_count = kept;
+    default_type_generation++;
+    if (default_type_generation == 0) default_type_generation = 1;
 }
 
 /* Locals of a STATIC procedure, and names listed in a STATIC statement,
@@ -764,20 +766,16 @@ static int is_string_var(const char *name);
 static int parse_array_index(const char **input, int var_idx);
 static int parse_array_index_tok(TokenStream *ts, int var_idx);
 static void set_string_variable(int idx, int array_idx, const char *value);
-static void set_numeric_variable(int idx, int array_idx, double val);
 static int resolve_token_variable(Token *token);
-static double relational_expression_tok(TokenStream *ts);
-static double logical_not_tok(TokenStream *ts);
-static double bitwise_and_tok(TokenStream *ts);
-static double bitwise_or_tok(TokenStream *ts);
+static Num evaluate_num_tok(TokenStream *ts);
+static Num evaluate_num_text(const char **input);
 static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out);
 static const char *skip_whitespace_fast(const char *p);
-static int match_identifier_fast(const char *p, const char *word);
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num);
+static void interpret_statement_text(Statement *stmt, const char **ptr);
 double evaluate_expression(const char **input);
 double evaluate_expression_tok(TokenStream *ts);
 static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, BasicString *out);
-static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char **input);
 static int evaluate_function_call_string_text(ProcedureDef *proc, const char **input, BasicString *out);
 
 // Helper to skip tokens until a matching end token is found
@@ -967,6 +965,12 @@ static void report_runtime_error(RuntimeError code) {
                 snprintf(full_msg, sizeof(full_msg), "%s in %d\n", msg, display_line);
             }
             basic_output(full_msg);
+            // In graphics mode the message is drawn in the window, which may be
+            // hidden (--headless) or closed a moment later; echo it to stderr.
+            if (graphics_is_active()) {
+                fputs(full_msg, stderr);
+                fflush(stderr);
+            }
         }
     }
     runtime_error_occurred = 1;
@@ -992,7 +996,8 @@ static int is_string_var(const char *name);
 static int parse_array_index(const char **input, int var_idx);
 static int parse_array_index_tok(TokenStream *ts, int var_idx);
 static void set_string_variable(int idx, int array_idx, const char *value);
-static void set_numeric_variable(int idx, int array_idx, double val);
+static inline int set_numeric_variable_num(int idx, int array_idx, Num n);
+static Num parse_number_text(const char *text);
 double evaluate_expression(const char **input);
 double evaluate_expression_tok(TokenStream *ts);
 
@@ -1087,7 +1092,19 @@ static int get_next_data_item(char *out, int out_size) {
             if (!advance_data_statement()) return 0;
             continue;
         }
-        parse_string_expression(&data_ptr, out, out_size);
+        if (*data_ptr == '"') {
+            parse_string_expression(&data_ptr, out, out_size);
+        } else {
+            // Unquoted items are taken as written, as in QBasic, so numbers
+            // keep every digit and words are strings.
+            int length = 0;
+            while (*data_ptr && *data_ptr != ',' && *data_ptr != ':') {
+                if (length < out_size - 1) out[length++] = *data_ptr;
+                data_ptr++;
+            }
+            while (length > 0 && isspace((unsigned char)out[length - 1])) length--;
+            out[length] = '\0';
+        }
         while (isspace((unsigned char)*data_ptr)) data_ptr++;
         if (*data_ptr == ',') {
             data_ptr++;
@@ -1119,47 +1136,445 @@ static int read_next_data_into_variable(const char **input) {
     if (is_string) {
         set_string_variable(var_idx, array_idx, item);
     } else {
-        set_numeric_variable(var_idx, array_idx, atof(item));
+        set_numeric_variable_num(var_idx, array_idx, parse_number_text(item));
     }
     return 1;
 }
 
-/* Converts val to the numeric type named by the variable's suffix.
- * INTEGER and LONG round half to even (2.5 -> 2, 3.5 -> 4) like QBasic.
- * Reports Overflow and returns 0 when the value does not fit. */
-static inline __attribute__((always_inline)) int coerce_numeric_value(const char *name, double *val) {
-    size_t len = strlen(name);
-    char suffix = (len > 0) ? name[len - 1] : '!';
+/* ---- Numeric values -------------------------------------------------------
+ * Expressions produce a Num: an exact 64-bit integer for the integer kinds or
+ * a double for SINGLE and DOUBLE. Arithmetic follows QBasic: the result has
+ * the larger operand kind, and an INTEGER, LONG or _INTEGER64 result that
+ * does not fit is an Overflow error. _UNSIGNED _INTEGER64 arithmetic wraps,
+ * like every _UNSIGNED type does on assignment. */
 
-    if (suffix == '!') {
-        *val = (double)((float)*val);
-        return 1;
+static inline Num num_i(int64_t value, int kind) {
+    Num n;
+    n.i = value;
+    n.kind = kind;
+    return n;
+}
+
+static inline Num num_f(double value, int kind) {
+    Num n;
+    n.d = value;
+    n.kind = kind;
+    return n;
+}
+
+static inline Num num_d(double value) { return num_f(value, NUM_DOUBLE); }
+
+/* A TOKEN_NUMBER literal; tokens built without a kind are DOUBLE. */
+static inline Num num_from_token(const Token *token) {
+    if (token->num_kind && token->num_kind < NUM_SINGLE) return num_i(token->int64_val, token->num_kind);
+    return num_f(token->double_val, token->num_kind ? token->num_kind : NUM_DOUBLE);
+}
+
+static inline int num_is_int(Num n) { return n.kind < NUM_SINGLE; }
+
+static inline double num_to_double(Num n) {
+    if (n.kind >= NUM_SINGLE) return n.d;
+    if (n.kind == NUM_UINT64) return (double)(uint64_t)n.i;
+    return (double)n.i;
+}
+
+static inline __int128 num_int128(Num n) {
+    return n.kind == NUM_UINT64 ? (__int128)(uint64_t)n.i : (__int128)n.i;
+}
+
+/* The kind of a float result: DOUBLE when either side is DOUBLE or wider
+ * than INTEGER, so 1& / 3 keeps LONG's precision. */
+static inline int num_float_kind(Num a, Num b) {
+    return (a.kind == NUM_SINGLE || a.kind == NUM_INTEGER) &&
+           (b.kind == NUM_SINGLE || b.kind == NUM_INTEGER) ? NUM_SINGLE : NUM_DOUBLE;
+}
+
+static __attribute__((noinline)) Num num_overflow(int kind) {
+    report_runtime_error(ERR_OVERFLOW);
+    return num_i(0, kind);
+}
+
+/* An INTEGER or LONG result, checked against its range. */
+static inline __attribute__((always_inline)) Num num_small_result(int64_t value, int kind) {
+    if (kind == NUM_INTEGER ? (value < -32768 || value > 32767)
+                            : (value < INT32_MIN || value > INT32_MAX)) {
+        return num_overflow(kind);
     }
-    if (suffix != '%' && suffix != '&') return 1;
-    const PrimitiveType *type = primitive_type_of_name(name);
-    if (!type || !type->is_integer) return 1;
-    *val = nearbyint(*val);
-    if (type->is_unsigned) {
-        // Unsigned types wrap around like QB64.
-        double modulus = type->max_value + 1.0;
-        *val = fmod(*val, modulus);
-        if (*val < 0) *val += modulus;
-    } else if (*val < type->min_value || *val > type->max_value) {
+    return num_i(value, kind);
+}
+
+#define NUM_HOT static inline __attribute__((always_inline))
+#define NUM_COLD static __attribute__((noinline))
+
+/* +, - and * on the wide kinds; the inline versions below handle floats and
+ * INTEGER/LONG directly. */
+NUM_COLD Num num_arith_slow(int op, Num a, Num b) {
+    int kind = a.kind > b.kind ? a.kind : b.kind;
+    if (kind <= NUM_LONG) {
+        int64_t r = op == '+' ? a.i + b.i : op == '-' ? a.i - b.i : a.i * b.i;
+        return num_small_result(r, kind);
+    }
+    if (kind == NUM_INT64) {
+        int64_t r;
+        int overflow = op == '+' ? __builtin_add_overflow(a.i, b.i, &r)
+                     : op == '-' ? __builtin_sub_overflow(a.i, b.i, &r)
+                                 : __builtin_mul_overflow(a.i, b.i, &r);
+        if (overflow) return num_overflow(kind);
+        return num_i(r, kind);
+    }
+    if (kind == NUM_UINT64) {
+        uint64_t x = (uint64_t)a.i, y = (uint64_t)b.i;
+        return num_i((int64_t)(op == '+' ? x + y : op == '-' ? x - y : x * y), kind);
+    }
+    double x = num_to_double(a), y = num_to_double(b);
+    return num_f(op == '+' ? x + y : op == '-' ? x - y : x * y, kind);
+}
+
+NUM_HOT Num num_add(Num a, Num b) {
+    int kind = a.kind > b.kind ? a.kind : b.kind;
+    if (kind >= NUM_SINGLE) return num_f(num_to_double(a) + num_to_double(b), kind);
+    if (kind <= NUM_LONG) return num_small_result(a.i + b.i, kind);
+    return num_arith_slow('+', a, b);
+}
+
+NUM_HOT Num num_subtract(Num a, Num b) {
+    int kind = a.kind > b.kind ? a.kind : b.kind;
+    if (kind >= NUM_SINGLE) return num_f(num_to_double(a) - num_to_double(b), kind);
+    if (kind <= NUM_LONG) return num_small_result(a.i - b.i, kind);
+    return num_arith_slow('-', a, b);
+}
+
+NUM_HOT Num num_multiply(Num a, Num b) {
+    int kind = a.kind > b.kind ? a.kind : b.kind;
+    if (kind >= NUM_SINGLE) return num_f(num_to_double(a) * num_to_double(b), kind);
+    if (kind <= NUM_LONG) return num_small_result(a.i * b.i, kind);
+    return num_arith_slow('*', a, b);
+}
+
+static Num num_negate(Num a) {
+    if (a.kind <= NUM_LONG) return num_small_result(-a.i, a.kind);
+    if (a.kind == NUM_INT64) {
+        if (a.i == INT64_MIN) return num_overflow(a.kind);
+        return num_i(-a.i, a.kind);
+    }
+    if (a.kind == NUM_UINT64) return num_i((int64_t)(0 - (uint64_t)a.i), a.kind);
+    return num_f(-a.d, a.kind);
+}
+
+/* Division as in QBasic: dividing by zero is an error, and / always gives
+ * a floating-point result. */
+static Num num_divide(Num a, Num b) {
+    double right = num_to_double(b);
+    if (right == 0.0) {
+        report_runtime_error(ERR_DIVISION_BY_ZERO);
+        return num_i(0, NUM_INTEGER);
+    }
+    return num_f(num_to_double(a) / right, num_float_kind(a, b));
+}
+
+static Num num_power(Num a, Num b) {
+    return num_f(pow(num_to_double(a), num_to_double(b)), num_float_kind(a, b));
+}
+
+/* \, MOD and the logical operators work on whole numbers: an integer stays as
+ * it is and a float is rounded half to even. Returns the operand's kind, or 0
+ * (after reporting Overflow) when a float is out of _INTEGER64 range. */
+static int num_whole_operand(Num n, int64_t *out) {
+    if (n.kind < NUM_SINGLE) {
+        *out = n.i;
+        return n.kind;
+    }
+    double r = nearbyint(n.d);
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) {
         report_runtime_error(ERR_OVERFLOW);
         return 0;
     }
+    *out = (int64_t)r;
+    return (*out >= INT32_MIN && *out <= INT32_MAX) ? NUM_LONG : NUM_INT64;
+}
+
+static __attribute__((noinline)) Num num_integer_divide_slow(Num a, Num b, int want_remainder) {
+    int64_t x, y;
+    int ka = num_whole_operand(a, &x);
+    int kb = num_whole_operand(b, &y);
+    if (!ka || !kb) return num_i(0, NUM_INTEGER);
+    int kind = ka > kb ? ka : kb;
+    if (y == 0) {
+        report_runtime_error(ERR_DIVISION_BY_ZERO);
+        return num_i(0, kind);
+    }
+    if (kind == NUM_UINT64) {
+        uint64_t ux = (uint64_t)x, uy = (uint64_t)y;
+        return num_i((int64_t)(want_remainder ? ux % uy : ux / uy), kind);
+    }
+    if (x == INT64_MIN && y == -1) return want_remainder ? num_i(0, kind) : num_overflow(kind);
+    int64_t r = want_remainder ? x % y : x / y;
+    return kind <= NUM_LONG ? num_small_result(r, kind) : num_i(r, kind);
+}
+
+/* \ and MOD: INTEGER/LONG operands, and floats that already hold a small
+ * whole number, take the inline path. */
+static inline __attribute__((always_inline)) int num_small_whole(Num n, int64_t *out, int *kind) {
+    if (n.kind <= NUM_LONG) {
+        *out = n.i;
+        *kind = n.kind;
+        return 1;
+    }
+    if (n.kind >= NUM_SINGLE && n.d >= -2147483648.0 && n.d <= 2147483647.0) {
+        int64_t whole = (int64_t)n.d;
+        if ((double)whole != n.d) return 0;
+        *out = whole;
+        *kind = NUM_LONG;
+        return 1;
+    }
+    return 0;
+}
+
+static inline __attribute__((always_inline)) Num num_integer_divide(Num a, Num b, int want_remainder) {
+    int64_t x, y;
+    int ka, kb;
+    if (num_small_whole(a, &x, &ka) && num_small_whole(b, &y, &kb) && y != 0) {
+        int kind = ka > kb ? ka : kb;
+        return num_small_result(want_remainder ? x % y : x / y, kind);
+    }
+    return num_integer_divide_slow(a, b, want_remainder);
+}
+
+/* Compares an exact integer with a double without rounding the integer. */
+static __attribute__((noinline)) int compare_integer_double(__int128 x, double d) {
+    if (d != d) return 0;
+    if (d >= 18446744073709551616.0) return -1;
+    if (d < -9223372036854775808.0) return 1;
+    double whole = floor(d);
+    __int128 y = (__int128)whole;
+    if (x != y) return x < y ? -1 : 1;
+    return whole < d ? -1 : 0;
+}
+
+/* Returns <0, 0 or >0. Integers compare exactly, also against floats. */
+static inline __attribute__((always_inline)) int num_compare(Num a, Num b) {
+    if (a.kind >= NUM_SINGLE && b.kind >= NUM_SINGLE) return (a.d > b.d) - (a.d < b.d);
+    if (a.kind < NUM_SINGLE && b.kind < NUM_SINGLE) {
+        if (a.kind != NUM_UINT64 && b.kind != NUM_UINT64) return (a.i > b.i) - (a.i < b.i);
+        __int128 x = num_int128(a), y = num_int128(b);
+        return (x > y) - (x < y);
+    }
+    if (a.kind < NUM_SINGLE) return compare_integer_double(num_int128(a), b.d);
+    return -compare_integer_double(num_int128(b), a.d);
+}
+
+static inline Num num_truth(int condition) { return num_i(condition ? -1 : 0, NUM_INTEGER); }
+
+/* AND, OR, XOR (op '&', '|', '^') and NOT (op '~', b ignored). */
+static Num num_logical(int op, Num a, Num b) {
+    int64_t x, y = 0;
+    int ka = num_whole_operand(a, &x);
+    int kb = op == '~' ? ka : num_whole_operand(b, &y);
+    if (!ka || !kb) return num_i(0, NUM_INTEGER);
+    int kind = ka > kb ? ka : kb;
+    switch (op) {
+        case '&': return num_i(x & y, kind);
+        case '|': return num_i(x | y, kind);
+        case '^': return num_i(x ^ y, kind);
+        default: return num_i(~x, kind);
+    }
+}
+
+/* Variable types, in the order of primitive_types[] (VarType = index + 1).
+ * VT_UNTYPED is an internal name without a suffix. */
+enum {
+    VT_STRING = 1, VT_BYTE, VT_UBYTE, VT_INTEGER, VT_UINTEGER, VT_LONG, VT_ULONG,
+    VT_INT64, VT_UINT64, VT_SINGLE, VT_DOUBLE, VT_UNTYPED
+};
+
+/* The expression kind a variable of each VarType reads as. */
+static const unsigned char var_type_kind[] = {
+    [VT_STRING] = 0, [VT_BYTE] = NUM_LONG, [VT_UBYTE] = NUM_LONG,
+    [VT_INTEGER] = NUM_INTEGER, [VT_UINTEGER] = NUM_LONG, [VT_LONG] = NUM_LONG,
+    [VT_ULONG] = NUM_INT64, [VT_INT64] = NUM_INT64, [VT_UINT64] = NUM_UINT64,
+    [VT_SINGLE] = NUM_SINGLE, [VT_DOUBLE] = NUM_DOUBLE, [VT_UNTYPED] = NUM_SINGLE
+};
+
+static inline int var_type_is_integer(int vt) { return vt >= VT_BYTE && vt <= VT_UINT64; }
+
+static int var_type_of_name(const char *name) {
+    const PrimitiveType *type = primitive_type_of_name(name);
+    if (!type) return VT_UNTYPED;
+    return (int)(type - primitive_types) + 1;
+}
+
+static inline int var_type(Variable *v) {
+    if (!v->var_type) v->var_type = (unsigned char)var_type_of_name(v->name);
+    return v->var_type;
+}
+
+/* LONG, _INTEGER64 and DOUBLE variables (names ending in & or #) make PRINT
+ * show 16 significant digits. */
+static const unsigned char var_type_wide[] = {
+    [VT_LONG] = 1, [VT_ULONG] = 1, [VT_INT64] = 1, [VT_UINT64] = 1, [VT_DOUBLE] = 1, [VT_UNTYPED] = 0
+};
+
+static inline int var_is_wide(Variable *v) { return var_type_wide[var_type(v)]; }
+
+/* Reads a numeric variable or array element (array_idx < 0 for a scalar). */
+static inline __attribute__((always_inline)) Num load_num(Variable *v, int array_idx) {
+    int vt = var_type(v);
+    int in_array = array_idx >= 0;
+    if (in_array && (!v->array || array_idx >= v->array_size)) {
+        return var_type_is_integer(vt) ? num_i(0, var_type_kind[vt]) : num_f(0, var_type_kind[vt]);
+    }
+    if (var_type_is_integer(vt)) {
+        return num_i(in_array ? v->iarray[array_idx] : v->ivalue, var_type_kind[vt]);
+    }
+    return num_f(in_array ? v->array[array_idx] : v->value, var_type_kind[vt]);
+}
+
+static inline double load_double(Variable *v, int array_idx) {
+    return num_to_double(load_num(v, array_idx));
+}
+
+/* Converts n to integer VarType vt: floats round half to even (2.5 -> 2,
+ * 3.5 -> 4) like QBasic, _UNSIGNED types wrap around like QB64, and a value
+ * outside a signed type's range is an Overflow error (returns 0). */
+static int num_to_integer_type(Num n, int vt, int64_t *out) {
+    const PrimitiveType *type = &primitive_types[vt - 1];
+    int bits = type->bytes * 8;
+    if (n.kind >= NUM_SINGLE) {
+        double r = nearbyint(n.d);
+        if (type->is_unsigned) {
+            double modulus = ldexp(1.0, bits);
+            r = fmod(r, modulus);
+            if (r < 0) r += modulus;
+            if (!(r >= 0)) r = 0; // NaN
+            *out = (int64_t)(uint64_t)r;
+            return 1;
+        }
+        if (!(r >= type->min_value && r <= type->max_value) ||
+            (bits == 64 && r >= 9223372036854775808.0)) {
+            report_runtime_error(ERR_OVERFLOW);
+            return 0;
+        }
+        *out = (int64_t)r;
+        return 1;
+    }
+    if (type->is_unsigned) {
+        uint64_t value = (uint64_t)n.i;
+        if (bits < 64) value &= (UINT64_C(1) << bits) - 1;
+        *out = (int64_t)value;
+        return 1;
+    }
+    if (n.kind == NUM_UINT64 && n.i < 0) {
+        report_runtime_error(ERR_OVERFLOW);
+        return 0;
+    }
+    if (bits < 64) {
+        int64_t limit = INT64_C(1) << (bits - 1);
+        if (n.i < -limit || n.i >= limit) {
+            report_runtime_error(ERR_OVERFLOW);
+            return 0;
+        }
+    }
+    *out = n.i;
     return 1;
 }
 
-static inline __attribute__((always_inline)) void set_numeric_variable(int idx, int array_idx, double val) {
-    Variable *v = get_variable_ptr(idx);
-    if (!coerce_numeric_value(v->name, &val)) return;
-
-    if (array_idx >= 0 && v->array && array_idx < v->array_size) {
-        v->array[array_idx] = val;
-    } else {
-        v->value = val;
+/* Converts n to the variable's type and stores it. Returns 0 on Overflow. */
+static inline __attribute__((always_inline)) int store_num(Variable *v, int array_idx, Num n) {
+    int vt = var_type(v);
+    int in_array = array_idx >= 0;
+    if (in_array && (!v->array || array_idx >= v->array_size)) return 1;
+    if (var_type_is_integer(vt)) {
+        int64_t value;
+        // A value of the variable's own kind always fits.
+        if (n.kind == var_type_kind[vt] && (vt == VT_INTEGER || vt == VT_LONG || vt == VT_INT64 ||
+                                            vt == VT_UINT64)) {
+            value = n.i;
+        } else if (!num_to_integer_type(n, vt, &value)) {
+            return 0;
+        }
+        if (in_array) v->iarray[array_idx] = value;
+        else v->ivalue = value;
+        return 1;
     }
+    double value = num_to_double(n);
+    if (vt == VT_SINGLE) value = (double)(float)value;
+    if (in_array) v->array[array_idx] = value;
+    else v->value = value;
+    return 1;
+}
+
+/* Stores a value without type conversion (graphics GET arrays hold pixel
+ * colors in whatever numeric array they are given). */
+static void store_double_raw(Variable *v, int array_idx, double value) {
+    int in_array = array_idx >= 0;
+    if (in_array && (!v->array || array_idx >= v->array_size)) return;
+    if (var_type_is_integer(var_type(v))) {
+        int64_t whole = (value >= -9223372036854775808.0 && value < 9223372036854775808.0)
+            ? (int64_t)value : 0;
+        if (in_array) v->iarray[array_idx] = whole;
+        else v->ivalue = whole;
+    } else if (in_array) {
+        v->array[array_idx] = value;
+    } else {
+        v->value = value;
+    }
+}
+
+static inline __attribute__((always_inline)) int set_numeric_variable_num(int idx, int array_idx, Num n) {
+    return store_num(get_variable_ptr(idx), array_idx, n);
+}
+
+
+/* A FUNCTION or DEF FN whose name has an integer suffix returns that type
+ * even when the result was assigned through an unsuffixed reference. */
+static Num num_as_name_type(Num value, const char *name) {
+    int vt = var_type_of_name(name);
+    if (!var_type_is_integer(vt)) return value;
+    Variable typed = {0};
+    typed.var_type = (unsigned char)vt;
+    return store_num(&typed, -1, value) ? load_num(&typed, -1) : num_i(0, var_type_kind[vt]);
+}
+
+/* Parses a number typed or read as text (INPUT, READ, VAL): whole numbers
+ * are exact integers, anything else a DOUBLE. */
+static Num parse_number_text(const char *text) {
+    const char *p = text;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p[0] == '&') {
+        // &H, &O and &B literals, typed as in program text.
+        const char *literal = p;
+        Token token = get_next_token(&literal);
+        if (token.type == TOKEN_NUMBER) return num_from_token(&token);
+    }
+    const char *digits = p;
+    if (*digits == '+' || *digits == '-') digits++;
+    if (isdigit((unsigned char)*digits)) {
+        const char *end = digits;
+        while (isdigit((unsigned char)*end)) end++;
+        const char *rest = end;
+        while (*rest == ' ' || *rest == '\t' || *rest == '%' || *rest == '&') rest++;
+        if (*rest == '\0' || *rest == ',') {
+            errno = 0;
+            char *parsed_end = NULL;
+            if (*p == '-') {
+                long long value = strtoll(p, &parsed_end, 10);
+                if (errno != ERANGE) return num_i(value, NUM_INT64);
+            } else {
+                unsigned long long value = strtoull(p, &parsed_end, 10);
+                if (errno != ERANGE) {
+                    return value > INT64_MAX ? num_i((int64_t)value, NUM_UINT64)
+                                             : num_i((int64_t)value, NUM_INT64);
+                }
+            }
+        }
+    }
+    return num_d(atof(text));
+}
+
+/* Formats an exact integer value. */
+static void format_num_integer(Num n, char *out, size_t size) {
+    if (n.kind == NUM_UINT64) snprintf(out, size, "%llu", (unsigned long long)(uint64_t)n.i);
+    else snprintf(out, size, "%lld", (long long)n.i);
 }
 
 static void randomize_seed(const char **input) {
@@ -1293,7 +1708,8 @@ static int is_string_var(const char *name) {
         const char *declared = find_declared_suffix(name);
         if (declared) return declared[0] == '$';
     }
-    int first = toupper((unsigned char)name[0]);
+    int first = (unsigned char)name[0];
+    if (first >= 'a' && first <= 'z') first -= 'a' - 'A'; // ASCII only; toupper is a libc call
     if (first >= 'A' && first <= 'Z') {
         return (default_type_map[first - 'A'] == '$');
     }
@@ -1515,28 +1931,30 @@ static void basic_string_destroy(BasicString *value) {
     basic_string_pool_release(value);
 }
 
-/* HEX$/OCT$: negative INTEGER values use 16-bit two's complement and other
- * negatives 32-bit, as in QBasic; positive values up to 32 bits (QB64
- * _UNSIGNED LONG colors) print in full. */
-static void format_radix_string(double val, int hex, char *buf, size_t size) {
-    double rounded = round(val);
-    unsigned long long bits;
-    if (rounded < 0) {
-        bits = rounded >= -32768.0 ? (unsigned long long)(uint16_t)(int16_t)rounded
-                                   : (unsigned long long)(uint32_t)(int32_t)(rounded < -2147483648.0 ? -2147483648.0 : rounded);
-    } else {
-        bits = rounded > 9007199254740992.0 ? 9007199254740992ULL : (unsigned long long)rounded;
+/* HEX$ and OCT$: negative values print in two's complement at the width of
+ * their type (INTEGER 16 bits, LONG 32 bits, _INTEGER64 64 bits), as in
+ * QBasic; floats are rounded first. */
+static void format_radix_string(Num value, int hex, char *buf, size_t size) {
+    uint64_t bits;
+    int kind = value.kind;
+    if (!num_is_int(value)) {
+        int64_t whole;
+        kind = num_whole_operand(value, &whole);
+        if (!kind) {
+            buf[0] = '\0';
+            return;
+        }
+        if (whole >= -32768 && whole < 0) kind = NUM_INTEGER;
+        value = num_i(whole, kind);
     }
-    snprintf(buf, size, hex ? "%llX" : "%llo", bits);
+    if (value.i < 0 && kind == NUM_INTEGER) bits = (uint16_t)value.i;
+    else if (value.i < 0 && kind == NUM_LONG) bits = (uint32_t)value.i;
+    else bits = (uint64_t)value.i;
+    snprintf(buf, size, hex ? "%llX" : "%llo", (unsigned long long)bits);
 }
 
-/* AND/OR/XOR/NOT operate on whole numbers; 32-bit LONG and _UNSIGNED LONG
- * operands keep all of their bits. */
-static long long basic_bit_int(double value) {
-    if (value >= 9.2e18) return LLONG_MAX;
-    if (value <= -9.2e18) return LLONG_MIN;
-    return (long long)value;
-}
+/* STR$: the number as PRINT shows it, with a leading space when positive. */
+static void format_str_function(Num value, char *buf, size_t size);
 
 /* TIMER: wall-clock seconds since local midnight, as in QBasic. */
 static double seconds_since_midnight(void) {
@@ -1572,30 +1990,7 @@ static void reset_call_frame(CallFrame *frame) {
     frame->func_return_string = NULL;
 }
 
-/* Division as in QBasic: dividing by zero is an error, and \ and MOD round
- * their operands to whole numbers before dividing. */
-static inline double basic_divide(double left, double right) {
-    if (right == 0.0) {
-        report_runtime_error(ERR_DIVISION_BY_ZERO);
-        return 0.0;
-    }
-    return left / right;
-}
 
-static inline double basic_integer_divide(double left, double right, int want_remainder) {
-    // Operands are usually whole already; only round the ones that are not.
-    double a = (left == (double)(long long)left) ? left : nearbyint(left);
-    double b = (right == (double)(long long)right) ? right : nearbyint(right);
-    if (b == 0.0) {
-        report_runtime_error(ERR_DIVISION_BY_ZERO);
-        return 0.0;
-    }
-    if (fabs(a) < 9.0e18 && fabs(b) < 9.0e18) {
-        long long x = (long long)a, y = (long long)b;
-        return want_remainder ? (double)(x % y) : (double)(x / y);
-    }
-    return want_remainder ? fmod(a, b) : trunc(a / b);
-}
 
 static int read_input_chars(int count, int fnum, BasicString *out);
 
@@ -1690,7 +2085,7 @@ static int find_variable_index(const char *normalized) {
     return -1;
 }
 
-static int add_named_constant(const char *name, double value, int is_wide) {
+static int add_named_constant(const char *name, Num value, int is_wide) {
     if (!name || !name[0]) return 0;
     char normalized[64];
     int len = 0;
@@ -1709,6 +2104,7 @@ static int add_named_constant(const char *name, double value, int is_wide) {
         }
     }
     if (named_constant_count >= MAX_NAMED_CONSTANTS) return 0;
+    if (++constant_generation == 0) constant_generation = 1;
     int idx = named_constant_count++;
     strncpy(named_constants[idx].name, normalized, sizeof(named_constants[idx].name) - 1);
     named_constants[idx].name[sizeof(named_constants[idx].name) - 1] = '\0';
@@ -1740,6 +2136,17 @@ static int find_named_constant_slow(const char *name) {
 /* Constants are rare, so keep the common no-constant check inlined. */
 static inline int find_named_constant(const char *name) {
     return named_constant_count == 0 ? -1 : find_named_constant_slow(name);
+}
+
+/* find_named_constant for a program token: the result is kept on the token,
+ * since every variable read in an expression asks whether it is a CONST. */
+static inline int find_named_constant_tok(Token *token) {
+    if (named_constant_count == 0) return -1;
+    if (token->const_generation != constant_generation) {
+        token->const_cache = find_named_constant_slow(token->text);
+        token->const_generation = constant_generation;
+    }
+    return token->const_cache;
 }
 
 static int resolve_token_variable(Token *token) {
@@ -2478,14 +2885,20 @@ static int compile_expression_node(UserFunction *function, unsigned char op, int
 
 static int compile_primary(TokenStream *ts, UserFunction *function);
 
+static int compile_unary(TokenStream *ts, UserFunction *function);
+
+/* Same precedence as the evaluator: ^ binds left to right. */
 static int compile_power(TokenStream *ts, UserFunction *function) {
     int left = compile_primary(ts, function);
     if (left < 0) return -1;
-    if (ts->tokens[ts->pos].type == TOKEN_POWER) {
+    while (ts->tokens[ts->pos].type == TOKEN_POWER) {
         ts->pos++;
-        int right = compile_power(ts, function);
+        TokenType next = ts->tokens[ts->pos].type;
+        int right = (next == TOKEN_MINUS || next == TOKEN_PLUS)
+            ? compile_unary(ts, function) : compile_primary(ts, function);
         if (right < 0) return -1;
-        return compile_expression_node(function, EXPR_POWER, left, right, (Token){0});
+        left = compile_expression_node(function, EXPR_POWER, left, right, (Token){0});
+        if (left < 0) return -1;
     }
     return left;
 }
@@ -2501,21 +2914,40 @@ static int compile_unary(TokenStream *ts, UserFunction *function) {
     return compile_power(ts, function);
 }
 
-static int compile_term(TokenStream *ts, UserFunction *function) {
+static int compile_multiply(TokenStream *ts, UserFunction *function) {
     int left = compile_unary(ts, function);
     if (left < 0) return -1;
-    while (1) {
-        TokenType type = ts->tokens[ts->pos].type;
-        unsigned char op;
-        if (type == TOKEN_STAR) op = EXPR_MULTIPLY;
-        else if (type == TOKEN_SLASH) op = EXPR_DIVIDE;
-        else if (type == TOKEN_MOD) op = EXPR_MOD;
-        else if (type == TOKEN_IDIV || (type == TOKEN_IDENTIFIER && strcasecmp(ts->tokens[ts->pos].text, "DIV") == 0)) op = EXPR_IDIV;
-        else break;
-        ts->pos++;
+    while (ts->tokens[ts->pos].type == TOKEN_STAR || ts->tokens[ts->pos].type == TOKEN_SLASH) {
+        unsigned char op = ts->tokens[ts->pos++].type == TOKEN_STAR ? EXPR_MULTIPLY : EXPR_DIVIDE;
         int right = compile_unary(ts, function);
         if (right < 0) return -1;
         left = compile_expression_node(function, op, left, right, (Token){0});
+        if (left < 0) return -1;
+    }
+    return left;
+}
+
+static int compile_integer_divide(TokenStream *ts, UserFunction *function) {
+    int left = compile_multiply(ts, function);
+    if (left < 0) return -1;
+    while (ts->tokens[ts->pos].type == TOKEN_IDIV) {
+        ts->pos++;
+        int right = compile_multiply(ts, function);
+        if (right < 0) return -1;
+        left = compile_expression_node(function, EXPR_IDIV, left, right, (Token){0});
+        if (left < 0) return -1;
+    }
+    return left;
+}
+
+static int compile_term(TokenStream *ts, UserFunction *function) {
+    int left = compile_integer_divide(ts, function);
+    if (left < 0) return -1;
+    while (ts->tokens[ts->pos].type == TOKEN_MOD) {
+        ts->pos++;
+        int right = compile_integer_divide(ts, function);
+        if (right < 0) return -1;
+        left = compile_expression_node(function, EXPR_MOD, left, right, (Token){0});
         if (left < 0) return -1;
     }
     return left;
@@ -2605,7 +3037,9 @@ static int compile_primary(TokenStream *ts, UserFunction *function) {
     if (token.type == TOKEN_IDENTIFIER) {
         int const_idx = find_named_constant(token.text);
         if (const_idx >= 0) {
-            Token num_token = (Token){.type = TOKEN_NUMBER, .double_val = named_constants[const_idx].value,
+            Num constant = named_constants[const_idx].value;
+            Token num_token = (Token){.type = TOKEN_NUMBER, .double_val = num_to_double(constant),
+                                       .int64_val = constant.i, .num_kind = constant.kind,
                                        .is_double = named_constants[const_idx].is_wide};
             return compile_expression_node(function, EXPR_NUMBER, -1, -1, num_token);
         }
@@ -2643,11 +3077,11 @@ static void compile_user_function_expression(UserFunction *function) {
     }
 }
 
-static double evaluate_compiled_expression_node(const UserFunction *function, int index) {
+static Num evaluate_compiled_expression_node(const UserFunction *function, int index) {
     const CompiledExpressionNode *node = &function->compiled_nodes[index];
     if (node->op == EXPR_NUMBER) {
         if (node->token.is_double) last_expression_is_double = 1;
-        return node->token.double_val;
+        return num_from_token(&node->token);
     }
     if (node->op == EXPR_VARIABLE) {
         int const_idx = find_named_constant(node->token.text);
@@ -2657,48 +3091,53 @@ static double evaluate_compiled_expression_node(const UserFunction *function, in
         }
         int variable_index = find_variable(node->token.text);
         Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
-        if (variable && name_has_wide_suffix(variable->name)) last_expression_is_double = 1;
-        return variable ? variable->value : 0;
+        if (variable && var_is_wide(variable)) last_expression_is_double = 1;
+        return variable ? load_num(variable, -1) : num_f(0, NUM_SINGLE);
     }
 
-    double left = evaluate_compiled_expression_node(function, node->left);
-    if (node->op == EXPR_NEGATE) return -left;
-    if (node->op == EXPR_NOT) return (double)~basic_bit_int(left);
-    double right = evaluate_compiled_expression_node(function, node->right);
+    Num left = evaluate_compiled_expression_node(function, node->left);
+    if (node->op == EXPR_NEGATE) return num_negate(left);
+    if (node->op == EXPR_NOT) return num_logical('~', left, left);
+    Num right = evaluate_compiled_expression_node(function, node->right);
     switch (node->op) {
-        case EXPR_ADD: return left + right;
-        case EXPR_SUBTRACT: return left - right;
-        case EXPR_MULTIPLY: return left * right;
-        case EXPR_DIVIDE: return basic_divide(left, right);
-        case EXPR_MOD: return basic_integer_divide(left, right, 1);
-        case EXPR_IDIV: return basic_integer_divide(left, right, 0);
-        case EXPR_POWER: return pow(left, right);
-        case EXPR_EQUAL: return left == right ? -1.0 : 0.0;
-        case EXPR_NOT_EQUAL: return left != right ? -1.0 : 0.0;
-        case EXPR_LESS: return left < right ? -1.0 : 0.0;
-        case EXPR_LESS_EQUAL: return left <= right ? -1.0 : 0.0;
-        case EXPR_GREATER: return left > right ? -1.0 : 0.0;
-        case EXPR_GREATER_EQUAL: return left >= right ? -1.0 : 0.0;
-        case EXPR_AND: return (double)(basic_bit_int(left) & basic_bit_int(right));
-        case EXPR_OR: return (double)(basic_bit_int(left) | basic_bit_int(right));
-        case EXPR_XOR: return (double)(basic_bit_int(left) ^ basic_bit_int(right));
-        default: return 0;
+        case EXPR_ADD: return num_add(left, right);
+        case EXPR_SUBTRACT: return num_subtract(left, right);
+        case EXPR_MULTIPLY: return num_multiply(left, right);
+        case EXPR_DIVIDE: return num_divide(left, right);
+        case EXPR_MOD: return num_integer_divide(left, right, 1);
+        case EXPR_IDIV: return num_integer_divide(left, right, 0);
+        case EXPR_POWER: return num_power(left, right);
+        case EXPR_EQUAL: return num_truth(num_compare(left, right) == 0);
+        case EXPR_NOT_EQUAL: return num_truth(num_compare(left, right) != 0);
+        case EXPR_LESS: return num_truth(num_compare(left, right) < 0);
+        case EXPR_LESS_EQUAL: return num_truth(num_compare(left, right) <= 0);
+        case EXPR_GREATER: return num_truth(num_compare(left, right) > 0);
+        case EXPR_GREATER_EQUAL: return num_truth(num_compare(left, right) >= 0);
+        case EXPR_AND: return num_logical('&', left, right);
+        case EXPR_OR: return num_logical('|', left, right);
+        case EXPR_XOR: return num_logical('^', left, right);
+        default: return num_i(0, NUM_INTEGER);
     }
 }
 
-static double evaluate_user_function(UserFunction *function, double argument) {
+static Num evaluate_num_text(const char **input);
+
+/* DEF FN: the parameter temporarily takes the argument's value. A function
+ * whose name has an integer suffix (FNA%) returns that type. */
+static Num evaluate_user_function(UserFunction *function, Num argument) {
     int parameter_index = find_variable(function->param_name);
-    double old_value = vars[parameter_index].value;
-    vars[parameter_index].value = argument;
-    double result;
+    Variable *parameter = &vars[parameter_index];
+    int64_t old_bits = parameter->ivalue;
+    store_num(parameter, -1, argument);
+    Num result;
     if (function->has_compiled_expression) {
         result = evaluate_compiled_expression_node(function, function->compiled_root);
     } else {
         const char *expression = function->expression;
-        result = evaluate_expression(&expression);
+        result = evaluate_num_text(&expression);
     }
-    vars[parameter_index].value = old_value;
-    return result;
+    parameter->ivalue = old_bits;
+    return num_as_name_type(result, function->name);
 }
 
 static void reset_file_field_state(int fnum) {
@@ -2955,14 +3394,58 @@ void basika_trigger_strig_event(int strig_idx, int pressed) {
 
 typedef struct {
     int var_idx;
-    double end_val;
-    double step_val;
+    Num end_val;
+    Num step_val;
     Statement *start_stmt;
     int start_ts_pos;
 } ForLoop;
 
 static ForLoop for_stack[16];
 static int for_ptr = 0;
+
+/* A FOR loop repeats while the counter has not passed the limit; a STEP of
+ * 0 counts as upward, so it loops until EXIT FOR. */
+static inline __attribute__((always_inline)) int for_loop_condition(Num value, Num end, Num step) {
+    int compare = num_compare(value, end);
+    return (step.kind < NUM_SINGLE ? step.i >= 0 : step.d >= 0) ? compare <= 0 : compare >= 0;
+}
+
+/* FOR: assigns the start value and records the limit and step. An integer
+ * counter counts in whole steps up to a rounded limit, as in QBasic. Returns
+ * 1 when the body runs, 0 when it is skipped and -1 on an error. */
+static int for_loop_begin(ForLoop *loop, int idx, Num start, Num end, Num step) {
+    Variable *v = get_variable_ptr(idx);
+    if (runtime_error_occurred || !store_num(v, -1, start)) return -1;
+    if (var_type_is_integer(var_type(v))) {
+        int64_t whole;
+        int kind;
+        if (!num_is_int(end)) {
+            if (!(kind = num_whole_operand(end, &whole))) return -1;
+            end = num_i(whole, kind);
+        }
+        if (!num_is_int(step)) {
+            if (!(kind = num_whole_operand(step, &whole))) return -1;
+            step = num_i(whole, kind);
+        }
+    } else {
+        // A float counter steps in floating point; convert once, not per NEXT.
+        end = num_f(num_to_double(end), end.kind >= NUM_SINGLE ? end.kind : NUM_DOUBLE);
+        step = num_f(num_to_double(step), step.kind >= NUM_SINGLE ? step.kind : NUM_SINGLE);
+    }
+    loop->var_idx = idx;
+    loop->end_val = end;
+    loop->step_val = step;
+    return for_loop_condition(load_num(v, -1), end, step);
+}
+
+/* NEXT: steps the counter (an INTEGER counter stepping past 32767 is an
+ * Overflow, as in QBasic). Returns 1 when the body runs again. */
+static inline __attribute__((always_inline)) int for_loop_next(ForLoop *loop) {
+    Variable *v = get_variable_ptr(loop->var_idx);
+    Num next = num_add(load_num(v, -1), loop->step_val);
+    if (runtime_error_occurred || !store_num(v, -1, next)) return 0;
+    return for_loop_condition(load_num(v, -1), loop->end_val, loop->step_val);
+}
 
 typedef struct {
     Statement *stmt;
@@ -3337,7 +3820,7 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
                 if (name_length > 0 && index_var->name[name_length - 1] == '#') {
                     last_expression_is_double = 1;
                 }
-                index_value = (int)index_var->value;
+                index_value = (int)load_double(index_var, -1);
                 simple_index = 1;
             }
         }
@@ -3629,7 +4112,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_HEX || t.type == TOKEN_OCT) {
             ts->pos++;
             ts->pos++;
-            double val = evaluate_expression_tok(ts);
+            Num val = evaluate_num_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             char buf[128];
             format_radix_string(val, t.type == TOKEN_HEX, buf, sizeof(buf));
@@ -3672,11 +4155,11 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_STR) {
             ts->pos++;
             ts->pos++;
-            double val = evaluate_expression_tok(ts);
+            last_expression_is_double = 0;
+            Num val = evaluate_num_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             char buf[128];
-            if (val >= 0) snprintf(buf, sizeof(buf), " %g", val);
-            else snprintf(buf, sizeof(buf), "%g", val);
+            format_str_function(val, buf, sizeof(buf));
             basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
             ts->pos++;
@@ -3974,7 +4457,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             basic_string_release(&base);
         } else if (t.type == TOKEN_HEX || t.type == TOKEN_OCT) {
             get_next_token(input);
-            double val = evaluate_expression(input);
+            Num val = evaluate_num_text(input);
             get_next_token(input);
             char buf[128];
             format_radix_string(val, t.type == TOKEN_HEX, buf, sizeof(buf));
@@ -4011,11 +4494,11 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             get_next_token(input);
         } else if (t.type == TOKEN_STR) {
             get_next_token(input);
-            double val = evaluate_expression(input);
+            last_expression_is_double = 0;
+            Num val = evaluate_num_text(input);
             get_next_token(input);
             char buf[128];
-            if (val >= 0) snprintf(buf, sizeof(buf), " %g", val);
-            else snprintf(buf, sizeof(buf), "%g", val);
+            format_str_function(val, buf, sizeof(buf));
             basic_string_append(&term, buf, strlen(buf));
         } else if (t.type == TOKEN_MKI || t.type == TOKEN_MKS || t.type == TOKEN_MKD) {
             get_next_token(input);
@@ -4128,7 +4611,7 @@ static void assign_input_value(int idx, int array_idx, int is_string, const char
             assign_string_variable_value(idx, array_idx, value, strlen(value));
         }
     } else {
-        set_numeric_variable(idx, array_idx, atof(value));
+        set_numeric_variable_num(idx, array_idx, parse_number_text(value));
     }
 }
 
@@ -4246,8 +4729,15 @@ static int is_numeric_input(const char *text) {
 
 /* Formats a number the way PRINT does, without the surrounding spaces
  * (used by WRITE and STR$-style output). */
-static void format_number_plain(double value, int is_double, char *out, size_t size) {
-    snprintf(out, size, "%.*g", is_double ? 16 : 7, value);
+static void format_number_plain(Num value, int is_double, char *out, size_t size) {
+    if (num_is_int(value)) format_num_integer(value, out, size);
+    else snprintf(out, size, "%.*g", is_double ? 16 : 7, value.d);
+}
+
+static void format_str_function(Num value, char *buf, size_t size) {
+    char digits[64];
+    format_number_plain(value, last_expression_is_double, digits, sizeof(digits));
+    snprintf(buf, size, "%s%s", digits[0] == '-' ? "" : " ", digits);
 }
 
 static void apply_basika_using(const char *fmt, double val, char *out, int out_size) {
@@ -4312,7 +4802,12 @@ static const char *user_type_field_suffix(const TypeField *field) {
 
 static int copy_variable_contents(Variable *destination, const Variable *source) {
     if (destination == source) return 1;
-    destination->value = source->value;
+    // COMMON may pass a value to a variable of another numeric type.
+    Variable *typed_source = (Variable *)source;
+    int convert = var_type(destination) != var_type(typed_source) &&
+        var_type(destination) != VT_STRING && var_type(typed_source) != VT_STRING;
+    if (convert) store_num(destination, -1, load_num(typed_source, -1));
+    else destination->value = source->value;
     destination->string_declared = source->string_declared;
     destination->string_fixed_length = source->string_fixed_length;
     if (source->array) {
@@ -4324,8 +4819,15 @@ static int copy_variable_contents(Variable *destination, const Variable *source)
                 return 0;
             }
         }
-        memcpy(destination->array, source->array,
-               (size_t)source->array_size * sizeof(*destination->array));
+        if (convert) {
+            destination->array_size = source->array_size;
+            for (int i = 0; i < source->array_size; i++) {
+                store_num(destination, i, load_num(typed_source, i));
+            }
+        } else {
+            memcpy(destination->array, source->array,
+                   (size_t)source->array_size * sizeof(*destination->array));
+        }
     }
     if (source->s_array) {
         if (!destination->s_array || destination->array_size != source->array_size) {
@@ -4737,36 +5239,40 @@ static void transfer_little_endian_bytes(unsigned char *bytes, void *value,
 
 /* Packed little-endian record fields: integers by size and signedness,
  * SINGLE as a 4-byte float, DOUBLE as 8 bytes. */
-static void encode_record_value(const char *type_name, double value, unsigned char *out) {
+static void encode_record_value(const char *type_name, Num value, unsigned char *out) {
     const PrimitiveType *type = find_primitive_type(type_name);
     if (type && type->is_integer) {
-        uint64_t bits = type->is_unsigned ? (uint64_t)value : (uint64_t)(int64_t)value;
+        int64_t whole;
+        if (num_is_int(value)) whole = value.i;
+        else if (!num_to_integer_type(value, (int)(type - primitive_types) + 1, &whole)) whole = 0;
+        uint64_t bits = (uint64_t)whole;
         for (int i = 0; i < type->bytes; i++) out[i] = (unsigned char)(bits >> (8 * i));
     } else if (type && type->bytes == 4) {
-        float single = (float)value;
+        float single = (float)num_to_double(value);
         transfer_little_endian_bytes(out, &single, sizeof(single), 1);
     } else {
-        transfer_little_endian_bytes(out, &value, sizeof(value), 1);
+        double number = num_to_double(value);
+        transfer_little_endian_bytes(out, &number, sizeof(number), 1);
     }
 }
 
-static double decode_record_value(const char *type_name, const unsigned char *in) {
+static Num decode_record_value(const char *type_name, const unsigned char *in) {
     const PrimitiveType *type = find_primitive_type(type_name);
     if (type && type->is_integer) {
         uint64_t bits = 0;
         for (int i = 0; i < type->bytes; i++) bits |= (uint64_t)in[i] << (8 * i);
-        if (type->is_unsigned) return (double)bits;
+        if (type->is_unsigned) return num_i((int64_t)bits, type->bytes == 8 ? NUM_UINT64 : NUM_INT64);
         int shift = 64 - 8 * type->bytes;
-        return (double)((int64_t)(bits << shift) >> shift); // sign-extend
+        return num_i((int64_t)(bits << shift) >> shift, NUM_INT64); // sign-extend
     }
     if (type && type->bytes == 4) {
         float single;
         transfer_little_endian_bytes((unsigned char *)in, &single, sizeof(single), 0);
-        return single;
+        return num_f(single, NUM_SINGLE);
     }
     double value;
     transfer_little_endian_bytes((unsigned char *)in, &value, sizeof(value), 0);
-    return value;
+    return num_f(value, NUM_DOUBLE);
 }
 
 static int transfer_user_type_fields(UserType *type, const char *prefix,
@@ -4844,16 +5350,11 @@ static int transfer_user_type_fields(UserType *type, const char *prefix,
                     }
                 }
             } else if (writing) {
-                double value = array_index >= 0 && variable->array
-                    ? variable->array[array_index] : variable->value;
-                encode_record_value(field->type_name, value, buffer + *offset);
+                int element = array_index >= 0 && variable->array ? array_index : -1;
+                encode_record_value(field->type_name, load_num(variable, element), buffer + *offset);
             } else {
-                double value = decode_record_value(field->type_name, buffer + *offset);
-                if (array_index >= 0 && variable->array) {
-                    variable->array[array_index] = value;
-                } else {
-                    variable->value = value;
-                }
+                int element = array_index >= 0 && variable->array ? array_index : -1;
+                store_num(variable, element, decode_record_value(field->type_name, buffer + *offset));
             }
             *offset += element_size;
         }
@@ -5026,8 +5527,8 @@ static void execute_assignment(const char **input, Token var_token) {
         }
         set_string_variable(idx, array_idx, value);
     } else {
-        double value = evaluate_expression(input);
-        if (!runtime_error_occurred) set_numeric_variable(idx, array_idx, value);
+        Num value = evaluate_num_text(input);
+        if (!runtime_error_occurred) set_numeric_variable_num(idx, array_idx, value);
     }
 }
 
@@ -5060,6 +5561,7 @@ static void clear_variables(int keep_registry) {
 
     user_function_count = 0;
     named_constant_count = 0;
+    if (++constant_generation == 0) constant_generation = 1;
     declared_type_count = 0;
     global_shared_count = 0;
     clear_static_locals();
@@ -5088,13 +5590,24 @@ void basic_output(const char *text) { // Made non-static
 
 // Forward declarations for recursive descent expression parser
 double evaluate_expression(const char **input);
-static double primary(const char **input);
+
+/* is_string_var for a program token. The answer depends only on the DEF
+ * types and declarations, so it is kept on the token until those change.
+ * Record fields (names with a dot) and fixed-length strings are not cached. */
+static int is_string_identifier_tok(Token *token) {
+    if (fixed_string_declarations_present) return is_string_var(token->text);
+    if (token->string_generation != default_type_generation) {
+        token->string_cache = strchr(token->text, '.') ? -1 : is_string_var(token->text);
+        token->string_generation = default_type_generation;
+    }
+    return token->string_cache >= 0 ? token->string_cache : is_string_var(token->text);
+}
 
 static int is_string_token(const Token *t) {
     if (t->type == TOKEN_STRING) return 1;
     if (t->type == TOKEN_IDENTIFIER) {
-        if (find_named_constant(t->text) >= 0) return 0;
-        if (is_string_var(t->text)) return 1;
+        if (find_named_constant_tok((Token *)t) >= 0) return 0;
+        if (is_string_identifier_tok((Token *)t)) return 1;
     }
     return (t->type == TOKEN_CHR || t->type == TOKEN_LEFT || t->type == TOKEN_RIGHT ||
             t->type == TOKEN_MID || t->type == TOKEN_UCASE || t->type == TOKEN_LCASE ||
@@ -5135,16 +5648,20 @@ typedef struct {
     CompiledExpressionInstruction instructions[MAX_CACHED_EXPRESSION_INSTRUCTIONS];
 } CachedExpressionParser;
 
-static int emit_cached_expression(CachedExpressionParser *parser, unsigned char opcode, int token_index, double number) {
+static int emit_cached_expression(CachedExpressionParser *parser, unsigned char opcode, int token_index) {
     if (parser->instruction_count >= MAX_CACHED_EXPRESSION_INSTRUCTIONS) {
         parser->failed = 1;
         return 0;
     }
     parser->instructions[parser->instruction_count++] = (CompiledExpressionInstruction){
         .opcode = opcode,
-        .token_index = token_index,
-        .number = number
+        .token_index = token_index
     };
+    if (opcode == CEXPR_NUMBER) {
+        const Token *token = &parser->statement->tokens[token_index];
+        parser->instructions[parser->instruction_count - 1].number = num_from_token(token);
+        parser->instructions[parser->instruction_count - 1].is_double = token->is_double;
+    }
     return 1;
 }
 
@@ -5154,12 +5671,18 @@ static int parse_cached_primary(CachedExpressionParser *parser) {
     Token *token = &parser->statement->tokens[parser->pos];
     if (token->type == TOKEN_NUMBER) {
         int token_index = parser->pos++;
-        return emit_cached_expression(parser, CEXPR_NUMBER, token_index, token->double_val);
+        return emit_cached_expression(parser, CEXPR_NUMBER, token_index);
     }
     if (token->type == TOKEN_IDENTIFIER) {
+        // Names that primary_tok treats as functions are not variables.
         if (is_string_var(token->text) ||
+            token->text[0] == '_' ||
             strcasecmp(token->text, "ERR") == 0 ||
             strcasecmp(token->text, "ERL") == 0 ||
+            strcasecmp(token->text, "ERDEV") == 0 ||
+            strcasecmp(token->text, "CSRLIN") == 0 ||
+            strcasecmp(token->text, "POS") == 0 ||
+            strcasecmp(token->text, "POINT") == 0 ||
             ((token->text[0] == 'F' || token->text[0] == 'f') &&
              (token->text[1] == 'N' || token->text[1] == 'n')) ||
             parser->statement->tokens[parser->pos + 1].type == TOKEN_LPAREN) {
@@ -5167,7 +5690,7 @@ static int parse_cached_primary(CachedExpressionParser *parser) {
             return 0;
         }
         int token_index = parser->pos++;
-        return emit_cached_expression(parser, CEXPR_VARIABLE, token_index, 0.0);
+        return emit_cached_expression(parser, CEXPR_VARIABLE, token_index);
     }
     if (token->type == TOKEN_LPAREN) {
         parser->pos++;
@@ -5192,26 +5715,32 @@ static int parse_cached_unary(CachedExpressionParser *parser) {
     if (type == TOKEN_MINUS) {
         parser->pos++;
         if (!parse_cached_unary(parser)) return 0;
-        return emit_cached_expression(parser, CEXPR_NEGATE, -1, 0.0);
+        return emit_cached_expression(parser, CEXPR_NEGATE, -1);
     }
     return parse_cached_primary(parser);
 }
 
-static int parse_cached_term(CachedExpressionParser *parser) {
-    if (!parse_cached_unary(parser)) return 0;
+/* * and / bind tighter than \, which binds tighter than MOD, as in QBasic. */
+static int parse_cached_level(CachedExpressionParser *parser, int level) {
+    if (!(level == 0 ? parse_cached_unary(parser) : parse_cached_level(parser, level - 1))) return 0;
     while (!parser->failed) {
         TokenType type = parser->statement->tokens[parser->pos].type;
         unsigned char opcode;
-        if (type == TOKEN_STAR) opcode = CEXPR_MULTIPLY;
-        else if (type == TOKEN_SLASH) opcode = CEXPR_DIVIDE;
-        else if (type == TOKEN_MOD) opcode = CEXPR_MOD;
-        else if (type == TOKEN_IDIV) opcode = CEXPR_IDIV;
+        if (level == 0 && type == TOKEN_STAR) opcode = CEXPR_MULTIPLY;
+        else if (level == 0 && type == TOKEN_SLASH) opcode = CEXPR_DIVIDE;
+        else if (level == 1 && type == TOKEN_IDIV) opcode = CEXPR_IDIV;
+        else if (level == 2 && type == TOKEN_MOD) opcode = CEXPR_MOD;
         else break;
 
         parser->pos++;
-        if (!parse_cached_unary(parser) || !emit_cached_expression(parser, opcode, -1, 0.0)) return 0;
+        if (!(level == 0 ? parse_cached_unary(parser) : parse_cached_level(parser, level - 1)) ||
+            !emit_cached_expression(parser, opcode, -1)) return 0;
     }
     return !parser->failed;
+}
+
+static int parse_cached_term(CachedExpressionParser *parser) {
+    return parse_cached_level(parser, 2);
 }
 
 static int parse_cached_arithmetic(CachedExpressionParser *parser) {
@@ -5221,7 +5750,7 @@ static int parse_cached_arithmetic(CachedExpressionParser *parser) {
         if (type != TOKEN_PLUS && type != TOKEN_MINUS) break;
         parser->pos++;
         if (!parse_cached_term(parser) ||
-            !emit_cached_expression(parser, type == TOKEN_PLUS ? CEXPR_ADD : CEXPR_SUBTRACT, -1, 0.0)) return 0;
+            !emit_cached_expression(parser, type == TOKEN_PLUS ? CEXPR_ADD : CEXPR_SUBTRACT, -1)) return 0;
     }
     return !parser->failed;
 }
@@ -5258,7 +5787,7 @@ static int parse_cached_relational(CachedExpressionParser *parser) {
             break;
         }
 
-        if (!parse_cached_arithmetic(parser) || !emit_cached_expression(parser, opcode, -1, 0.0)) return 0;
+        if (!parse_cached_arithmetic(parser) || !emit_cached_expression(parser, opcode, -1)) return 0;
     }
     return !parser->failed;
 }
@@ -5563,12 +6092,11 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
-                double val = evaluate_expression_tok(ts);
+                Num val = evaluate_num_tok(ts);
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                coerce_numeric_value(pdef->name, &val);
-                lv->value = val;
+                store_num(lv, -1, val);
             }
         }
 
@@ -6000,23 +6528,21 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     report_runtime_error(ERR_SYNTAX_ERROR);
                     break;
                 }
-                double start = evaluate_expression_tok(&ts);
+                Num start = evaluate_num_tok(&ts);
                 ts.pos++; // skip TO
-                double end = evaluate_expression_tok(&ts);
-                double step = 1.0;
+                Num end = evaluate_num_tok(&ts);
+                Num step = num_i(1, NUM_INTEGER);
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_STEP) {
                     ts.pos++;
-                    step = evaluate_expression_tok(&ts);
+                    step = evaluate_num_tok(&ts);
                 }
                 
                 int idx = resolve_token_variable(var_token);
-                set_numeric_variable(idx, -1, start);
+                ForLoop loop;
+                int runs = for_loop_begin(&loop, idx, start, end, step);
+                if (runs < 0) break;
 
-                int should_skip = 0;
-                if (step > 0 && start > end) should_skip = 1;
-                else if (step < 0 && start < end) should_skip = 1;
-
-                if (should_skip) {
+                if (!runs) {
                     int end_ts_pos = ts.pos;
                     Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, idx, &end_ts_pos);
                     if (target_stmt) {
@@ -6033,9 +6559,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 } else {
                     if (for_ptr == 0 || for_stack[for_ptr-1].var_idx != idx) {
                         if (for_ptr < 16) {
-                            for_stack[for_ptr].var_idx = idx;
-                            for_stack[for_ptr].end_val = end;
-                            for_stack[for_ptr].step_val = step;
+                            for_stack[for_ptr] = loop;
                             for_stack[for_ptr].start_stmt = exec_stmt;
                             for_stack[for_ptr].start_ts_pos = ts.pos;
                             for_ptr++;
@@ -6060,15 +6584,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         }
                         ts.pos++;
                     }
-                    int var_idx = for_stack[for_idx].var_idx;
-                    Variable *v = get_variable_ptr(var_idx);
-                    double current_val = v ? v->value : 0.0;
-                    current_val += for_stack[for_idx].step_val;
-                    set_numeric_variable(var_idx, -1, current_val);
-
-                    int loop_done = 0;
-                    if (for_stack[for_idx].step_val > 0 && current_val > for_stack[for_idx].end_val) loop_done = 1;
-                    else if (for_stack[for_idx].step_val < 0 && current_val < for_stack[for_idx].end_val) loop_done = 1;
+                    int loop_done = !for_loop_next(&for_stack[for_idx]);
 
                     if (loop_done) {
                         for_ptr = for_idx;
@@ -6120,16 +6636,16 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         assign_user_type_value_tok(&ts, idx, array_idx);
                     } else if (is_member
                             ? is_string_var(get_variable_ptr(idx)->name)
-                            : is_string_var(t->text)) {
+                            : is_string_identifier_tok(current_token)) {
                         BasicString value = {0};
                         if (parse_string_expression_tok_heap(&ts, &value)) {
                             assign_string_variable_value(idx, array_idx, value.data, value.length);
                         }
                         basic_string_release(&value);
                     } else {
-                        double value = evaluate_expression_tok(&ts);
+                        Num value = evaluate_num_tok(&ts);
                         // An error while evaluating aborts the assignment, as in QBasic.
-                        if (!runtime_error_occurred) set_numeric_variable(idx, array_idx, value);
+                        if (!runtime_error_occurred) set_numeric_variable_num(idx, array_idx, value);
                     }
                     continue;
                 }
@@ -6152,7 +6668,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
             default: {
                 const char *command_start_ptr = t->start_ptr;
                 const char *temp_ptr = command_start_ptr;
-                interpret_line_at_ptr(&temp_ptr, 0, NULL);
+                interpret_statement_text(exec_stmt, &temp_ptr);
                 while (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].start_ptr < temp_ptr) ts.pos++;
                 break;
             }
@@ -6169,119 +6685,6 @@ static void execute_procedure_statements(ProcedureDef *proc) {
 }
 
 
-
-static double evaluate_function_call_numeric_text(ProcedureDef *proc, const char **input) {
-    if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
-        report_runtime_error(ERR_OUT_OF_MEMORY);
-        return 0.0;
-    }
-
-    int frame_slot = call_stack_depth + frames_being_built;
-    CallFrame *frame = &call_stack[frame_slot];
-    reset_call_frame(frame);
-    frames_being_built++;
-    frame->proc = proc;
-
-    for (int p = 0; p < proc->param_count; p++) {
-        frame->byref_caller_var_idx[p] = -1;
-        frame->byref_caller_frame[p] = -1;
-    }
-
-    const char *p = skip_whitespace_fast(*input);
-    int has_parens = 0;
-    if (*p == '(') {
-        has_parens = 1;
-        p++;
-        *input = p;
-    }
-
-    int arg_idx = 0;
-    while (*input && **input != ')' && **input != ':' && **input != '\0') {
-        if (arg_idx >= proc->param_count) break;
-
-        ProcParamDef *pdef = &proc->params[arg_idx];
-
-        const char *temp = skip_whitespace_fast(*input);
-        int starts_with_letter = (isalpha((unsigned char)*temp) || *temp == '_');
-        char var_buf[64] = {0};
-        int vlen = 0;
-        while (isalnum((unsigned char)*temp) || *temp == '_' || *temp == '$' || *temp == '%' || *temp == '!' || *temp == '#' || *temp == '&' || *temp == '~') {
-            if (vlen < 63) var_buf[vlen++] = *temp;
-            temp++;
-        }
-        var_buf[vlen] = '\0';
-        const char *after_var = skip_whitespace_fast(temp);
-        int is_simple_var = (starts_with_letter && vlen > 0 && (*after_var == ',' || *after_var == ')' || *after_var == ':')) &&
-            find_named_constant(var_buf) < 0 && !is_function_name(var_buf);
-
-        if (is_simple_var) {
-            int c_var_idx = pdef->user_type_index >= 0
-                ? find_variable_raw_name(var_buf) : find_variable(var_buf);
-            if (pdef->user_type_index >= 0) {
-                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return 0.0;
-            } else {
-                frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
-                frame->byref_caller_var_idx[arg_idx] = c_var_idx;
-                frame->byref_caller_frame[arg_idx] =
-                    call_stack_depth > 0 ? (call_stack_depth - 1) : -1;
-            }
-            *input = after_var;
-        } else {
-            frame->byref_caller_var_idx[arg_idx] = -1;
-            frame->byref_caller_frame[arg_idx] = -1;
-
-            if (pdef->user_type_index >= 0) {
-                if (!bind_user_type_parameter_value_text(input, frame, pdef)) return 0.0;
-            } else if (pdef->is_string) {
-                BasicString sval = {0};
-                parse_string_expression_heap(input, &sval);
-                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
-                memset(lv, 0, sizeof(Variable));
-                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                basic_string_assign(&lv->s_value, sval.data, sval.length);
-                basic_string_release(&sval);
-            } else {
-                double val = evaluate_expression(input);
-                Variable *lv = &(*frame_local(frame, frame->local_var_count++));
-                memset(lv, 0, sizeof(Variable));
-                snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                coerce_numeric_value(pdef->name, &val);
-                lv->value = val;
-            }
-        }
-
-        arg_idx++;
-        p = skip_whitespace_fast(*input);
-        if (*p == ',') {
-            p++;
-            *input = p;
-        }
-    }
-
-    p = skip_whitespace_fast(*input);
-    if (has_parens && *p == ')') {
-        p++;
-        *input = p;
-    }
-
-    frames_being_built--;
-    frame->return_depth = call_stack_depth;
-    call_stack_depth = frame_slot + 1;
-
-    execute_procedure_statements(proc);
-
-    double result = 0.0;
-    for (int l = 0; l < frame->local_var_count; l++) {
-        if (proc_name_match((*frame_local(frame, l)).name, proc->name)) {
-            result = (*frame_local(frame, l)).value;
-            break;
-        }
-    }
-
-    call_stack_depth = frame->return_depth;
-
-    return result;
-}
 
 static int evaluate_function_call_string_text(ProcedureDef *proc, const char **input, BasicString *out) {
     if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
@@ -6354,12 +6757,11 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
                 basic_string_assign(&lv->s_value, sval.data, sval.length);
                 basic_string_release(&sval);
             } else {
-                double val = evaluate_expression(input);
+                Num val = evaluate_num_text(input);
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                coerce_numeric_value(pdef->name, &val);
-                lv->value = val;
+                store_num(lv, -1, val);
             }
         }
 
@@ -6395,11 +6797,11 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
     return 1;
 }
 
-static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts) {
+static Num evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts) {
 
     if (call_stack_depth + frames_being_built >= MAX_CALL_FRAMES) {
         report_runtime_error(ERR_OUT_OF_MEMORY);
-        return 0.0;
+        return num_i(0, NUM_INTEGER);
     }
 
     int frame_slot = call_stack_depth + frames_being_built;
@@ -6437,7 +6839,7 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
                 : resolve_token_variable(&ts->tokens[ts->pos]);
             ts->pos++;
             if (pdef->user_type_index >= 0) {
-                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return 0.0;
+                if (!bind_user_type_parameter_byref(frame, arg_idx, pdef, c_var_idx)) return num_i(0, NUM_INTEGER);
             } else {
                 frame->byref_caller_variable[arg_idx] = get_variable_ptr(c_var_idx);
                 frame->byref_caller_var_idx[arg_idx] = c_var_idx;
@@ -6449,7 +6851,7 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
             frame->byref_caller_frame[arg_idx] = -1;
 
             if (pdef->user_type_index >= 0) {
-                if (!bind_user_type_parameter_value_tok(ts, frame, pdef)) return 0.0;
+                if (!bind_user_type_parameter_value_tok(ts, frame, pdef)) return num_i(0, NUM_INTEGER);
             } else if (pdef->is_string) {
                 BasicString val = {0};
                 parse_string_expression_tok_heap(ts, &val);
@@ -6459,12 +6861,11 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
-                double val = evaluate_expression_tok(ts);
+                Num val = evaluate_num_tok(ts);
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                coerce_numeric_value(pdef->name, &val);
-                lv->value = val;
+                store_num(lv, -1, val);
             }
         }
 
@@ -6480,13 +6881,14 @@ static double evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts
 
     execute_procedure_statements(proc);
 
-    double result = 0.0;
+    Num result = num_f(0, NUM_SINGLE);
     for (int l = 0; l < frame->local_var_count; l++) {
         if (proc_name_match((*frame_local(frame, l)).name, proc->name)) {
-            result = (*frame_local(frame, l)).value;
+            result = load_num(frame_local(frame, l), -1);
             break;
         }
     }
+    result = num_as_name_type(result, proc->name);
 
     call_stack_depth = frame->return_depth;
 
@@ -6556,12 +6958,11 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
                 basic_string_assign(&lv->s_value, val.data, val.length);
                 basic_string_release(&val);
             } else {
-                double val = evaluate_expression_tok(ts);
+                Num val = evaluate_num_tok(ts);
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                coerce_numeric_value(pdef->name, &val);
-                lv->value = val;
+                store_num(lv, -1, val);
             }
         }
 
@@ -6734,20 +7135,43 @@ static double graphics_cursor_query(int n) {
     return 0;
 }
 
-static double primary_tok(TokenStream *ts) {
+/* Kept out of line: its string buffers would give primary_tok a frame of
+ * several pages and a stack probe on every call. */
+static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, Token *token);
+
+/* Converts value to integer VarType vt as an expression result (CINT, CLNG). */
+static Num num_convert_integer(Num value, int vt) {
+    int64_t converted;
+    if (!num_to_integer_type(value, vt, &converted)) return num_i(0, var_type_kind[vt]);
+    return num_i(converted, var_type_kind[vt]);
+}
+
+/* Reads the parenthesized argument of a one-argument function. */
+static int function_argument_tok(TokenStream *ts, Num *argument) {
+    if (ts->tokens[ts->pos].type != TOKEN_LPAREN) return 0;
+    ts->pos++;
+    *argument = evaluate_num_tok(ts);
+    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+    return 1;
+}
+
+static Num primary_tok(TokenStream *ts) {
     Token *token = &ts->tokens[ts->pos++];
     if (token->type == TOKEN_NUMBER) {
         if (token->is_double) last_expression_is_double = 1;
-        return token->double_val;
+        return num_from_token(token);
     }
-    if (token->type == TOKEN_ARGC) return (double)internal_argc;
+    if (token->type == TOKEN_ARGC) return num_i(internal_argc, NUM_INTEGER);
     if (token->type == TOKEN_IDENTIFIER) {
-        if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERR") == 0) return (double)last_runtime_error_code;
-        if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERL") == 0) return (double)last_runtime_error_line;
-        // No device drivers are simulated, so there is never a device error.
-        if ((token->text[0] == 'E' || token->text[0] == 'e') && strcasecmp(token->text, "ERDEV") == 0) return 0;
+        char first = (char)toupper((unsigned char)token->text[0]);
+        if (first == 'E') {
+            if (strcasecmp(token->text, "ERR") == 0) return num_i(last_runtime_error_code, NUM_INTEGER);
+            if (strcasecmp(token->text, "ERL") == 0) return num_i(last_runtime_error_line, NUM_LONG);
+            // No device drivers are simulated, so there is never a device error.
+            if (strcasecmp(token->text, "ERDEV") == 0) return num_i(0, NUM_INTEGER);
+        }
 
-        if (token->text[0] == '_') {
+        if (first == '_') {
             int function_id = qb64_function_id(token->text);
             if (function_id) {
                 double args[4];
@@ -6765,12 +7189,11 @@ static double primary_tok(TokenStream *ts) {
                     }
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                 }
-                return qb64_function_value(function_id, args, argc > 4 ? 5 : argc);
+                return num_d(qb64_function_value(function_id, args, argc > 4 ? 5 : argc));
             }
         }
 
-        if ((token->text[0] == 'P' || token->text[0] == 'p') &&
-            strcasecmp(token->text, "POINT") == 0) {
+        if (first == 'P' && strcasecmp(token->text, "POINT") == 0) {
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
                 ts->pos++;
                 double x = evaluate_expression_tok(ts);
@@ -6779,46 +7202,45 @@ static double primary_tok(TokenStream *ts) {
                     double y = evaluate_expression_tok(ts);
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                     if (!graphics_is_active()) init_graphics();
-                    return graphics_point(x, y);
+                    return num_d(graphics_point(x, y));
                 } else {
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                    return graphics_cursor_query((int)x);
+                    return num_d(graphics_cursor_query((int)x));
                 }
             }
-            return 0;
+            return num_i(0, NUM_INTEGER);
         }
 
-        int const_idx = find_named_constant(token->text);
+        int const_idx = find_named_constant_tok(token);
         if (const_idx >= 0) {
             if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
             return named_constants[const_idx].value;
         }
 
-        if (strcasecmp(token->text, "CSRLIN") == 0) {
+        if (first == 'C' && strcasecmp(token->text, "CSRLIN") == 0) {
             int row, col;
             get_text_cursor(&row, &col);
             if (!graphics_is_active()) row = print_row + 1;
-            return (double)row;
+            return num_i(row, NUM_INTEGER);
         }
-        if (strcasecmp(token->text, "POS") == 0) {
+        if (first == 'P' && strcasecmp(token->text, "POS") == 0) {
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
-            (void)evaluate_expression_tok(ts);
+            (void)evaluate_num_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             int col = print_col + 1;
             if (graphics_is_active()) {
                 int row;
                 get_text_cursor(&row, &col);
             }
-            return (double)col;
+            return num_i(col, NUM_INTEGER);
         }
 
-        if ((token->text[0] == 'F' || token->text[0] == 'f') &&
-            (token->text[1] == 'N' || token->text[1] == 'n')) {
+        if (first == 'F' && (token->text[1] == 'N' || token->text[1] == 'n')) {
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
                 ts->pos++; // (
                 for (int i = 0; i < user_function_count; i++) {
                     if (strcasecmp(user_functions[i].name, token->text) == 0) {
-                        double arg_val = evaluate_expression_tok(ts);
+                        Num arg_val = evaluate_num_tok(ts);
                         if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++; // )
                         
                         return evaluate_user_function(&user_functions[i], arg_val);
@@ -6839,39 +7261,78 @@ static double primary_tok(TokenStream *ts) {
                                               &member_array_index)
             : 0;
         if (is_member != 0) {
-            if (is_member < 0) return 0;
+            if (is_member < 0) return num_i(0, NUM_INTEGER);
             Variable *member = get_variable_ptr(member_index);
             if (!member || is_string_var(member->name)) {
                 report_runtime_error(ERR_TYPE_MISMATCH);
-                return 0;
+                return num_i(0, NUM_INTEGER);
             }
-            if (name_has_wide_suffix(member->name)) last_expression_is_double = 1;
-            return member_array_index >= 0
-                ? (member->array && member_array_index < member->array_size
-                    ? member->array[member_array_index] : 0.0)
-                : member->value;
+            if (var_is_wide(member)) last_expression_is_double = 1;
+            return load_num(member, member_array_index >= 0 ? member_array_index : -1);
         }
 
         int idx = resolve_token_variable(token);
         Variable *v = (idx != -1) ? get_variable_ptr(idx) : NULL;
         
-        if (v) {
-            const char *v_name = v->name;
-            if (name_has_wide_suffix(v_name)) last_expression_is_double = 1;
-        }
+        if (v && var_is_wide(v)) last_expression_is_double = 1;
 
         int array_idx = parse_array_index_tok(ts, idx);
-        if (array_idx >= 0) {
-             return (v && v->array && array_idx < v->array_size) ? v->array[array_idx] : 0;
-        }
-        return v ? v->value : 0;
+        if (!v) return num_f(0, NUM_SINGLE);
+        return load_num(v, array_idx >= 0 ? array_idx : -1);
     }
     if (token->type == TOKEN_LPAREN) {
-        double val = evaluate_expression_tok(ts);
+        Num val = evaluate_num_tok(ts);
         if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
         return val;
     }
 
+    Num argument;
+    switch (token->type) {
+        case TOKEN_CINT:
+            if (function_argument_tok(ts, &argument)) return num_convert_integer(argument, VT_INTEGER);
+            break;
+        case TOKEN_CLNG:
+            if (function_argument_tok(ts, &argument)) return num_convert_integer(argument, VT_LONG);
+            break;
+        case TOKEN_CSNG:
+            if (function_argument_tok(ts, &argument)) {
+                return num_f((double)(float)num_to_double(argument), NUM_SINGLE);
+            }
+            break;
+        case TOKEN_CDBL:
+            if (function_argument_tok(ts, &argument)) {
+                last_expression_is_double = 1;
+                return num_f(num_to_double(argument), NUM_DOUBLE);
+            }
+            break;
+        case TOKEN_ABS:
+            if (function_argument_tok(ts, &argument)) {
+                if (num_is_int(argument)) return argument.kind != NUM_UINT64 && argument.i < 0 ? num_negate(argument) : argument;
+                return num_f(fabs(argument.d), argument.kind);
+            }
+            break;
+        case TOKEN_SGN:
+            if (function_argument_tok(ts, &argument)) {
+                return num_i(num_compare(argument, num_i(0, NUM_INTEGER)), NUM_INTEGER);
+            }
+            break;
+        case TOKEN_INT:
+            if (function_argument_tok(ts, &argument)) {
+                return num_is_int(argument) ? argument : num_f(floor(argument.d), argument.kind);
+            }
+            break;
+        case TOKEN_FIX:
+            if (function_argument_tok(ts, &argument)) {
+                return num_is_int(argument) ? argument : num_f(trunc(argument.d), argument.kind);
+            }
+            break;
+        default:
+            break;
+    }
+    return num_d(builtin_function_tok(ts, token));
+}
+
+static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, Token *token) {
     if (token->type == TOKEN_LOADFONT) {
         /* _LOADFONT(filename$, size%) -> handle */
         if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
@@ -7119,37 +7580,69 @@ static double primary_tok(TokenStream *ts) {
     return 0;
 }
 
-static double unary_tok(TokenStream *ts) {
+/* Operator precedence follows QBasic, from tightest to loosest: ^ (left to
+ * right), negation, * and /, \, MOD, + and -, relations, NOT, AND, OR, XOR. */
+static Num unary_tok(TokenStream *ts);
+
+static Num power_tok(TokenStream *ts) {
+    Num val = primary_tok(ts);
+    while (ts->tokens[ts->pos].type == TOKEN_POWER) {
+        ts->pos++;
+        // The exponent may carry its own sign: 2 ^ -1.
+        TokenType next = ts->tokens[ts->pos].type;
+        Num exponent = (next == TOKEN_MINUS || next == TOKEN_PLUS) ? unary_tok(ts) : primary_tok(ts);
+        val = num_power(val, exponent);
+    }
+    return val;
+}
+
+static Num unary_tok(TokenStream *ts) {
     if (ts->tokens[ts->pos].type == TOKEN_PLUS) {
         ts->pos++;
         return unary_tok(ts);
     }
     if (ts->tokens[ts->pos].type == TOKEN_MINUS) {
         ts->pos++;
-        return -unary_tok(ts);
+        return num_negate(unary_tok(ts));
     }
-    return primary_tok(ts);
+    return power_tok(ts);
 }
 
-static double term_tok(TokenStream *ts) {
-    double val = unary_tok(ts);
+static Num multiply_tok(TokenStream *ts) {
+    Num val = unary_tok(ts);
     while (1) {
         TokenType type = ts->tokens[ts->pos].type;
-        if (type == TOKEN_STAR) { ts->pos++; val *= unary_tok(ts); }
-        else if (type == TOKEN_SLASH) { ts->pos++; val = basic_divide(val, unary_tok(ts)); }
-        else if (type == TOKEN_IDIV) { ts->pos++; val = basic_integer_divide(val, unary_tok(ts), 0); }
-        else if (type == TOKEN_MOD) { ts->pos++; val = basic_integer_divide(val, unary_tok(ts), 1); }
+        if (type == TOKEN_STAR) { ts->pos++; val = num_multiply(val, unary_tok(ts)); }
+        else if (type == TOKEN_SLASH) { ts->pos++; val = num_divide(val, unary_tok(ts)); }
         else break;
     }
     return val;
 }
 
-static double arithmetic_expression_tok(TokenStream *ts) {
-    double val = term_tok(ts);
+static Num integer_divide_tok(TokenStream *ts) {
+    Num val = multiply_tok(ts);
+    while (ts->tokens[ts->pos].type == TOKEN_IDIV) {
+        ts->pos++;
+        val = num_integer_divide(val, multiply_tok(ts), 0);
+    }
+    return val;
+}
+
+static Num modulo_tok(TokenStream *ts) {
+    Num val = integer_divide_tok(ts);
+    while (ts->tokens[ts->pos].type == TOKEN_MOD) {
+        ts->pos++;
+        val = num_integer_divide(val, integer_divide_tok(ts), 1);
+    }
+    return val;
+}
+
+static Num arithmetic_expression_tok(TokenStream *ts) {
+    Num val = modulo_tok(ts);
     while (1) {
         TokenType type = ts->tokens[ts->pos].type;
-        if (type == TOKEN_PLUS) { ts->pos++; val += term_tok(ts); }
-        else if (type == TOKEN_MINUS) { ts->pos++; val -= term_tok(ts); }
+        if (type == TOKEN_PLUS) { ts->pos++; val = num_add(val, modulo_tok(ts)); }
+        else if (type == TOKEN_MINUS) { ts->pos++; val = num_subtract(val, modulo_tok(ts)); }
         else break;
     }
     return val;
@@ -7182,18 +7675,18 @@ static int is_string_member_reference_text(const char *input) {
 
 /* A string comparison (a$ = b$, a$ <> b$, ...), evaluated at the relational
  * level so it combines with AND/OR/NOT like a numeric comparison. */
-static double string_comparison_tok(TokenStream *ts) {
+static Num string_comparison_tok(TokenStream *ts) {
     BasicString left = {0};
     BasicString right = {0};
     if (!parse_string_expression_tok_heap(ts, &left)) {
         basic_string_release(&left);
-        return 0;
+        return num_i(0, NUM_INTEGER);
     }
 
     TokenType op = ts->tokens[ts->pos].type;
     if (op != TOKEN_EQUALS && op != TOKEN_LESS && op != TOKEN_GREATER) {
         basic_string_release(&left);
-        return 0;
+        return num_i(0, NUM_INTEGER);
     }
     ts->pos++;
 
@@ -7208,54 +7701,52 @@ static double string_comparison_tok(TokenStream *ts) {
     if (!parse_string_expression_tok_heap(ts, &right)) {
         basic_string_release(&right);
         basic_string_release(&left);
-        return 0;
+        return num_i(0, NUM_INTEGER);
     }
 
     int comparison = strcmp((const char *)left.data, (const char *)right.data);
     basic_string_release(&right);
     basic_string_release(&left);
-    if (op == TOKEN_EQUALS) return comparison == 0 ? -1.0 : 0.0;
+    if (op == TOKEN_EQUALS) return num_truth(comparison == 0);
     if (op == TOKEN_LESS) {
-        if (modifier == TOKEN_GREATER) return comparison != 0 ? -1.0 : 0.0;
-        if (modifier == TOKEN_EQUALS) return comparison <= 0 ? -1.0 : 0.0;
-        return comparison < 0 ? -1.0 : 0.0;
+        if (modifier == TOKEN_GREATER) return num_truth(comparison != 0);
+        if (modifier == TOKEN_EQUALS) return num_truth(comparison <= 0);
+        return num_truth(comparison < 0);
     }
-    return modifier == TOKEN_EQUALS
-        ? (comparison >= 0 ? -1.0 : 0.0)
-        : (comparison > 0 ? -1.0 : 0.0);
+    return num_truth(modifier == TOKEN_EQUALS ? comparison >= 0 : comparison > 0);
 }
 
-static double relational_expression_tok(TokenStream *ts) {
+static Num relational_expression_tok(TokenStream *ts) {
     if (ts->tokens[ts->pos].type != TOKEN_EOF &&
         (is_string_token(&ts->tokens[ts->pos]) || is_string_member_reference_tok(ts))) {
         return string_comparison_tok(ts);
     }
-    double val = arithmetic_expression_tok(ts);
+    Num val = arithmetic_expression_tok(ts);
     while (1) {
         TokenType type = ts->tokens[ts->pos].type;
         if (type == TOKEN_EQUALS) {
             ts->pos++;
-            val = (val == arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
+            val = num_truth(num_compare(val, arithmetic_expression_tok(ts)) == 0);
         }
         else if (type == TOKEN_LESS) {
             ts->pos++;
             if (ts->tokens[ts->pos].type == TOKEN_GREATER) {
                 ts->pos++;
-                val = (val != arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
+                val = num_truth(num_compare(val, arithmetic_expression_tok(ts)) != 0);
             } else if (ts->tokens[ts->pos].type == TOKEN_EQUALS) {
                 ts->pos++;
-                val = (val <= arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
+                val = num_truth(num_compare(val, arithmetic_expression_tok(ts)) <= 0);
             } else {
-                val = (val < arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
+                val = num_truth(num_compare(val, arithmetic_expression_tok(ts)) < 0);
             }
         }
         else if (type == TOKEN_GREATER) {
             ts->pos++;
             if (ts->tokens[ts->pos].type == TOKEN_EQUALS) {
                 ts->pos++;
-                val = (val >= arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
+                val = num_truth(num_compare(val, arithmetic_expression_tok(ts)) >= 0);
             } else {
-                val = (val > arithmetic_expression_tok(ts)) ? -1.0 : 0.0;
+                val = num_truth(num_compare(val, arithmetic_expression_tok(ts)) > 0);
             }
         }
         else break;
@@ -7263,80 +7754,92 @@ static double relational_expression_tok(TokenStream *ts) {
     return val;
 }
 
-static double logical_not_tok(TokenStream *ts) {
+static Num logical_not_tok(TokenStream *ts) {
     if (ts->tokens[ts->pos].type == TOKEN_NOT) {
         ts->pos++;
-        return (double)(~basic_bit_int(logical_not_tok(ts)));
+        Num operand = logical_not_tok(ts);
+        return num_logical('~', operand, operand);
     }
     return relational_expression_tok(ts);
 }
 
-static double bitwise_and_tok(TokenStream *ts) {
-    double val = logical_not_tok(ts);
+static Num bitwise_and_tok(TokenStream *ts) {
+    Num val = logical_not_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_AND) {
         ts->pos++;
-        val = (double)(basic_bit_int(val) & basic_bit_int(logical_not_tok(ts)));
+        val = num_logical('&', val, logical_not_tok(ts));
     }
     return val;
 }
 
-static double bitwise_or_tok(TokenStream *ts) {
-    double val = bitwise_and_tok(ts);
+static Num bitwise_or_tok(TokenStream *ts) {
+    Num val = bitwise_and_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_OR) {
         ts->pos++;
-        val = (double)(basic_bit_int(val) | basic_bit_int(bitwise_and_tok(ts)));
+        val = num_logical('|', val, bitwise_and_tok(ts));
     }
     return val;
 }
 
-static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expression, double *result) {
-    double values[MAX_CACHED_EXPRESSION_INSTRUCTIONS];
+/* Operand stack depth for cached expressions; deeper ones use the parser. A
+ * small stack keeps the frame under a page, avoiding a stack probe per call. */
+#define CACHED_EXPRESSION_STACK 64
+
+static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expression, Num *result) {
+    Num values[CACHED_EXPRESSION_STACK];
     int stack_size = 0;
 
     for (int i = 0; i < expression->instruction_count; i++) {
         CompiledExpressionInstruction *instruction = &expression->instructions[i];
+        if (stack_size >= CACHED_EXPRESSION_STACK) return 0;
         if (instruction->opcode == CEXPR_NUMBER) {
-            Token *token = &ts->tokens[instruction->token_index];
-            if (token->is_double) last_expression_is_double = 1;
+            if (instruction->is_double) last_expression_is_double = 1;
             values[stack_size++] = instruction->number;
             continue;
         }
         if (instruction->opcode == CEXPR_VARIABLE) {
             Token *token = &ts->tokens[instruction->token_index];
-            int const_idx = find_named_constant(token->text);
+            int const_idx = find_named_constant_tok(token);
             if (const_idx >= 0) {
                 if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
                 values[stack_size++] = named_constants[const_idx].value;
                 continue;
             }
+            // Expressions are compiled before DIM and SUB/FUNCTION declarations
+            // take effect, so names that turned out not to be numeric
+            // variables are left to the full parser.
+            if (proc_count > 0 && find_procedure_tok(token)) return 0;
+            if (user_type_count > 0 && strchr(token->text, '.')) return 0;
             int variable_index = resolve_token_variable(token);
             Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
-            if (variable && name_has_wide_suffix(variable->name)) last_expression_is_double = 1;
-            values[stack_size++] = variable ? variable->value : 0.0;
+            if (!variable || var_type(variable) == VT_STRING || variable->string_declared) return 0;
+            if (var_is_wide(variable)) last_expression_is_double = 1;
+            values[stack_size++] = load_num(variable, -1);
             continue;
         }
         if (instruction->opcode == CEXPR_NEGATE) {
             if (stack_size < 1) return 0;
-            values[stack_size - 1] = -values[stack_size - 1];
+            values[stack_size - 1] = num_negate(values[stack_size - 1]);
             continue;
         }
         if (stack_size < 2) return 0;
 
-        double right = values[--stack_size];
-        double left = values[stack_size - 1];
+        Num right = values[--stack_size];
+        Num left = values[stack_size - 1];
+        Num *out = &values[stack_size - 1];
         switch (instruction->opcode) {
-            case CEXPR_ADD: values[stack_size - 1] = left + right; break;
-            case CEXPR_SUBTRACT: values[stack_size - 1] = left - right; break;
-            case CEXPR_MULTIPLY: values[stack_size - 1] = left * right; break;
-            case CEXPR_DIVIDE: values[stack_size - 1] = basic_divide(left, right); break;
-            case CEXPR_MOD: values[stack_size - 1] = basic_integer_divide(left, right, 1); break;
-            case CEXPR_IDIV: values[stack_size - 1] = basic_integer_divide(left, right, 0); break;
-            case CEXPR_EQUAL: values[stack_size - 1] = left == right ? -1.0 : 0.0; break;
-            case CEXPR_NOT_EQUAL: values[stack_size - 1] = left != right ? -1.0 : 0.0; break;
-            case CEXPR_LESS: values[stack_size - 1] = left < right ? -1.0 : 0.0; break;
-            case CEXPR_LESS_EQUAL: values[stack_size - 1] = left <= right ? -1.0 : 0.0; break;
-            case CEXPR_GREATER: values[stack_size - 1] = left > right ? -1.0 : 0.0; break;
-            case CEXPR_GREATER_EQUAL: values[stack_size - 1] = left >= right ? -1.0 : 0.0; break;
+            case CEXPR_ADD: *out = num_add(left, right); break;
+            case CEXPR_SUBTRACT: *out = num_subtract(left, right); break;
+            case CEXPR_MULTIPLY: *out = num_multiply(left, right); break;
+            case CEXPR_DIVIDE: *out = num_divide(left, right); break;
+            case CEXPR_MOD: *out = num_integer_divide(left, right, 1); break;
+            case CEXPR_IDIV: *out = num_integer_divide(left, right, 0); break;
+            case CEXPR_EQUAL: *out = num_truth(num_compare(left, right) == 0); break;
+            case CEXPR_NOT_EQUAL: *out = num_truth(num_compare(left, right) != 0); break;
+            case CEXPR_LESS: *out = num_truth(num_compare(left, right) < 0); break;
+            case CEXPR_LESS_EQUAL: *out = num_truth(num_compare(left, right) <= 0); break;
+            case CEXPR_GREATER: *out = num_truth(num_compare(left, right) > 0); break;
+            case CEXPR_GREATER_EQUAL: *out = num_truth(num_compare(left, right) >= 0); break;
             default: return 0;
         }
     }
@@ -7347,7 +7850,7 @@ static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expre
     return 1;
 }
 
-double evaluate_expression_tok(TokenStream *ts) {
+static Num evaluate_num_tok(TokenStream *ts) {
     Statement *statement = ts->statement;
     if (statement && ts->tokens == statement->tokens &&
         ts->pos >= 0 && ts->pos < statement->token_count &&
@@ -7355,417 +7858,22 @@ double evaluate_expression_tok(TokenStream *ts) {
         CompiledExpression *expression = statement->compiled_expressions[ts->pos];
         if (expression &&
             memcmp(expression->default_type_map, default_type_map, sizeof(expression->default_type_map)) == 0 &&
-            !fixed_string_declarations_present && declared_type_count == 0 && proc_count == 0) {
-            double result;
+            !fixed_string_declarations_present) {
+            Num result;
             if (evaluate_cached_expression(ts, expression, &result)) return result;
         }
     }
 
-    double val = bitwise_or_tok(ts);
+    Num val = bitwise_or_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_XOR) {
         ts->pos++;
-        val = (double)(basic_bit_int(val) ^ basic_bit_int(bitwise_or_tok(ts)));
+        val = num_logical('^', val, bitwise_or_tok(ts));
     }
     return val;
 }
 
-static double primary(const char **input) {
-    Token t = get_next_token(input);
-    if (t.type == TOKEN_NUMBER) {
-        if (t.is_double) last_expression_is_double = 1;
-        return t.double_val;
-    }
-    if (t.type == TOKEN_ARGC) return (double)internal_argc;
-    if (t.type == TOKEN_IDENTIFIER) {
-        if (strcasecmp(t.text, "ERR") == 0) return (double)last_runtime_error_code;
-        if (strcasecmp(t.text, "ERL") == 0) return (double)last_runtime_error_line;
-        if (strcasecmp(t.text, "ERDEV") == 0) return 0;
-
-        if (t.text[0] == '_') {
-            int function_id = qb64_function_id(t.text);
-            if (function_id) {
-                double args[4];
-                int argc = 0;
-                const char *paren_saved = *input;
-                if (get_next_token(input).type == TOKEN_LPAREN) {
-                    const char *close_saved = *input;
-                    if (get_next_token(input).type != TOKEN_RPAREN) {
-                        *input = close_saved;
-                        while (1) {
-                            double value = evaluate_expression(input);
-                            if (argc < 4) args[argc] = value;
-                            argc++;
-                            const char *sep_saved = *input;
-                            Token sep = get_next_token(input);
-                            if (sep.type == TOKEN_COMMA) continue;
-                            if (sep.type != TOKEN_RPAREN) *input = sep_saved;
-                            break;
-                        }
-                    }
-                } else {
-                    *input = paren_saved;
-                }
-                return qb64_function_value(function_id, args, argc > 4 ? 5 : argc);
-            }
-        }
-
-        if ((t.text[0] == 'P' || t.text[0] == 'p') &&
-            strcasecmp(t.text, "POINT") == 0) {
-            Token next = get_next_token(input);
-            if (next.type == TOKEN_LPAREN) {
-                double x = evaluate_expression(input);
-                Token sep = get_next_token(input);
-                if (sep.type == TOKEN_COMMA) {
-                    double y = evaluate_expression(input);
-                    get_next_token(input); // consume ')'
-                    if (!graphics_is_active()) init_graphics();
-                    return graphics_point(x, y);
-                } else {
-                    return graphics_cursor_query((int)x);
-                }
-            }
-            return 0;
-        }
-
-        int const_idx = find_named_constant(t.text);
-        if (const_idx >= 0) {
-            if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
-            return named_constants[const_idx].value;
-        }
-
-        if (strcasecmp(t.text, "CSRLIN") == 0) {
-            int row, col;
-            get_text_cursor(&row, &col);
-            if (!graphics_is_active()) row = print_row + 1;
-            return (double)row;
-        }
-        if (strcasecmp(t.text, "POS") == 0) {
-            get_next_token(input); // consume '('
-            double n = evaluate_expression(input);
-            get_next_token(input); // consume ')'
-            (void)n;
-            int col = print_col + 1;
-            if (graphics_is_active()) {
-                int row;
-                get_text_cursor(&row, &col);
-            }
-            return (double)col;
-        }
-
-        if (strncasecmp(t.text, "FN", 2) == 0) {
-            const char *lp_ptr = *input;
-            if (get_next_token(&lp_ptr).type == TOKEN_LPAREN) {
-                for (int i = 0; i < user_function_count; i++) {
-                    if (strcasecmp(user_functions[i].name, t.text) == 0) {
-                        *input = lp_ptr;
-                        double arg_val = evaluate_expression(input);
-                        get_next_token(input); // consume ')'
-                        
-                        return evaluate_user_function(&user_functions[i], arg_val);
-                    }
-                }
-            }
-        }
-        ProcedureDef *pfunc = find_procedure(t.text);
-        if (pfunc && pfunc->is_function) {
-            return evaluate_function_call_numeric_text(pfunc, input);
-        }
-        int member_index = -1;
-        int member_array_index = -1;
-        int is_member = user_type_count > 0
-            ? resolve_user_type_reference_text(input, &t, &member_index,
-                                               &member_array_index)
-            : 0;
-        if (is_member != 0) {
-            if (is_member < 0) return 0;
-            Variable *member = get_variable_ptr(member_index);
-            if (!member || is_string_var(member->name)) {
-                report_runtime_error(ERR_TYPE_MISMATCH);
-                return 0;
-            }
-            if (name_has_wide_suffix(member->name)) last_expression_is_double = 1;
-            return member_array_index >= 0
-                ? (member->array && member_array_index < member->array_size
-                    ? member->array[member_array_index] : 0.0)
-                : member->value;
-        }
-        int idx = find_variable(t.text);
-        Variable *v = (idx != -1) ? get_variable_ptr(idx) : NULL;
-
-        if (v) {
-            const char *v_name = v->name;
-            if (name_has_wide_suffix(v_name)) last_expression_is_double = 1;
-        }
-        const char *after_name = skip_whitespace_fast(*input);
-        if (*after_name == '(') {
-            int array_idx = parse_array_index(input, idx);
-            if (v && v->s_array && array_idx >= 0 && array_idx < v->array_size) {
-                // This is a string array, evaluate_expression currently only handles doubles.
-                // We return 0 here as fallback. String expressions are handled in statements.
-                return 0;
-            }
-            if (v && v->array && array_idx >= 0 && array_idx < v->array_size) {
-                return v->array[array_idx];
-            }
-            return 0;
-        }
-        return v ? v->value : 0;
-    }
-    if (t.type == TOKEN_LPAREN) {
-        double val = evaluate_expression(input);
-        get_next_token(input); // consume ')'
-        return val;
-    }
-    if (t.type == TOKEN_LOADFONT) {
-        /* _LOADFONT(filename$, size%) -> handle */
-        Token next = get_next_token(input);
-        if (next.type == TOKEN_LPAREN) {
-            char buf[BASIC_STRING_MAX] = "";
-            parse_string_expression(input, buf, sizeof(buf));
-            get_next_token(input); // consume comma
-            int size = (int)evaluate_expression(input);
-            get_next_token(input); // consume ')'
-            if (!graphics_is_active()) init_graphics();
-            fprintf(stderr, "DEBUG _LOADFONT(2): buf='%s' size=%d\n", buf, size);
-            int result2 = graphics_loadfont(buf, size);
-            fprintf(stderr, "DEBUG _LOADFONT(2): result=%d\n", result2);
-            return (double)result2;
-        }
-        return 0;
-    }
-    if (t.type == TOKEN_DEST) return graphics_get_dest();
-    if (t.type == TOKEN_SOURCE) return graphics_get_source();
-    if (t.type == TOKEN_NEWIMAGE) {
-        double args[3] = {0, 0, 256};
-        int argc = 0;
-        if (get_next_token(input).type == TOKEN_LPAREN) {
-            while (argc < 3) {
-                args[argc++] = evaluate_expression(input);
-                const char *sep_saved = *input;
-                Token sep = get_next_token(input);
-                if (sep.type == TOKEN_COMMA) continue;
-                if (sep.type != TOKEN_RPAREN) *input = sep_saved;
-                break;
-            }
-        }
-        if (argc < 2) {
-            report_runtime_error(ERR_SYNTAX_ERROR);
-            return 0;
-        }
-        if (!graphics_is_active()) init_graphics();
-        int handle = graphics_newimage((int)args[0], (int)args[1], (int)args[2]);
-        if (handle == -1) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
-        return handle;
-    }
-    if (t.type == TOKEN_LOADIMAGE) {
-        /* _LOADIMAGE(filename$, mode&) -> handle */
-        Token next = get_next_token(input);
-        if (next.type == TOKEN_LPAREN) {
-            char buf[BASIC_STRING_MAX] = "";
-            parse_string_expression(input, buf, sizeof(buf));
-            int mode = 32;
-            Token separator = get_next_token(input);
-            if (separator.type == TOKEN_COMMA) mode = (int)evaluate_expression(input);
-            get_next_token(input); // consume ')'
-            if (!graphics_is_active()) init_graphics();
-            return (double)graphics_loadimage(buf, mode);
-        }
-        return 0;
-     }
-     if ((t.type >= TOKEN_ABS && t.type <= TOKEN_SGN) || t.type == TOKEN_EOF_FUNC || t.type == TOKEN_TIMER || t.type == TOKEN_KEY || t.type == TOKEN_STRIG || t.type == TOKEN_PEN || t.type == TOKEN_STICK || t.type == TOKEN_ASC || t.type == TOKEN_LEN || t.type == TOKEN_INSTR || t.type == TOKEN_VAL || t.type == TOKEN_PEEK || t.type == TOKEN_VARPTR || t.type == TOKEN_LOF || t.type == TOKEN_LOC || t.type == TOKEN_CVI || t.type == TOKEN_CVS || t.type == TOKEN_CVD || t.type == TOKEN_PRINTWIDTH) {
-         TokenType ft = t.type;
-        const char *saved = *input;
-        Token next = get_next_token(input);
-        double arg = 0;
-        int has_arg = 0;
-        if (next.type == TOKEN_LPAREN) {
-            has_arg = 1;
-            if (ft == TOKEN_VARPTR) {
-                Token var_tok = get_next_token(input);
-                int var_idx = -1;
-                int array_idx = -1;
-                if (var_tok.type == TOKEN_IDENTIFIER) {
-                    var_idx = find_variable(var_tok.text);
-                    array_idx = parse_array_index(input, var_idx);
-                }
-                get_next_token(input); // consume ')'
-                if (var_idx < 0) return 0;
-                if (array_idx >= 0) return 61440.0 + var_idx * 256.0 + array_idx;
-                return 61440.0 + var_idx * 256.0;
-            }
-            if (ft == TOKEN_CVI || ft == TOKEN_CVS || ft == TOKEN_CVD) {
-                char buf[BASIC_STRING_MAX] = "";
-                int len = 0;
-                const char *saved_tok = *input;
-                Token arg_tok = get_next_token(input);
-                if (arg_tok.type == TOKEN_IDENTIFIER && is_string_var(arg_tok.text)) {
-                    int idx = find_variable(arg_tok.text);
-                    int array_idx = parse_array_index(input, idx);
-                    len = get_string_variable_raw(idx, array_idx, buf, sizeof(buf));
-                    get_next_token(input); // consume ')'
-                } else {
-                    *input = saved_tok;
-                    parse_string_expression(input, buf, sizeof(buf));
-                    len = (int)strlen(buf);
-                    get_next_token(input); // consume ')'
-                }
-                if (ft == TOKEN_CVI) {
-                    int16_t val = 0;
-                    int cpy = (len > 2) ? 2 : len;
-                    if (cpy > 0) memcpy(&val, buf, (size_t)cpy);
-                    return (double)val;
-                } else if (ft == TOKEN_CVS) {
-                    float val = 0.0f;
-                    int cpy = (len > 4) ? 4 : len;
-                    if (cpy > 0) memcpy(&val, buf, (size_t)cpy);
-                    return (double)val;
-                } else {
-                    double val = 0.0;
-                    int cpy = (len > 8) ? 8 : len;
-                    if (cpy > 0) memcpy(&val, buf, (size_t)cpy);
-                    return val;
-                }
-            }
-            if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
-                if (ft == TOKEN_LEN) {
-                    const char *length_saved = *input;
-                    Token length_token = get_next_token(input);
-                    if (length_token.type == TOKEN_IDENTIFIER && is_string_var(length_token.text)) {
-                        int length_idx = find_variable(length_token.text);
-                        int length_array_idx = parse_array_index(input, length_idx);
-                        Variable *length_var = get_variable_ptr(length_idx);
-                        BasicString *length_value = length_array_idx >= 0 && length_var->s_array
-                            ? length_var->s_array[length_array_idx] : length_var->s_value;
-                        get_next_token(input);
-                        return length_value ? (double)length_value->length : 0.0;
-                    }
-                    *input = length_saved;
-                }
-                char buf[BASIC_STRING_MAX] = "";
-                parse_string_expression(input, buf, sizeof(buf));
-                get_next_token(input); // consume ')'
-                if (ft == TOKEN_ASC) return buf[0] ? (double)(unsigned char)buf[0] : 0;
-                if (ft == TOKEN_LEN) return (double)strlen(buf);
-                if (ft == TOKEN_VAL) return atof(buf);
-                if (ft == TOKEN_PRINTWIDTH) return (double)graphics_printwidth(buf);
-            }
-            if (ft == TOKEN_INSTR) {
-                char s1[BASIC_STRING_MAX] = "";
-                char s2[BASIC_STRING_MAX] = "";
-                int start = 1;
-                const char *saved_instr = *input;
-                Token first_arg = get_next_token(input);
-                if (first_arg.type != TOKEN_STRING && first_arg.type != TOKEN_IDENTIFIER) {
-                    *input = saved_instr;
-                    start = (int)evaluate_expression(input);
-                    get_next_token(input); // consume comma
-                } else {
-                    *input = saved_instr;
-                }
-                parse_string_expression(input, s1, sizeof(s1));
-                get_next_token(input); // consume comma
-                parse_string_expression(input, s2, sizeof(s2));
-                get_next_token(input); // consume ')'
-                if (start < 1) return 0;
-                char *pos = strstr(s1 + start - 1, s2);
-                return pos ? (double)(pos - s1 + 1) : 0;
-            }
-            arg = evaluate_expression(input);
-            get_next_token(input); // consume ')'
-        } else {
-            *input = saved;
-        }
-        switch((int)ft) {
-            case TOKEN_ABS: return fabs(arg);
-            case TOKEN_SQR: return sqrt(arg);
-            case TOKEN_SIN: return sin(arg);
-            case TOKEN_COS: return cos(arg);
-            case TOKEN_TAN: return tan(arg);
-            case TOKEN_ATN: return atan(arg);
-            case TOKEN_EXP: return exp(arg);
-            case TOKEN_LOG: return log(arg);
-            case TOKEN_INT: return floor(arg);
-            case TOKEN_FIX: return (double)(long)arg;
-            case TOKEN_SGN: return (arg > 0) - (arg < 0);
-            case TOKEN_EOF_FUNC: {
-                int fnum = (int)arg;
-                if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                    report_runtime_error(ERR_BAD_FILE_NUMBER);
-                    return 0;
-                }
-                int c = fgetc(file_handles[fnum]);
-                    if (c == EOF) return 1;
-                    ungetc(c, file_handles[fnum]);
-                    return 0;
-                }
-            case TOKEN_LOF: {
-                int fnum = (int)arg;
-                if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                    report_runtime_error(ERR_BAD_FILE_NUMBER);
-                    return 0;
-                }
-                long cur = ftell(file_handles[fnum]);
-                fseek(file_handles[fnum], 0, SEEK_END);
-                long size = ftell(file_handles[fnum]);
-                fseek(file_handles[fnum], cur, SEEK_SET);
-                return (double)size;
-            }
-            case TOKEN_LOC: {
-                int fnum = (int)arg;
-                if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                    report_runtime_error(ERR_BAD_FILE_NUMBER);
-                    return 0;
-                }
-                // RANDOM: last record used; BINARY: last byte used.
-                if (file_mode[fnum] == FILE_MODE_RANDOM || file_mode[fnum] == FILE_MODE_BINARY) {
-                    return (double)file_last_record[fnum];
-                }
-                return (double)ftell(file_handles[fnum]);
-            }
-            case TOKEN_TIMER: return seconds_since_midnight();
-            case TOKEN_KEY: return (double)get_graphics_key();
-            case TOKEN_PEN:
-                if (arg < 0 || arg > 9) {
-                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
-                    return 0;
-                }
-                return graphics_is_active() ? graphics_pen((int)arg) : 0;
-            case TOKEN_STICK:
-                if (arg < 0 || arg > 3) {
-                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
-                    return 0;
-                }
-                return graphics_is_active() ? graphics_stick((int)arg) : 0;
-            case TOKEN_STRIG: {
-                int s = (int)arg;
-                if (s >= 0 && s < 8) {
-                    if (s % 2 == 0) {
-                        double val = strig_button_pressed_since[s] ? -1.0 : 0.0;
-                        strig_button_pressed_since[s] = 0;
-                        return val;
-                    } else {
-                        return strig_button_currently_pressed[s - 1] ? -1.0 : 0.0;
-                    }
-                }
-                return 0;
-            }
-            case TOKEN_PEEK: {
-                int addr = (int)arg;
-                if (addr < 0 || addr >= 65536) return 0;
-                return basika_memory[addr];
-            }
-            case TOKEN_RND:
-                if (has_arg && arg < 0) {
-                    // RND with negative argument seeds the generator deterministically
-                    rnd_seed = (unsigned int)(-(long)arg);
-                    return basika_rnd_next();
-                }
-                if (has_arg && arg == 0) return last_rnd_value;
-                return basika_rnd_next();
-            default: return 0;
-        }
-    }
-    return 0;
+double evaluate_expression_tok(TokenStream *ts) {
+    return num_to_double(evaluate_num_tok(ts));
 }
 
 static const char *skip_whitespace_fast(const char *p) {
@@ -7773,188 +7881,64 @@ static const char *skip_whitespace_fast(const char *p) {
     return p;
 }
 
-static int match_identifier_fast(const char *p, const char *word) {
-    size_t len = strlen(word);
-    if (strncasecmp(p, word, len) != 0) return 0;
-    unsigned char next = (unsigned char)p[len];
-    return !(isalnum(next) || next == '$' || next == '%' || next == '!' || next == '#' || next == '&' || next == '_');
+
+/* The statement interpret_line_at_ptr is executing. Expressions in its text
+ * are evaluated with its tokens, so both evaluation paths share one parser. */
+static Statement *text_statement = NULL;
+
+/* Index of the token at text position p (which may sit on whitespace before
+ * the token), or -1 if p is inside a token. */
+static int token_index_at(const Statement *stmt, const char *p) {
+    int low = 0, high = stmt->token_count;
+    while (low < high) {
+        int mid = (low + high + 1) / 2;
+        if (stmt->tokens[mid].start_ptr <= p) low = mid;
+        else high = mid - 1;
+    }
+    for (const char *c = stmt->tokens[low].start_ptr; c < p; c++) {
+        if (!isspace((unsigned char)*c)) return -1;
+    }
+    return low;
 }
 
-static double power_op(const char **input) {
-    double val = primary(input);
-    const char *p = skip_whitespace_fast(*input);
-    if (*p == '^') {
-        *input = p + 1;
-        return pow(val, power_op(input));
-    }
-    return val;
-}
-
-static double unary(const char **input) {
-    const char *p = skip_whitespace_fast(*input);
-    if (*p == '+') {
-        *input = p + 1;
-        return unary(input);
-    }
-    if (*p == '-') {
-        *input = p + 1;
-        return -unary(input);
-    }
-    return power_op(input);
-}
-
-static double term(const char **input) {
-    double val = unary(input);
-    while (1) {
-        const char *p = skip_whitespace_fast(*input);
-        if (*p == '*') {
-            *input = p + 1;
-            val *= unary(input);
-            continue;
-        }
-        if (*p == '/') {
-            *input = p + 1;
-            val = basic_divide(val, unary(input));
-            continue;
-        }
-        if (match_identifier_fast(p, "MOD")) {
-            *input = p + 3;
-            val = basic_integer_divide(val, unary(input), 1);
-            continue;
-        }
-        if (match_identifier_fast(p, "DIV")) {
-            *input = p + 3;
-            val = basic_integer_divide(val, unary(input), 0);
-            continue;
-        }
-        if (*p == '\\') {
-            *input = p + 1;
-            val = basic_integer_divide(val, unary(input), 0);
-            continue;
-        }
-        break;
-    }
-    return val;
-}
-
-static double arithmetic_expression(const char **input) {
-    double val = term(input);
-    while (1) {
-        const char *p = skip_whitespace_fast(*input);
-        if (*p == '+') {
-            *input = p + 1;
-            val += term(input);
-            continue;
-        }
-        if (*p == '-') {
-            *input = p + 1;
-            val -= term(input);
-            continue;
-        }
-        break;
-    }
-    return val;
-}
-
-static double string_comparison(const char **input) {
-    char s1[BASIC_STRING_MAX], s2[BASIC_STRING_MAX];
-    parse_string_expression(input, s1, sizeof(s1));
-    const char *op_saved = *input;
-    Token t = get_next_token(input);
-    if (t.type == TOKEN_EQUALS || t.type == TOKEN_LESS || t.type == TOKEN_GREATER) {
-        int op1 = t.type;
-        const char *saved2 = *input;
-        Token t2 = get_next_token(input);
-        int op2 = -1;
-        if (t2.type == TOKEN_EQUALS || t2.type == TOKEN_GREATER) op2 = t2.type;
-        else *input = saved2;
-
-        parse_string_expression(input, s2, sizeof(s2));
-        int res = strcmp(s1, s2);
-        if (op1 == TOKEN_EQUALS) return res == 0 ? -1.0 : 0.0;
-        if (op1 == TOKEN_LESS) {
-            if (op2 == TOKEN_GREATER) return res != 0 ? -1.0 : 0.0;
-            if (op2 == TOKEN_EQUALS) return res <= 0 ? -1.0 : 0.0;
-            return res < 0 ? -1.0 : 0.0;
-        }
-        if (op1 == TOKEN_GREATER) {
-            if (op2 == TOKEN_EQUALS) return res >= 0 ? -1.0 : 0.0;
-            return res > 0 ? -1.0 : 0.0;
+static Num evaluate_num_text(const char **input) {
+    const char *p = *input;
+    Statement *stmt = text_statement;
+    if (stmt && stmt->tokens && p >= stmt->raw_command &&
+        p <= stmt->raw_command + strlen(stmt->raw_command)) {
+        int pos = token_index_at(stmt, p);
+        if (pos >= 0) {
+            TokenStream ts = {stmt->tokens, pos, stmt};
+            Num result = evaluate_num_tok(&ts);
+            *input = stmt->tokens[ts.pos].start_ptr;
+            return result;
         }
     }
-    *input = op_saved;
-    return 0;
-}
-
-static double relational_expression(const char **input) {
-    const char *peek_ptr = *input;
-    Token peek_tok = get_next_token(&peek_ptr);
-    if (is_string_token(&peek_tok) || is_string_member_reference_text(*input)) return string_comparison(input);
-    double val = arithmetic_expression(input);
-    while (1) {
-    const char *p = skip_whitespace_fast(*input);
-    if (*p != '=' && *p != '<' && *p != '>') break;
-    *input = p;
-    Token t = get_next_token(input);
-    if (t.type == TOKEN_EQUALS) val = (val == arithmetic_expression(input)) ? -1.0 : 0.0;
-    else if (t.type == TOKEN_LESS) {
-        const char *s2 = *input;
-        Token t2 = get_next_token(input);
-        if (t2.type == TOKEN_GREATER) val = (val != arithmetic_expression(input)) ? -1.0 : 0.0;
-        else if (t2.type == TOKEN_EQUALS) val = (val <= arithmetic_expression(input)) ? -1.0 : 0.0;
-        else { *input = s2; val = (val < arithmetic_expression(input)) ? -1.0 : 0.0; }
+    // Text from elsewhere (DEF FN bodies, direct input): tokenize a copy.
+    Statement *copy = calloc(1, sizeof(Statement));
+    if (!copy) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return num_i(0, NUM_INTEGER);
     }
-    else if (t.type == TOKEN_GREATER) {
-        const char *s2 = *input;
-        Token t2 = get_next_token(input);
-        if (t2.type == TOKEN_EQUALS) val = (val >= arithmetic_expression(input)) ? -1.0 : 0.0;
-        else { *input = s2; val = (val > arithmetic_expression(input)) ? -1.0 : 0.0; }
-    }
-    else break;
-    }
-    return val;
-}
-
-static double logical_not_expression(const char **input) {
-    const char *p = skip_whitespace_fast(*input);
-    if ((p[0] == 'N' || p[0] == 'n') && match_identifier_fast(p, "NOT")) {
-        *input = p + 3;
-        return (double)(~basic_bit_int(logical_not_expression(input)));
-    }
-    return relational_expression(input);
-}
-
-static double bitwise_and_expression(const char **input) {
-    double val = logical_not_expression(input);
-    while (1) {
-        const char *p = skip_whitespace_fast(*input);
-        if ((*p != 'A' && *p != 'a') || !match_identifier_fast(p, "AND")) break;
-        *input = p + 3;
-        val = (double)(basic_bit_int(val) & basic_bit_int(logical_not_expression(input)));
-    }
-    return val;
-}
-
-static double bitwise_or_expression(const char **input) {
-    double val = bitwise_and_expression(input);
-    while (1) {
-        const char *p = skip_whitespace_fast(*input);
-        if ((*p != 'O' && *p != 'o') || !match_identifier_fast(p, "OR")) break;
-        *input = p + 2;
-        val = (double)(basic_bit_int(val) | basic_bit_int(bitwise_and_expression(input)));
-    }
-    return val;
+    snprintf(copy->raw_command, sizeof(copy->raw_command), "%s", p);
+    tokenize_line(copy);
+    TokenStream ts = {copy->tokens, 0, NULL};
+    Num result = evaluate_num_tok(&ts);
+    *input = p + (copy->tokens[ts.pos].start_ptr - copy->raw_command);
+    free(copy->tokens);
+    free(copy);
+    return result;
 }
 
 double evaluate_expression(const char **input) {
-    double val = bitwise_or_expression(input);
-    while (1) {
-        const char *p = skip_whitespace_fast(*input);
-        if ((*p != 'X' && *p != 'x') || !match_identifier_fast(p, "XOR")) break;
-        *input = p + 3;
-        val = (double)(basic_bit_int(val) ^ basic_bit_int(bitwise_or_expression(input)));
-    }
-    return val;
+    return num_to_double(evaluate_num_text(input));
+}
+
+static void interpret_statement_text(Statement *stmt, const char **ptr) {
+    Statement *saved = text_statement;
+    text_statement = stmt;
+    interpret_line_at_ptr(ptr, 0, NULL);
+    text_statement = saved;
 }
 
 /* Parses "[STEP] (x, y)". STEP offsets are added to (base_x, base_y).
@@ -8577,6 +8561,7 @@ static void execute_chain(const char **ptr) {
     for (int i = 0; i < common_variable_count && i < MAX_COMMON_VALUES; i++) {
         Variable *source = &vars[common_variables[i]];
         memset(&chain_values[i], 0, sizeof(Variable));
+        snprintf(chain_values[i].name, sizeof(chain_values[i].name), "%s", source->name);
         chain_is_string[i] = is_string_var(source->name);
         if (!copy_variable_contents(&chain_values[i], source)) return;
         if (source->s_value && !chain_values[i].s_value) {
@@ -8897,14 +8882,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 } else {
                     ptr = item_saved;
                     last_expression_is_double = 0;
-                    double val = evaluate_expression(&ptr); 
+                    Num number = evaluate_num_text(&ptr);
                     if (runtime_error_occurred) break; // the failed item is not printed
-                    int prec = last_expression_is_double ? 16 : 7;
+                    double val = num_to_double(number);
 
                     if (using_mode) apply_basika_using(using_fmt, val, val_buf, sizeof(val_buf));
                     else {
-                        if (val >= 0) snprintf(val_buf, sizeof(val_buf), " %.*g ", prec, val);
-                        else snprintf(val_buf, sizeof(val_buf), "%.*g ", prec, val);
+                        char digits[64];
+                        format_number_plain(number, last_expression_is_double, digits, sizeof(digits));
+                        snprintf(val_buf, sizeof(val_buf), "%s%s ", digits[0] == '-' ? "" : " ", digits);
                     }
                     last_was_numeric = 1;
                 }
@@ -9057,7 +9043,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 long values[256];
                 for (int i = 0; i < size; i++) {
                     attributes[i] = i;
-                    values[i] = (long)array->array[start + i];
+                    values[i] = (long)load_double(array, start + i);
                 }
                 if (!graphics_set_palette(size, attributes, values)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             } else {
@@ -9185,7 +9171,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 return;
             }
             last_expression_is_double = 0;
-            double value = evaluate_expression(&ptr);
+            // CONST X% = ... has the suffix's type; otherwise the expression's.
+            Num value = num_as_name_type(evaluate_num_text(&ptr), name_tok.text);
             if (!add_named_constant(name_tok.text, value, last_expression_is_double)) {
                 report_runtime_error(ERR_OUT_OF_MEMORY);
             }
@@ -9335,28 +9322,25 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             int is_str1 = is_string_var(v1_tok.text);
             int is_str2 = is_string_var(v2_tok.text);
 
-            if (is_str1 != is_str2) {
+            // Procedure locals and parameters resolve through the call frame.
+            Variable *first = get_variable_ptr(idx1);
+            Variable *second = get_variable_ptr(idx2);
+            if (is_str1 != is_str2 || (!is_str1 && var_type(first) != var_type(second))) {
                 report_runtime_error(ERR_TYPE_MISMATCH);
-            } else if (!is_str1) {
-                const char *n1 = vars[idx1].name;
-                const char *n2 = vars[idx2].name;
-                if (n1[strlen(n1)-1] != n2[strlen(n2)-1]) {
-                    report_runtime_error(ERR_TYPE_MISMATCH);
-                    return;
-                }
             }
             if (runtime_error_occurred) return;
 
             if (a_idx1 == -1 && a_idx2 == -1) {
                 // Swapping entire variables/arrays
-                double tmp_val = vars[idx1].value; vars[idx1].value = vars[idx2].value; vars[idx2].value = tmp_val;
-                BasicString *tmp_sval = vars[idx1].s_value; vars[idx1].s_value = vars[idx2].s_value; vars[idx2].s_value = tmp_sval;
-                double *tmp_arr = vars[idx1].array; vars[idx1].array = vars[idx2].array; vars[idx2].array = tmp_arr;
-                BasicString **tmp_sarr = vars[idx1].s_array; vars[idx1].s_array = vars[idx2].s_array; vars[idx2].s_array = tmp_sarr;
-                int tmp_size = vars[idx1].array_size; vars[idx1].array_size = vars[idx2].array_size; vars[idx2].array_size = tmp_size;
-                int tmp_dims = vars[idx1].num_dims; vars[idx1].num_dims = vars[idx2].num_dims; vars[idx2].num_dims = tmp_dims;
+                int64_t tmp_val = first->ivalue; first->ivalue = second->ivalue; second->ivalue = tmp_val;
+                BasicString *tmp_sval = first->s_value; first->s_value = second->s_value; second->s_value = tmp_sval;
+                double *tmp_arr = first->array; first->array = second->array; second->array = tmp_arr;
+                BasicString **tmp_sarr = first->s_array; first->s_array = second->s_array; second->s_array = tmp_sarr;
+                int tmp_size = first->array_size; first->array_size = second->array_size; second->array_size = tmp_size;
+                int tmp_dims = first->num_dims; first->num_dims = second->num_dims; second->num_dims = tmp_dims;
                 for (int i = 0; i < 3; i++) {
-                    int td = vars[idx1].dims[i]; vars[idx1].dims[i] = vars[idx2].dims[i]; vars[idx2].dims[i] = td;
+                    int td = first->dims[i]; first->dims[i] = second->dims[i]; second->dims[i] = td;
+                    int tl = first->lower_bounds[i]; first->lower_bounds[i] = second->lower_bounds[i]; second->lower_bounds[i] = tl;
                 }
             } else {
                 // Element swapping
@@ -9367,14 +9351,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     set_string_variable(idx1, a_idx1, s2);
                     set_string_variable(idx2, a_idx2, s1);
                 } else {
-                    double val1 = (a_idx1 >= 0 && vars[idx1].array) ? vars[idx1].array[a_idx1] : vars[idx1].value;
-                    double val2 = (a_idx2 >= 0 && vars[idx2].array) ? vars[idx2].array[a_idx2] : vars[idx2].value;
-                    
-                    if (a_idx1 >= 0 && vars[idx1].array) vars[idx1].array[a_idx1] = val2;
-                    else vars[idx1].value = val2;
-                    
-                    if (a_idx2 >= 0 && vars[idx2].array) vars[idx2].array[a_idx2] = val1;
-                    else vars[idx2].value = val1;
+                    int element1 = (a_idx1 >= 0 && first->array) ? a_idx1 : -1;
+                    int element2 = (a_idx2 >= 0 && second->array) ? a_idx2 : -1;
+                    Num val1 = load_num(first, element1);
+                    Num val2 = load_num(second, element2);
+                    store_num(first, element1, val2);
+                    store_num(second, element2, val1);
                 }
             }
         } else if (t.type == TOKEN_OPEN) {
@@ -10191,7 +10173,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     basic_string_release(&value);
                 } else {
                     last_expression_is_double = 0;
-                    double value = evaluate_expression(&ptr);
+                    Num value = evaluate_num_text(&ptr);
                     if (runtime_error_occurred) break;
                     char number[64];
                     format_number_plain(value, last_expression_is_double, number, sizeof(number));
@@ -10578,8 +10560,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     int idx = find_variable(var_tok.text);
                     Variable *image = idx != -1 ? get_variable_ptr(idx) : NULL;
                     if (image && image->array && image->array_size >= 2) {
-                        int w = (int)image->array[0];
-                        int h = (int)image->array[1];
+                        int w = (int)load_double(image, 0);
+                        int h = (int)load_double(image, 1);
                         int action = 0;
                         const char *action_saved = ptr;
                         if (get_next_token(&ptr).type == TOKEN_COMMA) {
@@ -10596,7 +10578,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         for (int j = 0; j < h; j++) {
                             for (int i = 0; i < w; i++) {
                                 if (k >= image->array_size) break;
-                                unsigned int src_col = color_from_value(image->array[k++]);
+                                unsigned int src_col = color_from_value(load_double(image, k++));
                                 unsigned int dst_col = color_from_value(get_pixel(x + i, y + j));
                                 unsigned int final_col = src_col;
                                 switch (action) {
@@ -10710,12 +10692,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 int total_size = 2 + w * h;
                 Variable *image = idx != -1 ? get_variable_ptr(idx) : NULL;
                 if (image && image->array && image->array_size >= total_size) {
-                    image->array[0] = (double)w;
-                    image->array[1] = (double)h;
+                    store_double_raw(image, 0, (double)w);
+                    store_double_raw(image, 1, (double)h);
                     int k = 2;
                     for (int j = 0; j < h; j++) {
                         for (int i = 0; i < w; i++) {
-                            image->array[k++] = graphics_point(min_x + i, min_y + j);
+                            store_double_raw(image, k++, graphics_point(min_x + i, min_y + j));
                         }
                     }
                 } else {
@@ -10963,6 +10945,18 @@ static void run_program_from(Statement *start) {
     frames_being_built = 0;
     scan_procedures();
     scanned_generation = program_edit_generation();
+    // Open the audio device now if the program makes sound, rather than
+    // pausing at its first PLAY or SOUND.
+    for (Statement *s = get_head(); s && audio_is_enabled(); s = s->next) {
+        int uses_sound = 0;
+        for (int i = 0; i < s->token_count && !uses_sound; i++) {
+            uses_sound = s->tokens[i].type == TOKEN_PLAY || s->tokens[i].type == TOKEN_SOUND;
+        }
+        if (uses_sound) {
+            audio_prepare();
+            break;
+        }
+    }
     print_col = 0;
     print_row = 0;
     clear_data_pointer();
@@ -11284,24 +11278,22 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     report_runtime_error(ERR_SYNTAX_ERROR);
                     break;
                 }
-                double start = evaluate_expression_tok(&ts);
+                Num start = evaluate_num_tok(&ts);
                 ts.pos++; // skip TO
-                double end = evaluate_expression_tok(&ts);
-                double step = 1.0;
+                Num end = evaluate_num_tok(&ts);
+                Num step = num_i(1, NUM_INTEGER);
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_STEP) {
                     ts.pos++;
-                    step = evaluate_expression_tok(&ts);
+                    step = evaluate_num_tok(&ts);
                 }
                 
                 int idx = resolve_token_variable(var_token);
-                set_numeric_variable(idx, -1, start);
+                ForLoop loop;
+                int runs = for_loop_begin(&loop, idx, start, end, step);
+                if (runs < 0) break;
 
-                // BASIKA check: If the loop should not execute at all
-                int should_skip = 0;
-                if (step > 0 && start > end) should_skip = 1;
-                else if (step < 0 && start < end) should_skip = 1;
-
-                if (should_skip) {
+                // The body is skipped when the start is already past the limit.
+                if (!runs) {
                     int end_ts_pos = ts.pos; // Start searching from current position
                     Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, idx, &end_ts_pos);
 
@@ -11320,9 +11312,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 }
 
                 if (for_ptr < 16) {
-                    for_stack[for_ptr].var_idx = idx;
-                    for_stack[for_ptr].end_val = end;
-                    for_stack[for_ptr].step_val = step;
+                    for_stack[for_ptr] = loop;
                     for_stack[for_ptr].start_stmt = exec_stmt;
                     for_stack[for_ptr].start_ts_pos = ts.pos;
                     for_ptr++;
@@ -11461,7 +11451,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 Token next_on = ts.tokens[ts.pos];
                 if (next_on.type == TOKEN_ERR || next_on.type == TOKEN_PEN) {
                     const char *temp_ptr = command_start_ptr;
-                    interpret_line_at_ptr(&temp_ptr, 0, NULL);
+                    interpret_statement_text(exec_stmt, &temp_ptr);
                     // We need to advance ts.pos to match where interpret_line_at_ptr left off
                     while(ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type != TOKEN_COLON && ts.tokens[ts.pos].type != TOKEN_EOF) ts.pos++;
                     continue;
@@ -11627,13 +11617,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     if (for_ptr > 0) f = for_ptr - 1;
                 }
                 if (f != -1) {
-                    int var_idx = for_stack[f].var_idx;
-                    Variable *loop_var = get_variable_ptr(var_idx);
-                    double next_value = (loop_var ? loop_var->value : 0.0) + for_stack[f].step_val;
-                    set_numeric_variable(var_idx, -1, next_value);
-                    loop_var = get_variable_ptr(var_idx);
-                    double v = loop_var ? loop_var->value : 0.0;
-                    if ((for_stack[f].step_val > 0 && v <= for_stack[f].end_val) || (for_stack[f].step_val < 0 && v >= for_stack[f].end_val)) {
+                    if (for_loop_next(&for_stack[f])) {
                         curr = for_stack[f].start_stmt;
                         resume_ptr = NULL;
                         resume_ts_pos = for_stack[f].start_ts_pos;
@@ -11839,16 +11823,16 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                         assign_user_type_value_tok(&ts, idx, array_idx);
                     } else if (is_member
                             ? is_string_var(get_variable_ptr(idx)->name)
-                            : is_string_var(t->text)) {
+                            : is_string_identifier_tok(current_token)) {
                         BasicString value = {0};
                         if (parse_string_expression_tok_heap(&ts, &value)) {
                             assign_string_variable_value(idx, array_idx, value.data, value.length);
                         }
                         basic_string_release(&value);
                     } else {
-                        double value = evaluate_expression_tok(&ts);
+                        Num value = evaluate_num_tok(&ts);
                         // An error while evaluating aborts the assignment, as in QBasic.
-                        if (!runtime_error_occurred) set_numeric_variable(idx, array_idx, value);
+                        if (!runtime_error_occurred) set_numeric_variable_num(idx, array_idx, value);
                     }
                     continue;
                 }
@@ -11871,7 +11855,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 // Fallback for complex commands
                 const char *command_start_ptr = t->start_ptr;
                 const char *temp_ptr = command_start_ptr;
-                interpret_line_at_ptr(&temp_ptr, 0, NULL);
+                interpret_statement_text(exec_stmt, &temp_ptr);
                 // Advance TokenStream to match the processed string
                 while(ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].start_ptr < temp_ptr) ts.pos++;
                 break;

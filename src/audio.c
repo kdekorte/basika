@@ -65,6 +65,13 @@ static int audio_init(void) {
     return 1;
 }
 
+/* Opening the mixer and output device takes a noticeable moment (about a
+ * quarter second on macOS); doing it before a program runs keeps the first
+ * PLAY or SOUND from stalling it. */
+void audio_prepare(void) {
+    if (audio_enabled) audio_init();
+}
+
 void audio_set_enabled(int enabled) {
     audio_enabled = enabled != 0;
 }
