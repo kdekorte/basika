@@ -73,6 +73,13 @@ int graphics_mouse_wheel(void);
 int graphics_stick(int n);
 void wait_for_keypress();
 void set_window_title(const char *title);
+/* $RESIZE / _RESIZE: allow lets the user resize the window; scaling is
+ * RESIZE_SCALE_NONE, _STRETCH or _SMOOTH (-1 keeps the current method). */
+enum { RESIZE_SCALE_NONE, RESIZE_SCALE_STRETCH, RESIZE_SCALE_SMOOTH };
+void graphics_set_resize(int allow, int scaling);
+int graphics_resize_event(void);
+int graphics_resize_width(void);
+int graphics_resize_height(void);
 
 void get_graphics_cursor(double *x, double *y);
 void set_graphics_cursor(double x, double y);

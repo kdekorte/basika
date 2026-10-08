@@ -34,13 +34,15 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `SPC`, `SQR`, `STATIC`, `STEP`, `STICK`, `STOP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UBOUND`, `UCASE$`, `UNLOCK`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WAIT`, `WEND`, `WHILE`, `WIDTH`, `WINDOW`, `WRITE`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DEST`, `_DISPLAY`, `_FONT`,
-`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`, `_SOURCE`, `_TITLE`,
+`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`, `_RESIZE`, `_SOURCE`, `_TITLE`,
 `_DEFLATE$`, `_INFLATE$`.
 
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
 `_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
-`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`.
+`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`.
+
+Metacommand: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`.
 
 `_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
 Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
@@ -250,6 +252,10 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_PUTIMAGE [(dx1,dy1)[-(dx2,dy2)]][, [source][, [dest]][, (sx1,sy1)[-(sx2,sy2)]]]`: Copies the source rectangle of one image onto another (defaults: the whole `_SOURCE` image onto `_DEST`). A single destination point keeps the source size, no destination stretches over the whole image, and a reversed rectangle mirrors the picture. 32-bit images blend by their alpha. The older form `_PUTIMAGE (x,y), handle, (sx1,sy1)-(sx2,sy2)` is still accepted.
 - `_FREEIMAGE handle`: Releases an image; drawing returns to the screen if it was `_DEST`.
 - `_TITLE text$`: Sets the window title.
+- `$RESIZE:ON`: Lets the user resize the window. The metacommand applies to the whole program wherever it appears. `$RESIZE:STRETCH` and `$RESIZE:SMOOTH` also allow resizing; SMOOTH scales the screen with linear filtering instead of keeping hard pixels. `$RESIZE:OFF` (the default) keeps the window fixed. The screen is always scaled to fit the window with its proportions kept, so a program that wants the extra room creates a new screen of the new size:
+  `IF _RESIZE THEN SCREEN _NEWIMAGE(_RESIZEWIDTH, _RESIZEHEIGHT, 32): GOSUB Redraw`
+- `_RESIZE`: -1 once after each user resize of the window, then 0. Size changes the program makes itself (`SCREEN _NEWIMAGE`) do not count. `_RESIZEWIDTH` and `_RESIZEHEIGHT` give the window's current size in pixels.
+- `_RESIZE [{ON|OFF}][, {_STRETCH|_SMOOTH}]`: Turns resizing on or off while the program runs, and optionally sets the scaling method.
 - `_KEYDOWN(code)`: -1 while the key with that QB64 code is held: ASCII for printable keys (lowercase letters unshifted, uppercase with Shift), 256 times the scan code for cursor and function keys (Up 18432, Down 20480, Left 19200, Right 19712, F1 15104), and 100304/100303 left/right Shift, 100306/100305 Ctrl, 100308/100307 Alt.
 - `_KEYHIT`: The next key from a queue, positive when pressed and negative when released, or 0.
 - `_MOUSEX`, `_MOUSEY`, `_MOUSEBUTTON(n)`: The mouse position in screen pixels and whether button n (1 left, 2 right, 3 middle) is down (-1).

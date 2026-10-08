@@ -24,6 +24,12 @@ static int page_count = 1;
 static int visual_page = 0;
 /* Where the canvas was last drawn in the window, to map mouse positions. */
 static SDL_FRect presented_area = {0, 0, 0, 0};
+/* $RESIZE state. A user resize sets resize_pending for _RESIZE; the size the
+ * program itself last asked for is remembered so that it does not count. */
+static int resize_allowed = 0;
+static int resize_scaling = RESIZE_SCALE_NONE;
+static int resize_pending = 0;
+static int requested_w = -1, requested_h = -1;
 static SDL_Color current_text_color = {255, 255, 255, 255};
 static int canvas_width = 1280;
 static int canvas_height = 400;
@@ -362,7 +368,15 @@ void set_screen_newimage(int width, int height, int colors) {
 
     canvas_width = width;
     canvas_height = height;
-    if (window) SDL_SetWindowSize(window, width, height);
+    if (window) {
+        int win_w, win_h;
+        SDL_GetWindowSize(window, &win_w, &win_h);
+        if (win_w != width || win_h != height) {
+            requested_w = width;
+            requested_h = height;
+            SDL_SetWindowSize(window, width, height);
+        }
+    }
 
     text_columns = width / 8;
     text_rows = height / 16;
@@ -1175,6 +1189,7 @@ int init_graphics() {
     if (headless_mode) {
         flags |= SDL_WINDOW_HIDDEN;
     }
+    if (resize_allowed) flags |= SDL_WINDOW_RESIZABLE;
     window = SDL_CreateWindow("BASIKA Virtual Framebuffer", 1024, 768, flags);
         
     if (!window) return 0;
@@ -1241,7 +1256,7 @@ static Uint64 last_present = 0;
 static int present_interval_ms = 16; // default ~60 FPS
 
 static double get_target_aspect_ratio(void) {
-    if (mode_res_h == 200 || mode_res_h == 350) {
+    if (current_screen_mode >= 0 && (mode_res_h == 200 || mode_res_h == 350)) {
         return 4.0 / 3.0; // CRT aspect ratio for legacy 200/350 line modes
     }
     if (canvas_width > 0 && canvas_height > 0) {
@@ -1266,7 +1281,10 @@ static void render_canvas_to_window(void) {
     SDL_SetRenderTarget(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
-    SDL_RenderTexture(renderer, pages[visual_page] ? pages[visual_page] : canvas, NULL, &dst);
+    SDL_Texture *shown = pages[visual_page] ? pages[visual_page] : canvas;
+    if (resize_scaling == RESIZE_SCALE_SMOOTH) SDL_SetTextureScaleMode(shown, SDL_SCALEMODE_LINEAR);
+    SDL_RenderTexture(renderer, shown, NULL, &dst);
+    if (resize_scaling == RESIZE_SCALE_SMOOTH) SDL_SetTextureScaleMode(shown, SDL_SCALEMODE_NEAREST);
     SDL_RenderPresent(renderer);
     last_present = SDL_GetTicks();
     SDL_SetRenderTarget(renderer, canvas);
@@ -2043,6 +2061,39 @@ void set_window_title(const char *title) {
     graphics_present_now();
 }
 
+void graphics_set_resize(int allow, int scaling) {
+    resize_allowed = allow != 0;
+    if (scaling >= 0) resize_scaling = scaling;
+    if (!resize_allowed) resize_pending = 0;
+    if (window) {
+        SDL_SetWindowResizable(window, resize_allowed);
+        graphics_present_if_autodisplay();
+    }
+}
+
+/* _RESIZE: -1 once after each user resize of the window, then 0. */
+int graphics_resize_event(void) {
+    handle_events();
+    int pending = resize_pending;
+    resize_pending = 0;
+    return pending ? -1 : 0;
+}
+
+/* _RESIZEWIDTH / _RESIZEHEIGHT: the window's current size in pixels. */
+int graphics_resize_width(void) {
+    int w = 0, h = 0;
+    handle_events();
+    if (window) SDL_GetWindowSize(window, &w, &h);
+    return w;
+}
+
+int graphics_resize_height(void) {
+    int w = 0, h = 0;
+    handle_events();
+    if (window) SDL_GetWindowSize(window, &w, &h);
+    return h;
+}
+
 void update_graphics() {
     if (!renderer || !canvas || !autodisplay_enabled) return;
 
@@ -2308,6 +2359,12 @@ void handle_events() {
         if (e.type == SDL_EVENT_QUIT) exit(0);
         if (e.type == SDL_EVENT_TEXT_INPUT) {
             if (e.text.text[0]) last_key_char = (unsigned char)e.text.text[0];
+        }
+        if (e.type == SDL_EVENT_WINDOW_RESIZED) {
+            int requested = e.window.data1 == requested_w && e.window.data2 == requested_h;
+            requested_w = requested_h = -1;
+            if (!requested && resize_allowed) resize_pending = 1;
+            graphics_present_if_autodisplay();
         }
         if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
             track_key(&e.key, e.type == SDL_EVENT_KEY_DOWN);

@@ -7,11 +7,19 @@
 '  thumbnail. Undo keeps a _COPYIMAGE snapshot; mirror and flip copy the
 '  picture with a reversed _PUTIMAGE rectangle.
 '
+'  The window is resizable ($RESIZE:ON). When _RESIZE reports a new size,
+'  the screen is rebuilt at _RESIZEWIDTH x _RESIZEHEIGHT and the layout
+'  follows it: the picture area fills the space between the toolbar and the
+'  palette, and the picture grows (never shrinks) to fill it. When the
+'  window is made smaller than the picture, scroll bars appear: drag a bar's
+'  thumb, click its track to move a page, use the arrow keys, or draw past
+'  the edge of the picture area to scroll toward the mouse.
+'
 '  Mouse   left button draws, right button picks up a color, wheel = size
 '  Keys    P pencil  B brush  S spray  E eraser  L line  R rectangle
 '          F filled rectangle  O ellipse  K fill bucket
 '          [ ] brush size   A opacity   U undo   C clear
-'          M mirror   V flip   W save screenshot   Q quit
+'          M mirror   V flip   W save screenshot   Q quit   arrows scroll
 '          hold Shift for straight lines, squares and circles
 '
 '  Run with: basika -w demo/qb64_paint.bas
@@ -19,12 +27,23 @@
 '   saves basika_paint_selftest.png and exits.)
 ' ============================================================================
 
-CONST SCREEN_W = 800
-CONST SCREEN_H = 600
+$RESIZE:ON
+
+CONST START_W = 800
+CONST START_H = 600
+CONST MIN_W = 560 ' room for the palette and the thumbnail
+CONST MIN_H = 560 ' room for the toolbar above the palette
 CONST CANVAS_X = 72
 CONST CANVAS_Y = 32
-CONST CANVAS_W = 712
-CONST CANVAS_H = 496
+CONST MARGIN_RIGHT = 16
+CONST PANEL_H = 72 ' palette strip along the bottom
+CONST BAR = 14 ' scroll bar thickness
+CONST MIN_THUMB = 24
+CONST SCROLL_STEP = 40 ' arrow keys and auto-scroll, in pixels
+CONST KEY_UP = 18432
+CONST KEY_DOWN = 20480
+CONST KEY_LEFT = 19200
+CONST KEY_RIGHT = 19712
 CONST TOOL_COUNT = 9
 CONST TOOL_PENCIL = 0
 CONST TOOL_BRUSH = 1
@@ -47,8 +66,20 @@ DIM SHARED Ink AS _UNSIGNED LONG
 DIM SHARED Dragging AS INTEGER, StartX AS INTEGER, StartY AS INTEGER
 DIM SHARED LastX AS INTEGER, LastY AS INTEGER
 DIM SHARED AntPhase AS LONG, Message AS STRING, MessageTime AS DOUBLE
+' Window size; the area between toolbar and palette (AreaW x AreaH), the part
+' of it showing the picture (ViewW x ViewH, less any scroll bars); the
+' picture's own size, and which part of it is scrolled into view.
+DIM SHARED ScreenW AS INTEGER, ScreenH AS INTEGER
+DIM SHARED AreaW AS INTEGER, AreaH AS INTEGER
+DIM SHARED ViewW AS INTEGER, ViewH AS INTEGER
+DIM SHARED PicW AS INTEGER, PicH AS INTEGER
+DIM SHARED ScrollX AS INTEGER, ScrollY AS INTEGER
+DIM SHARED HasHBar AS INTEGER, HasVBar AS INTEGER
+' A scroll bar thumb being dragged: 1 horizontal, 2 vertical; BarGrab is
+' where on the thumb it was picked up.
+DIM SHARED BarDrag AS INTEGER, BarGrab AS INTEGER
 
-SCREEN _NEWIMAGE(SCREEN_W, SCREEN_H, 32)
+SetScreenSize START_W, START_H
 _TITLE "BASIKA Paint"
 _AUTODISPLAY OFF
 RANDOMIZE TIMER
@@ -62,6 +93,10 @@ END IF
 DIM mx AS INTEGER, my AS INTEGER, leftDown AS INTEGER, rightDown AS INTEGER
 DIM wasDown AS INTEGER, done AS INTEGER, k AS LONG
 DO
+    IF _RESIZE THEN
+        SetScreenSize _RESIZEWIDTH, _RESIZEHEIGHT
+        Notify "Window" + STR$(ScreenW) + " x" + STR$(ScreenH)
+    END IF
     WHILE _MOUSEINPUT: WEND
     mx = _MOUSEX: my = _MOUSEY
     leftDown = _MOUSEBUTTON(1): rightDown = _MOUSEBUTTON(2)
@@ -76,7 +111,8 @@ DO
     IF leftDown AND NOT wasDown THEN MousePressed mx, my
     IF leftDown AND wasDown THEN MouseDragged mx, my
     IF wasDown AND NOT leftDown THEN MouseReleased mx, my
-    IF rightDown AND InCanvas(mx, my) THEN PickColor mx - CANVAS_X, my - CANVAS_Y
+    IF leftDown AND Dragging THEN AutoScroll mx, my
+    IF rightDown AND InCanvas(mx, my) THEN PickColor PicX(mx), PicY(my)
     wasDown = leftDown
 
     DrawWindow mx, my
@@ -94,11 +130,10 @@ SUB InitPaint
     FOR i = 0 TO TOOL_COUNT - 1
         READ ToolName(i), ToolKey(i)
     NEXT
-    Picture = _NEWIMAGE(CANVAS_W, CANVAS_H, 32)
-    _DEST Picture
-    LINE (0, 0)-(CANVAS_W - 1, CANVAS_H - 1), _RGB32(255, 255, 255), BF
-    _DEST 0
-    UndoImage = _COPYIMAGE(Picture)
+    PicW = AreaW: PicH = AreaH
+    Picture = BlankImage&(0)
+    UndoImage = BlankImage&(0)
+    UpdateScrollBars
     Tool = TOOL_BRUSH
     BrushSize = 8
     Opacity = 255
@@ -118,8 +153,174 @@ DATA "Rect", "R", "Box", "F", "Oval", "O", "Fill", "K"
 HelpText:
 DATA "[ ] size   A opacity", "U undo  M mirror  V flip", "W save  C clear  Q quit"
 
+' A new screen the size of the window (at least MIN_W x MIN_H, so a window
+' dragged smaller springs back), with the layout and picture to match.
+SUB SetScreenSize (w AS INTEGER, h AS INTEGER)
+    IF w < MIN_W THEN w = MIN_W
+    IF h < MIN_H THEN h = MIN_H
+    ScreenW = w: ScreenH = h
+    SCREEN _NEWIMAGE(ScreenW, ScreenH, 32)
+    AreaW = ScreenW - CANVAS_X - MARGIN_RIGHT
+    AreaH = ScreenH - CANVAS_Y - PANEL_H
+    IF Picture THEN GrowPicture: UpdateScrollBars
+END SUB
+
+' A white PicW x PicH image holding a copy of old (if any) at its top-left.
+FUNCTION BlankImage& (old AS LONG)
+    DIM img AS LONG
+    img = _NEWIMAGE(PicW, PicH, 32)
+    _DEST img
+    LINE (0, 0)-(PicW - 1, PicH - 1), _RGB32(255, 255, 255), BF
+    _DEST 0
+    IF old THEN
+        _PUTIMAGE (0, 0), old, img
+        _FREEIMAGE old
+    END IF
+    BlankImage& = img
+END FUNCTION
+
+' Enlarges the picture (and its undo copy) to fill a bigger picture area.
+' A smaller window only hides the edges, so shrinking never loses drawing.
+SUB GrowPicture
+    IF AreaW <= PicW AND AreaH <= PicH THEN EXIT SUB
+    IF AreaW > PicW THEN PicW = AreaW
+    IF AreaH > PicH THEN PicH = AreaH
+    Picture = BlankImage&(Picture)
+    UndoImage = BlankImage&(UndoImage)
+END SUB
+
+' ---- Scrolling ----
+
+' Shows a scroll bar for each direction the picture does not fit in. A bar
+' takes room from the view, which can make the other direction not fit.
+SUB UpdateScrollBars
+    ViewW = AreaW: ViewH = AreaH
+    HasVBar = PicH > ViewH
+    IF HasVBar THEN ViewW = AreaW - BAR
+    HasHBar = PicW > ViewW
+    IF HasHBar THEN
+        ViewH = AreaH - BAR
+        IF NOT HasVBar AND PicH > ViewH THEN HasVBar = -1: ViewW = AreaW - BAR
+    END IF
+    ScrollBy 0, 0
+END SUB
+
+' Scrolls by (dx, dy), kept within the picture.
+SUB ScrollBy (dx AS INTEGER, dy AS INTEGER)
+    ScrollX = ScrollX + dx: ScrollY = ScrollY + dy
+    IF ScrollX > PicW - ViewW THEN ScrollX = PicW - ViewW
+    IF ScrollY > PicH - ViewH THEN ScrollY = PicH - ViewH
+    IF ScrollX < 0 THEN ScrollX = 0
+    IF ScrollY < 0 THEN ScrollY = 0
+END SUB
+
+' A scroll bar's track is as long as the view it scrolls (viewLen, showing
+' viewLen of picLen pixels): the thumb's length, its offset along the track
+' when scrolled to scroll, and the scroll for a thumb at offset.
+FUNCTION ThumbLen (viewLen AS INTEGER, picLen AS INTEGER)
+    DIM t AS LONG
+    t = CLNG(viewLen) * viewLen \ picLen
+    IF t < MIN_THUMB THEN t = MIN_THUMB
+    IF t > viewLen THEN t = viewLen
+    ThumbLen = t
+END FUNCTION
+
+FUNCTION ThumbPos (viewLen AS INTEGER, picLen AS INTEGER, scroll AS INTEGER)
+    IF picLen <= viewLen THEN ThumbPos = 0: EXIT FUNCTION
+    ThumbPos = CLNG(viewLen - ThumbLen(viewLen, picLen)) * scroll \ (picLen - viewLen)
+END FUNCTION
+
+FUNCTION ScrollForThumb (viewLen AS INTEGER, picLen AS INTEGER, offset AS INTEGER)
+    DIM room AS INTEGER
+    room = viewLen - ThumbLen(viewLen, picLen)
+    IF room <= 0 THEN ScrollForThumb = 0: EXIT FUNCTION
+    ScrollForThumb = CLNG(offset) * (picLen - viewLen) \ room
+END FUNCTION
+
+' A press on a scroll bar: grab the thumb, or move a page toward the press.
+' Returns -1 if the press was on a bar.
+FUNCTION PressScrollBar (mx AS INTEGER, my AS INTEGER)
+    DIM p AS INTEGER, tp AS INTEGER, tl AS INTEGER
+    PressScrollBar = 0
+    IF HasVBar AND mx >= CANVAS_X + ViewW AND mx < CANVAS_X + ViewW + BAR AND my >= CANVAS_Y AND my < CANVAS_Y + ViewH THEN
+        p = my - CANVAS_Y
+        tp = ThumbPos(ViewH, PicH, ScrollY): tl = ThumbLen(ViewH, PicH)
+        IF p < tp THEN
+            ScrollBy 0, -ViewH
+        ELSEIF p >= tp + tl THEN
+            ScrollBy 0, ViewH
+        ELSE
+            BarDrag = 2: BarGrab = p - tp
+        END IF
+        PressScrollBar = -1
+    ELSEIF HasHBar AND my >= CANVAS_Y + ViewH AND my < CANVAS_Y + ViewH + BAR AND mx >= CANVAS_X AND mx < CANVAS_X + ViewW THEN
+        p = mx - CANVAS_X
+        tp = ThumbPos(ViewW, PicW, ScrollX): tl = ThumbLen(ViewW, PicW)
+        IF p < tp THEN
+            ScrollBy -ViewW, 0
+        ELSEIF p >= tp + tl THEN
+            ScrollBy ViewW, 0
+        ELSE
+            BarDrag = 1: BarGrab = p - tp
+        END IF
+        PressScrollBar = -1
+    END IF
+END FUNCTION
+
+SUB DragScrollBar (mx AS INTEGER, my AS INTEGER)
+    IF BarDrag = 2 THEN
+        ScrollY = ScrollForThumb(ViewH, PicH, my - CANVAS_Y - BarGrab)
+    ELSE
+        ScrollX = ScrollForThumb(ViewW, PicW, mx - CANVAS_X - BarGrab)
+    END IF
+    ScrollBy 0, 0
+END SUB
+
+' While drawing, a mouse past the edge of the view scrolls toward it.
+SUB AutoScroll (mx AS INTEGER, my AS INTEGER)
+    DIM dx AS INTEGER, dy AS INTEGER
+    IF mx < CANVAS_X THEN dx = -SCROLL_STEP \ 4
+    IF mx >= CANVAS_X + ViewW THEN dx = SCROLL_STEP \ 4
+    IF my < CANVAS_Y THEN dy = -SCROLL_STEP \ 4
+    IF my >= CANVAS_Y + ViewH THEN dy = SCROLL_STEP \ 4
+    IF dx OR dy THEN
+        ScrollBy dx, dy
+        MouseDragged mx, my ' continue the stroke into the newly shown part
+    END IF
+END SUB
+
+SUB DrawScrollBars
+    DIM tp AS INTEGER, tl AS INTEGER, x AS INTEGER, y AS INTEGER
+    DIM track AS _UNSIGNED LONG, thumb AS _UNSIGNED LONG
+    track = _RGB32(225, 228, 235): thumb = _RGB32(140, 148, 170)
+    IF HasVBar THEN
+        x = CANVAS_X + ViewW
+        LINE (x, CANVAS_Y)-(x + BAR - 1, CANVAS_Y + ViewH - 1), track, BF
+        tp = ThumbPos(ViewH, PicH, ScrollY): tl = ThumbLen(ViewH, PicH)
+        LINE (x + 2, CANVAS_Y + tp + 1)-(x + BAR - 3, CANVAS_Y + tp + tl - 2), thumb, BF
+    END IF
+    IF HasHBar THEN
+        y = CANVAS_Y + ViewH
+        LINE (CANVAS_X, y)-(CANVAS_X + ViewW - 1, y + BAR - 1), track, BF
+        tp = ThumbPos(ViewW, PicW, ScrollX): tl = ThumbLen(ViewW, PicW)
+        LINE (CANVAS_X + tp + 1, y + 2)-(CANVAS_X + tp + tl - 2, y + BAR - 3), thumb, BF
+    END IF
+    IF HasVBar AND HasHBar THEN
+        LINE (CANVAS_X + ViewW, CANVAS_Y + ViewH)-(CANVAS_X + AreaW - 1, CANVAS_Y + AreaH - 1), _RGB32(205, 210, 220), BF
+    END IF
+END SUB
+
+' Window position to picture position, through the scroll offset.
+FUNCTION PicX (mx AS INTEGER)
+    PicX = mx - CANVAS_X + ScrollX
+END FUNCTION
+
+FUNCTION PicY (my AS INTEGER)
+    PicY = my - CANVAS_Y + ScrollY
+END FUNCTION
+
 FUNCTION InCanvas (x AS INTEGER, y AS INTEGER)
-    InCanvas = x >= CANVAS_X AND x < CANVAS_X + CANVAS_W AND y >= CANVAS_Y AND y < CANVAS_Y + CANVAS_H
+    InCanvas = x >= CANVAS_X AND x < CANVAS_X + ViewW AND y >= CANVAS_Y AND y < CANVAS_Y + ViewH
 END FUNCTION
 
 FUNCTION ShiftHeld
@@ -146,6 +347,12 @@ END SUB
 FUNCTION HandleKey (code AS LONG)
     DIM c AS STRING, i AS INTEGER
     HandleKey = 0
+    SELECT CASE code
+        CASE KEY_UP: ScrollBy 0, -SCROLL_STEP: EXIT FUNCTION
+        CASE KEY_DOWN: ScrollBy 0, SCROLL_STEP: EXIT FUNCTION
+        CASE KEY_LEFT: ScrollBy -SCROLL_STEP, 0: EXIT FUNCTION
+        CASE KEY_RIGHT: ScrollBy SCROLL_STEP, 0: EXIT FUNCTION
+    END SELECT
     c = UCASE$(CHR$(code MOD 256))
     IF code > 255 THEN EXIT FUNCTION
     FOR i = 0 TO TOOL_COUNT - 1
@@ -166,7 +373,7 @@ FUNCTION HandleKey (code AS LONG)
         CASE "C"
             SaveUndo
             _DEST Picture
-            LINE (0, 0)-(CANVAS_W - 1, CANVAS_H - 1), _RGB32(255, 255, 255), BF
+            LINE (0, 0)-(PicW - 1, PicH - 1), _RGB32(255, 255, 255), BF
             _DEST 0
             Notify "Cleared (U to undo)"
         CASE "M": Reflect 1
@@ -198,9 +405,9 @@ SUB Reflect (horizontal AS INTEGER)
     SaveUndo
     spare = _COPYIMAGE(Picture)
     IF horizontal THEN
-        _PUTIMAGE (CANVAS_W - 1, 0)-(0, CANVAS_H - 1), spare, Picture
+        _PUTIMAGE (PicW - 1, 0)-(0, PicH - 1), spare, Picture
     ELSE
-        _PUTIMAGE (0, CANVAS_H - 1)-(CANVAS_W - 1, 0), spare, Picture
+        _PUTIMAGE (0, PicH - 1)-(PicW - 1, 0), spare, Picture
     END IF
     _FREEIMAGE spare
 END SUB
@@ -219,13 +426,14 @@ SUB MousePressed (mx AS INTEGER, my AS INTEGER)
         IF i >= 0 AND i < TOOL_COUNT THEN Tool = i
         EXIT SUB
     END IF
-    IF my >= 540 AND my < 590 AND mx >= 120 AND mx < 120 + 8 * 34 THEN
-        i = (mx - 120) \ 34 + 8 * ((my - 540) \ 25)
+    IF my >= ScreenH - 60 AND my < ScreenH - 10 AND mx >= 120 AND mx < 120 + 8 * 34 THEN
+        i = (mx - 120) \ 34 + 8 * ((my - (ScreenH - 60)) \ 25)
         IF i >= 0 AND i < 16 THEN Ink = Swatches(i)
         EXIT SUB
     END IF
+    IF PressScrollBar(mx, my) THEN EXIT SUB
     IF NOT InCanvas(mx, my) THEN EXIT SUB
-    cx = mx - CANVAS_X: cy = my - CANVAS_Y
+    cx = PicX(mx): cy = PicY(my)
     SaveUndo
     Dragging = -1
     StartX = cx: StartY = cy: LastX = cx: LastY = cy
@@ -236,20 +444,22 @@ SUB MousePressed (mx AS INTEGER, my AS INTEGER)
 END SUB
 
 SUB MouseDragged (mx AS INTEGER, my AS INTEGER)
+    IF BarDrag THEN DragScrollBar mx, my: EXIT SUB
     IF NOT Dragging THEN EXIT SUB
     DIM cx AS INTEGER, cy AS INTEGER
-    cx = mx - CANVAS_X: cy = my - CANVAS_Y
+    cx = PicX(mx): cy = PicY(my)
     SELECT CASE Tool
         CASE TOOL_PENCIL, TOOL_BRUSH, TOOL_ERASER, TOOL_SPRAY: Stroke cx, cy
     END SELECT
 END SUB
 
 SUB MouseReleased (mx AS INTEGER, my AS INTEGER)
+    BarDrag = 0
     IF NOT Dragging THEN EXIT SUB
     Dragging = 0
     IF Tool >= TOOL_LINE AND Tool <= TOOL_ELLIPSE THEN
         _DEST Picture
-        DrawShape StartX, StartY, mx - CANVAS_X, my - CANVAS_Y, InkColor~&(), 0
+        DrawShape StartX, StartY, PicX(mx), PicY(my), InkColor~&(), 0
         _DEST 0
     END IF
 END SUB
@@ -350,7 +560,7 @@ SUB BucketFill (x AS INTEGER, y AS INTEGER)
     _SOURCE Picture
     inside = POINT(x, y)
     border = opaque
-    FOR scan = x + 1 TO CANVAS_W - 1
+    FOR scan = x + 1 TO PicW - 1
         IF POINT(scan, y) <> inside THEN border = POINT(scan, y): EXIT FOR
     NEXT
     _SOURCE 0
@@ -363,32 +573,37 @@ END SUB
 ' ---- Drawing the window ----
 
 SUB DrawWindow (mx AS INTEGER, my AS INTEGER)
-    DIM i AS INTEGER, y AS INTEGER, label AS STRING
-    LINE (0, 0)-(SCREEN_W - 1, SCREEN_H - 1), _RGB32(205, 210, 220), BF
-    ' The picture, then the shape being dragged drawn over it as a preview.
-    _PUTIMAGE (CANVAS_X, CANVAS_Y), Picture
-    LINE (CANVAS_X - 1, CANVAS_Y - 1)-(CANVAS_X + CANVAS_W, CANVAS_Y + CANVAS_H), _RGB32(40, 40, 50), B
+    DIM i AS INTEGER, y AS INTEGER, label AS STRING, panelY AS INTEGER
+    DIM tx AS INTEGER, tw AS INTEGER, th AS INTEGER
+    panelY = ScreenH - PANEL_H + 12
+    LINE (0, 0)-(ScreenW - 1, ScreenH - 1), _RGB32(205, 210, 220), BF
+    ' The visible part of the picture, then the shape being dragged drawn
+    ' over it as a preview.
+    _PUTIMAGE (CANVAS_X, CANVAS_Y)-(CANVAS_X + ViewW - 1, CANVAS_Y + ViewH - 1), Picture, 0, (ScrollX, ScrollY)-(ScrollX + ViewW - 1, ScrollY + ViewH - 1)
+    DrawScrollBars
+    LINE (CANVAS_X - 1, CANVAS_Y - 1)-(CANVAS_X + AreaW, CANVAS_Y + AreaH), _RGB32(40, 40, 50), B
     AntPhase = ((AntPhase * 2) OR (AntPhase \ 32768)) AND &HFFFF&
     IF AntPhase = 0 THEN AntPhase = &HF0F0&
     IF Dragging AND Tool >= TOOL_LINE AND Tool <= TOOL_ELLIPSE THEN
-        VIEW SCREEN (CANVAS_X, CANVAS_Y)-(CANVAS_X + CANVAS_W - 1, CANVAS_Y + CANVAS_H - 1)
-        WINDOW SCREEN (0, 0)-(CANVAS_W - 1, CANVAS_H - 1) ' picture coordinates
-        DrawShape StartX, StartY, mx - CANVAS_X, my - CANVAS_Y, InkColor~&(), -1
+        VIEW SCREEN (CANVAS_X, CANVAS_Y)-(CANVAS_X + ViewW - 1, CANVAS_Y + ViewH - 1)
+        WINDOW SCREEN (ScrollX, ScrollY)-(ScrollX + ViewW - 1, ScrollY + ViewH - 1) ' picture coordinates
+        DrawShape StartX, StartY, PicX(mx), PicY(my), InkColor~&(), -1
         WINDOW
         VIEW
     END IF
 
     ' Title bar and status line.
-    LINE (0, 0)-(SCREEN_W - 1, 24), _RGB32(40, 44, 60), BF
+    LINE (0, 0)-(ScreenW - 1, 24), _RGB32(40, 44, 60), BF
     COLOR _RGB32(255, 255, 255)
     _PRINTSTRING (10, 4), "BASIKA Paint"
     COLOR _RGB32(170, 190, 230)
     label = ToolName(Tool) + "   size" + STR$(BrushSize) + "   opacity" + STR$(INT(Opacity * 100 / 255 + .5)) + "%"
-    IF InCanvas(mx, my) THEN label = label + "   (" + LTRIM$(STR$(mx - CANVAS_X)) + "," + LTRIM$(STR$(my - CANVAS_Y)) + ")"
+    IF InCanvas(mx, my) THEN label = label + "   (" + LTRIM$(STR$(PicX(mx))) + "," + LTRIM$(STR$(PicY(my))) + ")"
     _PRINTSTRING (150, 4), label
-    IF Message <> "" AND TIMER - MessageTime < 2 AND TIMER >= MessageTime THEN
+    ' Messages show on the right for two seconds, if the window is wide enough.
+    IF Message <> "" AND TIMER - MessageTime < 2 AND TIMER >= MessageTime AND ScreenW - 10 - _PRINTWIDTH(Message) > 160 + _PRINTWIDTH(label) THEN
         COLOR _RGB32(255, 220, 120)
-        _PRINTSTRING (SCREEN_W - 10 - _PRINTWIDTH(Message), 4), Message
+        _PRINTSTRING (ScreenW - 10 - _PRINTWIDTH(Message), 4), Message
     END IF
 
     ' Toolbar.
@@ -406,25 +621,36 @@ SUB DrawWindow (mx AS INTEGER, my AS INTEGER)
         _PRINTSTRING (34 - _PRINTWIDTH(ToolName(i)) \ 2, y + 28), ToolName(i)
     NEXT
 
-    ' Palette, current color and the brush.
+    ' Palette, current color and the brush, along the bottom of the window.
     COLOR _RGB32(40, 40, 50)
-    _PRINTSTRING (12, 544), "Ink"
-    LINE (12, 562)-(100, 590), Ink, BF
-    LINE (12, 562)-(100, 590), _RGB32(40, 40, 50), B
+    _PRINTSTRING (12, panelY + 4), "Ink"
+    LINE (12, panelY + 22)-(100, panelY + 50), Ink, BF
+    LINE (12, panelY + 22)-(100, panelY + 50), _RGB32(40, 40, 50), B
     FOR i = 0 TO 15
-        LINE (120 + (i MOD 8) * 34, 540 + (i \ 8) * 25)-(150 + (i MOD 8) * 34, 562 + (i \ 8) * 25), Swatches(i), BF
-        LINE (120 + (i MOD 8) * 34, 540 + (i \ 8) * 25)-(150 + (i MOD 8) * 34, 562 + (i \ 8) * 25), _RGB32(40, 40, 50), B
+        LINE (120 + (i MOD 8) * 34, panelY + (i \ 8) * 25)-(150 + (i MOD 8) * 34, panelY + 22 + (i \ 8) * 25), Swatches(i), BF
+        LINE (120 + (i MOD 8) * 34, panelY + (i \ 8) * 25)-(150 + (i MOD 8) * 34, panelY + 22 + (i \ 8) * 25), _RGB32(40, 40, 50), B
     NEXT
-    FillCircle 420, 565, BrushSize / 2, InkColor~&()
+    FillCircle 420, panelY + 25, BrushSize / 2, InkColor~&()
+    ' The key reminders, right-aligned before the thumbnail when they fit.
     RESTORE HelpText
     FOR i = 0 TO 2
         READ label
-        _PRINTSTRING (690 - _PRINTWIDTH(label), 539 + i * 19), label
+        IF ScreenW - 110 - _PRINTWIDTH(label) > 440 THEN
+            _PRINTSTRING (ScreenW - 110 - _PRINTWIDTH(label), panelY - 1 + i * 19), label
+        END IF
     NEXT
 
-    ' A scaled-down thumbnail of the whole picture.
-    _PUTIMAGE (700, 538)-(779, 593), Picture
-    LINE (699, 537)-(780, 594), _RGB32(40, 40, 50), B
+    ' A scaled-down thumbnail of the whole picture in an 80x56 box,
+    ' keeping the picture's proportions.
+    tw = 80: th = 80& * PicH \ PicW
+    IF th > 56 THEN th = 56: tw = 56& * PicW \ PicH
+    tx = ScreenW - 20 - tw
+    _PUTIMAGE (tx, panelY - 2)-(tx + tw - 1, panelY - 3 + th), Picture
+    LINE (tx - 1, panelY - 3)-(tx + tw, panelY - 2 + th), _RGB32(40, 40, 50), B
+    ' When scrolled, outline the part of the picture in view.
+    IF HasHBar OR HasVBar THEN
+        LINE (tx + CLNG(ScrollX) * tw \ PicW, panelY - 2 + CLNG(ScrollY) * th \ PicH)-(tx + CLNG(ScrollX + ViewW) * tw \ PicW - 1, panelY - 3 + CLNG(ScrollY + ViewH) * th \ PicH), _RGB32(200, 30, 40), B
+    END IF
 
     ' Brush outline under the mouse.
     IF InCanvas(mx, my) AND Tool <> TOOL_BUCKET THEN

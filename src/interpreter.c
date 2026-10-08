@@ -294,6 +294,14 @@ static ProcedureDef *find_procedure(const char *name) {
     for (int p = 0; p < proc_count; p++) {
         if (strcasecmp(registered_procs[p].name, norm) == 0) return &registered_procs[p];
     }
+    // As in QB64, a FUNCTION Name& (or Name$, ...) can be named without its
+    // suffix; a different suffix is a different name.
+    if (strchr("$%&!#", norm[i - 1])) return NULL;
+    for (int p = 0; p < proc_count; p++) {
+        const char *proc_name = registered_procs[p].name;
+        if (strncasecmp(proc_name, norm, i) != 0 || !proc_name[i]) continue;
+        if (strspn(proc_name + i, "$%&!#~") == strlen(proc_name + i)) return &registered_procs[p];
+    }
     return NULL;
 }
 
@@ -307,7 +315,12 @@ static ProcedureDef *find_procedure_tok(Token *token) {
     return (ProcedureDef *)token->proc_cache;
 }
 
+static int qb64_function_id(const char *name);
+
+/* A user FUNCTION or a QB64 built-in such as _RESIZEWIDTH: a value, never a
+ * by-reference variable. */
 static int is_function_name(const char *name) {
+    if (name[0] == '_' && qb64_function_id(name)) return 1;
     ProcedureDef *proc = find_procedure(name);
     return proc && proc->is_function;
 }
@@ -1723,6 +1736,27 @@ static int parse_randomize(const char **input) {
 static unsigned int hash_name(const char *name);
 static int find_variable_index(const char *normalized);
 
+/* Name is a FUNCTION Name$ written without its "$" (as QB64 allows). */
+static int is_string_function_without_suffix(const char *name) {
+    static unsigned int checked_generation = 0;
+    static int checked_count = -1, any_string_function = 0;
+    if (checked_generation != proc_generation || checked_count != proc_count) {
+        any_string_function = 0;
+        for (int p = 0; p < proc_count && !any_string_function; p++) {
+            size_t len = strlen(registered_procs[p].name);
+            any_string_function = registered_procs[p].is_function && len > 0 &&
+                registered_procs[p].name[len - 1] == '$';
+        }
+        checked_generation = proc_generation;
+        checked_count = proc_count;
+    }
+    if (!any_string_function || strchr(name, '.')) return 0;
+    ProcedureDef *proc = find_procedure(name);
+    if (!proc || !proc->is_function) return 0;
+    size_t len = strlen(proc->name);
+    return proc->name[len - 1] == '$';
+}
+
 static int is_string_var(const char *name) {
     int len = (int)strlen(name);
     if (len == 0) return 0;
@@ -1750,6 +1784,7 @@ static int is_string_var(const char *name) {
         const char *declared = find_declared_suffix(name);
         if (declared) return declared[0] == '$';
     }
+    if (is_string_function_without_suffix(name)) return 1;
     int first = (unsigned char)name[0];
     if (first >= 'a' && first <= 'z') first -= 'a' - 'A'; // ASCII only; toupper is a libc call
     if (first >= 'A' && first <= 'Z') {
@@ -5490,7 +5525,24 @@ static int transfer_user_type_record(int file_number, double record_number,
     return success;
 }
 
+/* Inside FUNCTION Name$, "Name = ..." sets the string result, as in QB64:
+ * renames the assignment target to the function's own name. */
+static void name_string_function_result(Token *target) {
+    const ProcedureDef *scope = current_declaration_scope();
+    if (!scope || !scope->is_function) return;
+    size_t len = strlen(target->text);
+    if (len == 0 || strchr("$%&!#.", target->text[len - 1]) ||
+        strncasecmp(scope->name, target->text, len) != 0 || strcmp(scope->name + len, "$") != 0) {
+        return;
+    }
+    snprintf(target->text, sizeof(target->text), "%s", scope->name);
+    target->var_idx = -1;
+    target->type_generation = 0;
+    target->string_cache = -1;
+}
+
 static void execute_assignment(const char **input, Token var_token) {
+    name_string_function_result(&var_token);
     int idx = var_token.var_idx;
     int array_idx = -1;
     int is_member = user_type_count > 0
@@ -6049,6 +6101,9 @@ static void scan_procedures(void) {
         }
         stmt = stmt->next;
     }
+    // Names cached as numeric may now be string FUNCTIONs called without "$".
+    default_type_generation++;
+    if (default_type_generation == 0) default_type_generation = 1;
 }
 
 /* An argument written name() is a whole array. Returns 1 and consumes it,
@@ -6688,10 +6743,13 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 t = current_token;
                 /* fall through */
             case TOKEN_IDENTIFIER: {
-                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COLON) {
+                // "Name:" is a line label only at the start of a line; after THEN or
+                // another statement it calls SUB Name.
+                if (current_token == ts.tokens && ts.tokens[ts.pos].type == TOKEN_COLON) {
                     ts.pos++;
                     continue;
                 }
+                name_string_function_result(current_token);
                 int idx = resolve_token_variable(current_token);
                 int array_idx = -1;
                 int is_member = user_type_count > 0
@@ -7098,7 +7156,8 @@ enum {
     QB64_FN_RED, QB64_FN_GREEN, QB64_FN_BLUE, QB64_FN_ALPHA,
     QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT,
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
-    QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE
+    QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
+    QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT
 };
 
 static int qb64_function_id(const char *name) {
@@ -7114,6 +7173,8 @@ static int qb64_function_id(const char *name) {
         {"_MOUSEX", QB64_FN_MOUSEX}, {"_MOUSEY", QB64_FN_MOUSEY},
         {"_MOUSEBUTTON", QB64_FN_MOUSEBUTTON}, {"_MOUSEINPUT", QB64_FN_MOUSEINPUT},
         {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
+        {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
+        {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT},
     };
     if (name[0] != '_') return QB64_FN_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -7211,6 +7272,12 @@ static double qb64_function_value(int id, const double *args, int argc) {
             return graphics_is_active() ? graphics_mouse_input() : 0;
         case QB64_FN_MOUSEWHEEL:
             return graphics_is_active() ? graphics_mouse_wheel() : 0;
+        case QB64_FN_RESIZE:
+            return graphics_is_active() ? graphics_resize_event() : 0;
+        case QB64_FN_RESIZEWIDTH:
+            return graphics_is_active() ? graphics_resize_width() : 0;
+        case QB64_FN_RESIZEHEIGHT:
+            return graphics_is_active() ? graphics_resize_height() : 0;
     }
     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
     return 0;
@@ -7591,16 +7658,22 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 }
             }
             if (ft == TOKEN_ASC || ft == TOKEN_LEN || ft == TOKEN_VAL || ft == TOKEN_PRINTWIDTH) {
+                // LEN(var$) reads the length without copying the string; any
+                // other argument (a FUNCTION call, an expression) is parsed below.
                 if (ft == TOKEN_LEN && ts->tokens[ts->pos].type == TOKEN_IDENTIFIER &&
-                    is_string_var(ts->tokens[ts->pos].text)) {
+                    is_string_var(ts->tokens[ts->pos].text) && !is_function_name(ts->tokens[ts->pos].text)) {
+                    int length_start = ts->pos;
                     Token *length_token = &ts->tokens[ts->pos++];
                     int length_idx = resolve_token_variable(length_token);
                     int length_array_idx = parse_array_index_tok(ts, length_idx);
-                    Variable *length_var = get_variable_ptr(length_idx);
-                    BasicString *length_value = length_array_idx >= 0 && length_var->s_array
-                        ? length_var->s_array[length_array_idx] : length_var->s_value;
-                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                    return length_value ? (double)length_value->length : 0.0;
+                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) {
+                        ts->pos++;
+                        Variable *length_var = get_variable_ptr(length_idx);
+                        BasicString *length_value = length_array_idx >= 0 && length_var->s_array
+                            ? length_var->s_array[length_array_idx] : length_var->s_value;
+                        return length_value ? (double)length_value->length : 0.0;
+                    }
+                    ts->pos = length_start;
                 }
                 char buf[BASIC_STRING_MAX] = "";
                 parse_string_expression_tok(ts, buf, sizeof(buf));
@@ -8828,6 +8901,62 @@ static void execute_lock(const char **ptr, int locking) {
     }
 }
 
+/* $RESIZE:{ON|OFF|STRETCH|SMOOTH}. Returns 0 when text is not a valid
+ * $RESIZE line; applies it unless check_only is set. */
+static int apply_resize_metacommand(const char *text, int check_only) {
+    text = skip_whitespace_fast(text);
+    if (strncasecmp(text, "$RESIZE", 7) != 0) return 0;
+    text = skip_whitespace_fast(text + 7);
+    if (*text++ != ':') return 0;
+    text = skip_whitespace_fast(text);
+    static const struct { const char *name; int allow, scaling; } modes[] = {
+        {"ON", 1, RESIZE_SCALE_NONE}, {"OFF", 0, RESIZE_SCALE_NONE},
+        {"STRETCH", 1, RESIZE_SCALE_STRETCH}, {"SMOOTH", 1, RESIZE_SCALE_SMOOTH},
+    };
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        size_t len = strlen(modes[i].name);
+        if (strncasecmp(text, modes[i].name, len) != 0) continue;
+        const char *rest = skip_whitespace_fast(text + len);
+        if (*rest != '\0' && *rest != '\'') continue;
+        if (!check_only) graphics_set_resize(modes[i].allow, modes[i].scaling);
+        return 1;
+    }
+    return 0;
+}
+
+/* _RESIZE [{ON|OFF}][, {_STRETCH|_SMOOTH}] */
+static void execute_resize_statement(const char **ptr) {
+    const char *saved = *ptr;
+    Token t = get_next_token(ptr);
+    int allow = 1, scaling = -1;
+    if (t.type == TOKEN_OFF) {
+        allow = 0;
+        scaling = RESIZE_SCALE_NONE;
+        saved = *ptr;
+        t = get_next_token(ptr);
+    } else if (t.type == TOKEN_ON) {
+        saved = *ptr;
+        t = get_next_token(ptr);
+    }
+    if (t.type == TOKEN_COMMA && allow) {
+        Token method = get_next_token(ptr);
+        if (method.type == TOKEN_IDENTIFIER && strcasecmp(method.text, "_STRETCH") == 0) {
+            scaling = RESIZE_SCALE_STRETCH;
+        } else if (method.type == TOKEN_IDENTIFIER && strcasecmp(method.text, "_SMOOTH") == 0) {
+            scaling = RESIZE_SCALE_SMOOTH;
+        } else {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return;
+        }
+    } else if (t.type != TOKEN_EOF && t.type != TOKEN_COLON && t.type != TOKEN_REM) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return;
+    } else {
+        *ptr = saved;
+    }
+    graphics_set_resize(allow, scaling);
+}
+
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num) {
     const char *ptr = *ptr_addr;
     Token t = get_next_token(&ptr);
@@ -9135,6 +9264,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     break;
                 }
             }
+        } else if (t.type == TOKEN_IDENTIFIER && t.text[0] == '$') {
+            // Metacommands such as $RESIZE take effect before the program runs.
+            if (strcasecmp(t.text, "$RESIZE") == 0 && !apply_resize_metacommand(*ptr_addr, 1)) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            ptr += strlen(ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
+            execute_resize_statement(&ptr);
         } else if (t.type == TOKEN_LET || t.type == TOKEN_IDENTIFIER) {
             Token var_token = (t.type == TOKEN_LET) ? get_next_token(&ptr) : t;
             execute_assignment(&ptr, var_token);
@@ -11139,6 +11277,12 @@ static void run_program_from(Statement *start) {
     frames_being_built = 0;
     scan_procedures();
     scanned_generation = program_edit_generation();
+    // $RESIZE is a metacommand: it applies wherever it appears in the program.
+    int resize_set = 0;
+    for (Statement *s = get_head(); s; s = s->next) {
+        resize_set |= apply_resize_metacommand(s->raw_command, 0);
+    }
+    if (!resize_set) graphics_set_resize(0, RESIZE_SCALE_NONE);
     // Open the audio device now if the program makes sound, rather than
     // pausing at its first PLAY or SOUND.
     for (Statement *s = get_head(); s && audio_is_enabled(); s = s->next) {
@@ -11986,11 +12130,14 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 t = current_token;
                 /* fall through */
             case TOKEN_IDENTIFIER: {
-                if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_COLON) {
+                // "Name:" is a line label only at the start of a line; after THEN or
+                // another statement it calls SUB Name.
+                if (current_token == ts.tokens && ts.tokens[ts.pos].type == TOKEN_COLON) {
                     ts.pos++; // Skip colon
                     continue;
                 }
                 // Direct handling of assignments
+                name_string_function_result(current_token);
                 int idx = resolve_token_variable(current_token);
                 int array_idx = -1;
                 int is_member = user_type_count > 0
