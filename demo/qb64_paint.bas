@@ -481,8 +481,8 @@ SUB Stroke (x AS INTEGER, y AS INTEGER)
         CASE ELSE
             steps = (ABS(x - LastX) + ABS(y - LastY)) \ (BrushSize \ 3 + 1) + 1
             FOR i = 1 TO steps
-                px = LastX + (x - LastX) * i / steps
-                py = LastY + (y - LastY) * i / steps
+                px = LastX + (x - LastX) * (i / steps)
+                py = LastY + (y - LastY) * (i / steps)
                 IF Tool = TOOL_ERASER THEN
                     FillCircle px, py, BrushSize / 2, _RGB32(255, 255, 255)
                 ELSE
@@ -494,12 +494,15 @@ SUB Stroke (x AS INTEGER, y AS INTEGER)
     LastX = x: LastY = y
 END SUB
 
+' The center is rounded to a whole pixel: rows at y = n.5 would round to even
+' lines (as CINT does) and leave every other line empty.
 SUB FillCircle (cx AS SINGLE, cy AS SINGLE, r AS SINGLE, c AS _UNSIGNED LONG)
-    DIM row AS INTEGER, half AS SINGLE
+    DIM row AS INTEGER, half AS SINGLE, y AS LONG
     IF r < 1 THEN PSET (cx, cy), c: EXIT SUB
+    y = INT(cy + .5)
     FOR row = -INT(r) TO INT(r)
         half = SQR(r * r - row * row)
-        LINE (cx - half, cy + row)-(cx + half, cy + row), c
+        LINE (cx - half, y + row)-(cx + half, y + row), c
     NEXT
 END SUB
 
@@ -525,7 +528,9 @@ SUB DrawShape (x1 AS INTEGER, y1 AS INTEGER, x2 AS INTEGER, y2 AS INTEGER, c AS 
                 ThickLine x1, y1, x2, y2, c
             END IF
         CASE TOOL_RECT
-            IF preview THEN
+            IF BrushSize > 2 THEN
+                ThickRect x1, y1, x2, y2, c
+            ELSEIF preview THEN
                 LINE (x1, y1)-(x2, y2), c, B, AntPhase
             ELSE
                 LINE (x1, y1)-(x2, y2), c, B
@@ -537,7 +542,9 @@ SUB DrawShape (x1 AS INTEGER, y1 AS INTEGER, x2 AS INTEGER, y2 AS INTEGER, c AS 
             rx = ABS(x2 - x1) / 2: ry = ABS(y2 - y1) / 2
             IF rx < 1 THEN rx = 1
             IF ry < 1 THEN ry = 1
-            IF rx >= ry THEN
+            IF BrushSize > 2 THEN
+                ThickEllipse (x1 + x2) / 2, (y1 + y2) / 2, rx, ry, c
+            ELSEIF rx >= ry THEN
                 CIRCLE ((x1 + x2) / 2, (y1 + y2) / 2), rx, c, , , ry / rx
             ELSE
                 CIRCLE ((x1 + x2) / 2, (y1 + y2) / 2), ry, c, , , ry / rx
@@ -549,7 +556,43 @@ SUB ThickLine (x1 AS INTEGER, y1 AS INTEGER, x2 AS INTEGER, y2 AS INTEGER, c AS 
     DIM steps AS INTEGER, i AS INTEGER
     steps = (ABS(x2 - x1) + ABS(y2 - y1)) \ (BrushSize \ 3 + 1) + 1
     FOR i = 0 TO steps
-        FillCircle x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps, BrushSize / 2, c
+        FillCircle x1 + (x2 - x1) * (i / steps), y1 + (y2 - y1) * (i / steps), BrushSize / 2, c
+    NEXT
+END SUB
+
+' A rectangle outline BrushSize pixels thick, inside the dragged corners.
+' The four bands do not overlap, so translucent ink blends evenly.
+SUB ThickRect (x1 AS INTEGER, y1 AS INTEGER, x2 AS INTEGER, y2 AS INTEGER, c AS _UNSIGNED LONG)
+    DIM l AS INTEGER, t AS INTEGER, r AS INTEGER, b AS INTEGER
+    l = x1: r = x2: t = y1: b = y2
+    IF l > r THEN SWAP l, r
+    IF t > b THEN SWAP t, b
+    IF 2 * BrushSize >= r - l + 1 OR 2 * BrushSize >= b - t + 1 THEN
+        LINE (l, t)-(r, b), c, BF
+        EXIT SUB
+    END IF
+    LINE (l, t)-(r, t + BrushSize - 1), c, BF
+    LINE (l, b - BrushSize + 1)-(r, b), c, BF
+    LINE (l, t + BrushSize)-(l + BrushSize - 1, b - BrushSize), c, BF
+    LINE (r - BrushSize + 1, t + BrushSize)-(r, b - BrushSize), c, BF
+END SUB
+
+' An ellipse outline BrushSize pixels thick, inside radii rx and ry: each
+' row draws the span between the outer ellipse and the inner one. Rows start
+' from a whole-pixel center, as in FillCircle.
+SUB ThickEllipse (cx AS SINGLE, cy AS SINGLE, rx AS SINGLE, ry AS SINGLE, c AS _UNSIGNED LONG)
+    DIM row AS INTEGER, outer AS SINGLE, inner AS SINGLE, irx AS SINGLE, iry AS SINGLE, y AS LONG
+    irx = rx - BrushSize: iry = ry - BrushSize
+    y = INT(cy + .5)
+    FOR row = -INT(ry) TO INT(ry)
+        outer = rx * SQR(1 - (row / ry) ^ 2)
+        IF irx > 0 AND iry > 0 AND ABS(row) < iry THEN
+            inner = irx * SQR(1 - (row / iry) ^ 2)
+            LINE (cx - outer, y + row)-(cx - inner, y + row), c
+            LINE (cx + inner, y + row)-(cx + outer, y + row), c
+        ELSE
+            LINE (cx - outer, y + row)-(cx + outer, y + row), c
+        END IF
     NEXT
 END SUB
 
@@ -696,6 +739,8 @@ SUB SelfTest
     MousePressed 300, 140: MouseReleased 390, 200
     Ink = Swatches(0): Tool = TOOL_RECT: BrushSize = 2
     MousePressed 280, 260: MouseReleased 320, 330         ' door
+    Ink = Swatches(1): Tool = TOOL_RECT: BrushSize = 5
+    MousePressed 235, 225: MouseReleased 270, 260         ' window frame
     Ink = Swatches(1): Opacity = 128: Tool = TOOL_BRUSH: BrushSize = 24
     MousePressed 450, 90: MouseDragged 500, 80: MouseDragged 550, 95: MouseReleased 550, 95
     Opacity = 255: Ink = Swatches(15): Tool = TOOL_SPRAY: BrushSize = 20
