@@ -77,6 +77,10 @@ void set_window_title(const char *title);
  * RESIZE_SCALE_NONE, _STRETCH or _SMOOTH (-1 keeps the current method). */
 enum { RESIZE_SCALE_NONE, RESIZE_SCALE_STRETCH, RESIZE_SCALE_SMOOTH };
 void graphics_set_resize(int allow, int scaling);
+/* _FULLSCREEN modes, numbered as the _FULLSCREEN function returns them. */
+enum { FULLSCREEN_OFF, FULLSCREEN_STRETCH, FULLSCREEN_SQUAREPIXELS };
+void graphics_set_fullscreen(int mode, int smooth);
+int graphics_fullscreen_mode(void);
 int graphics_resize_event(void);
 int graphics_resize_width(void);
 int graphics_resize_height(void);

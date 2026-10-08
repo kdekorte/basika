@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -281,6 +282,28 @@ static const KeywordMap *find_keyword(const char *word) {
     return NULL;
 }
 
+static int noprefix_enabled = 0;
+
+void lexer_set_noprefix(int enabled) { noprefix_enabled = enabled != 0; }
+
+/* QB64 names the interpreter recognizes by their text rather than as
+ * keywords; with $NOPREFIX they may be written without the "_". */
+static const char *find_qb64_name(const char *name) {
+    static const char *const names[] = {
+        "_RGB32", "_RGBA32", "_RGB", "_RGBA", "_RED32", "_GREEN32", "_BLUE32", "_ALPHA32",
+        "_RED", "_GREEN", "_BLUE", "_ALPHA", "_PI", "_WIDTH", "_HEIGHT", "_COPYIMAGE",
+        "_KEYDOWN", "_KEYHIT", "_MOUSEX", "_MOUSEY", "_MOUSEBUTTON", "_MOUSEINPUT", "_MOUSEWHEEL",
+        "_RESIZE", "_RESIZEWIDTH", "_RESIZEHEIGHT", "_ROUND", "_PRINTMODE",
+        "_KEEPBACKGROUND", "_ONLYBACKGROUND", "_FILLBACKGROUND", "_STRETCH", "_SMOOTH",
+        "_SQUAREPIXELS", "_FULLSCREEN", "_EXPLICIT", "_EXPLICITARRAY",
+        "_UNSIGNED", "_BYTE", "_INTEGER64", "_FLOAT",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcasecmp(name, names[i]) == 0) return names[i];
+    }
+    return NULL;
+}
+
 Token get_next_token(const char **input) {
     Token token;
     token.text[0] = '\0';
@@ -514,6 +537,14 @@ Token get_next_token(const char **input) {
     buffer[i] = '\0';
 
     const KeywordMap *res = find_keyword(buffer);
+    const char *qb64_name = NULL;
+    if (!res && noprefix_enabled && i > 0 && i < BASIC_TOKEN_TEXT_MAX - 1 && isalpha((unsigned char)buffer[0])) {
+        char prefixed[BASIC_TOKEN_TEXT_MAX];
+        prefixed[0] = '_';
+        memcpy(prefixed + 1, buffer, (size_t)i + 1);
+        res = find_keyword(prefixed);
+        if (!res) qb64_name = find_qb64_name(prefixed);
+    }
 
     if (res) {
         token.type = res->type;
@@ -522,7 +553,7 @@ Token get_next_token(const char **input) {
         }
     } else {
         token.type = TOKEN_IDENTIFIER;
-        strcpy(token.text, buffer);
+        strcpy(token.text, qb64_name ? qb64_name : buffer);
         if (i > 0 && buffer[i-1] == '#') token.is_double = 1;
     }
 

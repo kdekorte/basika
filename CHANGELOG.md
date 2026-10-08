@@ -4,6 +4,12 @@ All notable changes to this project are recorded in this file.
 
 ## Unreleased
 
+- **$NOPREFIX**: Programs starting with `$NOPREFIX` may write QB64 names without their `_` (`Option Explicit`, `FullScreen SquarePixels`, `RGB32`, `Display`), as in QB64.
+- **_FULLSCREEN**: Added `_FULLSCREEN [{_STRETCH|_SQUAREPIXELS|_OFF}][, _SMOOTH]` and the `_FULLSCREEN` function.
+- **DIM AS type list**: QB64's `DIM [SHARED] AS type name, name...` declares every name with that type (it was a syntax error).
+- **OPTION _EXPLICITARRAY**: Accepted; on its own it requires only arrays to be declared.
+- **SYSTEM code**: `SYSTEM n` exits with status `n`, as in QB64.
+- **Fixes**: `$RESIZE:OFF`, `:STRETCH` and `:SMOOTH` were run as a line label followed by a statement (a syntax error; only `$RESIZE:ON` worked). A fixed-length string (`DIM s AS STRING * 3`) after `DEFLNG` or another `DEFtype` was treated as a number. `CASE IS` no longer counts as an undeclared variable under `OPTION _EXPLICIT`.
 - **_PRINTMODE (behavior change)**: Added QB64's `_PRINTMODE {_FILLBACKGROUND|_KEEPBACKGROUND|_ONLYBACKGROUND}[, handle]` and the `_PRINTMODE` function. As in QB64, `_PRINTSTRING` now fills the box behind its text with the `COLOR` background by default (it always left the background alone); use `_PRINTMODE _KEEPBACKGROUND` to draw text over graphics. `PRINT` follows the same mode, and each image and each new `SCREEN` starts with `_FILLBACKGROUND`. The paint, printstring, resize and graphics showcase demos use `_KEEPBACKGROUND`.
 - **Printstring Demo**: `demo/printstring.bas` is now an animated showcase of `_PRINTSTRING`, `_PRINTWIDTH`, `_LOADFONT` and `_FONT`: an outlined, centered title, a gallery of system fonts (macOS or Linux, with missing ones listed as not installed), plain/bold/italic/underline styles, left/center/right alignment, translucent letters, a rainbow wave, a typewriter line and a scrolling ticker. `--selftest` saves `tests/printstring.png` and exits.
 - **String Constants**: `CONST name = "text"` defines a string constant, usable without a `$` and inside procedures (it printed 0, and using it in a string expression was a syntax error). One `CONST` may define several constants (`CONST a = 1, b$ = "x"`).

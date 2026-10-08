@@ -174,6 +174,7 @@ void list_program() {
 /* clear_program - Free all statements and reset the program storage,
  * implementing the NEW command */
 void clear_program() {
+    lexer_set_noprefix(0);
     index_dirty = 1;
     edit_generation++;
     Statement *curr = head;

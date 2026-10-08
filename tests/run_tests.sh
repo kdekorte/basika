@@ -152,6 +152,7 @@ TESTS=(
   "tests/graphics/color_wrap"
   "tests/graphics/font_handles"
   "tests/graphics/printmode"
+  "tests/graphics/fullscreen"
   "tests/math/qb64_types"
   "tests/math/integer_math"
   "tests/math/restore_label"
@@ -211,6 +212,8 @@ TESTS=(
   "tests/user_types/user_types_type_mismatch"
   "tests/user_types/user_types_long"
   "tests/system/timing"
+  "tests/system/noprefix"
+  "tests/system/explicit_array"
 )
 
 for t in "${TESTS[@]}"; do
@@ -288,7 +291,7 @@ for t in "${TESTS[@]}"; do
        [ "$t" = "tests/graphics/palette_pages" ] || [ "$t" = "tests/graphics/pen_stick" ] ||
        [ "$t" = "tests/graphics/offscreen_images" ] || [ "$t" = "tests/graphics/resize_window" ] ||
        [ "$t" = "tests/graphics/color_wrap" ] || [ "$t" = "tests/graphics/font_handles" ] ||
-       [ "$t" = "tests/graphics/printmode" ]; then
+       [ "$t" = "tests/graphics/printmode" ] || [ "$t" = "tests/graphics/fullscreen" ]; then
     # Headless graphics tests write their assertion result to tests/<name>.result.
     name=$(basename "$t")
     rm -f "tests/$name.result" "tests/$name.png"

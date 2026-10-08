@@ -28,6 +28,9 @@ static SDL_FRect presented_area = {0, 0, 0, 0};
  * program itself last asked for is remembered so that it does not count. */
 static int resize_allowed = 0;
 static int resize_scaling = RESIZE_SCALE_NONE;
+/* _FULLSCREEN: FULLSCREEN_OFF, _STRETCH or _SQUAREPIXELS, and _SMOOTH. */
+static int fullscreen_mode = FULLSCREEN_OFF;
+static int fullscreen_smooth = 0;
 static int resize_pending = 0;
 static int requested_w = -1, requested_h = -1;
 static SDL_Color current_text_color = {255, 255, 255, 255};
@@ -1249,6 +1252,7 @@ int init_graphics() {
         flags |= SDL_WINDOW_HIDDEN;
     }
     if (resize_allowed) flags |= SDL_WINDOW_RESIZABLE;
+    if (fullscreen_mode != FULLSCREEN_OFF) flags |= SDL_WINDOW_FULLSCREEN;
     window = SDL_CreateWindow("BASIKA Virtual Framebuffer", 1024, 768, flags);
         
     if (!window) return 0;
@@ -1335,15 +1339,25 @@ static void render_canvas_to_window(void) {
         dest_h = win_h;
         dest_w = (int)(dest_h * target_aspect + 0.5);
     }
+    if (fullscreen_mode == FULLSCREEN_SQUAREPIXELS) {
+        // The largest whole-number scale that fits, so every pixel is the same size.
+        int base_w = mode_res_w, base_h = (int)(mode_res_w / target_aspect + 0.5);
+        int factor = base_w > 0 && base_h > 0 ? (win_w / base_w < win_h / base_h ? win_w / base_w : win_h / base_h) : 0;
+        if (factor >= 1) {
+            dest_w = base_w * factor;
+            dest_h = base_h * factor;
+        }
+    }
     SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
     presented_area = dst;
     SDL_SetRenderTarget(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
     SDL_Texture *shown = pages[visual_page] ? pages[visual_page] : canvas;
-    if (resize_scaling == RESIZE_SCALE_SMOOTH) SDL_SetTextureScaleMode(shown, SDL_SCALEMODE_LINEAR);
+    int smooth = resize_scaling == RESIZE_SCALE_SMOOTH || (fullscreen_mode != FULLSCREEN_OFF && fullscreen_smooth);
+    if (smooth) SDL_SetTextureScaleMode(shown, SDL_SCALEMODE_LINEAR);
     SDL_RenderTexture(renderer, shown, NULL, &dst);
-    if (resize_scaling == RESIZE_SCALE_SMOOTH) SDL_SetTextureScaleMode(shown, SDL_SCALEMODE_NEAREST);
+    if (smooth) SDL_SetTextureScaleMode(shown, SDL_SCALEMODE_NEAREST);
     SDL_RenderPresent(renderer);
     last_present = SDL_GetTicks();
     SDL_SetRenderTarget(renderer, canvas);
@@ -2127,6 +2141,21 @@ void set_window_title(const char *title) {
     if (!window || !title) return;
     SDL_SetWindowTitle(window, title);
     graphics_present_now();
+}
+
+/* _FULLSCREEN [mode][, _SMOOTH]: fills the monitor (FULLSCREEN_OFF returns
+ * to a window). */
+void graphics_set_fullscreen(int mode, int smooth) {
+    fullscreen_mode = mode;
+    fullscreen_smooth = smooth;
+    if (window) {
+        SDL_SetWindowFullscreen(window, mode != FULLSCREEN_OFF);
+        graphics_present_if_autodisplay();
+    }
+}
+
+int graphics_fullscreen_mode(void) {
+    return fullscreen_mode;
 }
 
 void graphics_set_resize(int allow, int scaling) {

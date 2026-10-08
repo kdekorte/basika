@@ -1806,8 +1806,12 @@ static int is_string_var(const char *name) {
             find_variable_index(string_member) >= 0) return 1;
     }
     if (fixed_string_declarations_present && last != '%' && last != '!' && last != '#' && last != '&') {
+        // A fixed-length string is stored under the name with the letter's
+        // default suffix (S! normally, S& after DEFLNG).
         char normalized[64];
-        snprintf(normalized, sizeof(normalized), "%s!", name);
+        int letter = toupper((unsigned char)name[0]);
+        char default_suffix = letter >= 'A' && letter <= 'Z' ? default_type_map[letter - 'A'] : '!';
+        snprintf(normalized, sizeof(normalized), "%s%c", name, default_suffix ? default_suffix : '!');
         for (int i = 0; normalized[i]; i++) normalized[i] = (char)toupper((unsigned char)normalized[i]);
         int idx = find_variable_index(normalized);
         if (idx >= 0 && vars[idx].string_declared) {
@@ -3560,6 +3564,7 @@ static inline __attribute__((always_inline)) int for_loop_next(ForLoop *loop) {
 }
 
 static int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat);
+static int apply_resize_metacommand(const char *text, int check_only);
 
 /* After skipping a loop that runs zero times to its NEXT (stmt, *pos): when
  * that NEXT names more loops (NEXT j, i), steps them. Returns 1 with *repeat
@@ -7072,6 +7077,16 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 t = current_token;
                 /* fall through */
             case TOKEN_IDENTIFIER: {
+                // A metacommand ($RESIZE:ON, $NOPREFIX) takes the whole line and was
+                // applied before the program ran; it is not a "$RESIZE:" label.
+                if (t->text[0] == '$') {
+                    if (strcasecmp(t->text, "$RESIZE") == 0 && !apply_resize_metacommand(t->start_ptr, 1)) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    ts.pos = exec_stmt->token_count;
+                    continue;
+                }
                 // "Name:" is a line label only at the start of a line; after THEN or
                 // another statement it calls SUB Name.
                 if (current_token == ts.tokens && ts.tokens[ts.pos].type == TOKEN_COLON) {
@@ -7488,7 +7503,8 @@ enum {
     QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT,
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
     QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
-    QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE
+    QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE,
+    QB64_FN_FULLSCREEN
 };
 
 static int qb64_function_id(const char *name) {
@@ -7506,7 +7522,7 @@ static int qb64_function_id(const char *name) {
         {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
         {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
         {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT}, {"_ROUND", QB64_FN_ROUND},
-        {"_PRINTMODE", QB64_FN_PRINTMODE},
+        {"_PRINTMODE", QB64_FN_PRINTMODE}, {"_FULLSCREEN", QB64_FN_FULLSCREEN},
     };
     if (name[0] != '_') return QB64_FN_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -7617,6 +7633,9 @@ static double qb64_function_value(int id, const double *args, int argc) {
             if (!mode) break;
             return mode;
         }
+        case QB64_FN_FULLSCREEN:
+            // _FULLSCREEN: 0 off, 1 _STRETCH, 2 _SQUAREPIXELS.
+            return graphics_fullscreen_mode();
         case QB64_FN_ROUND:
             // _ROUND(x): the nearest whole number, halves to even, like CINT
             // but for any size.
@@ -9408,6 +9427,44 @@ static void define_string_constant(const char *name, const char **ptr) {
     if (!scope) share_with_procedures(vars[idx].name, name);
 }
 
+/* The type after AS in DIM: a TYPE, a primitive type (with _UNSIGNED), or
+ * STRING * length. Returns 0 after reporting a syntax error. */
+static int parse_dim_type(const char **ptr, UserType **user_type, const char **suffix, int *fixed_length) {
+    *user_type = NULL;
+    *suffix = NULL;
+    *fixed_length = -1;
+    Token type = get_next_token(ptr);
+    *user_type = find_user_type(type.text);
+    if (*user_type) return 1;
+    const char *type_name = type.text;
+    const char *unsigned_saved = *ptr;
+    if (strcasecmp(type_name, "_UNSIGNED") == 0) {
+        Token width = get_next_token(ptr);
+        if (unsigned_type_name(type_name, width.text)) type_name = unsigned_type_name(type_name, width.text);
+        else *ptr = unsigned_saved;
+    }
+    *suffix = primitive_type_suffix(type_name);
+    if (!*suffix) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return 0;
+    }
+    if ((*suffix)[0] == '$') {
+        const char *star_saved = *ptr;
+        if (get_next_token(ptr).type == TOKEN_STAR) {
+            Token length_token = get_next_token(ptr);
+            if (length_token.type != TOKEN_NUMBER || length_token.int_val < 0) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return 0;
+            }
+            *fixed_length = length_token.int_val;
+            *suffix = NULL; /* fixed-length strings keep their own storage */
+        } else {
+            *ptr = star_saved;
+        }
+    }
+    return 1;
+}
+
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num) {
     const char *ptr = *ptr_addr;
     Token t = get_next_token(&ptr);
@@ -9418,6 +9475,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
     }
 
     if (is_direct) {
+        // $NOPREFIX applies to the program lines after it as they are read.
+        if (last_line_num && t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "$NOPREFIX") == 0) {
+            lexer_set_noprefix(1);
+        }
         if (t.type == TOKEN_NUMBER) {
             if (last_line_num) *last_line_num = t.int_val;
             // Typing a line number alone deletes that line, as in BASICA.
@@ -9739,6 +9800,37 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_FULLSCREEN") == 0) {
+            // _FULLSCREEN [{_STRETCH|_SQUAREPIXELS|_OFF}][, _SMOOTH]
+            int mode = FULLSCREEN_STRETCH, smooth = 0;
+            const char *saved = ptr;
+            Token option = get_next_token(&ptr);
+            if (option.type == TOKEN_OFF || (option.type == TOKEN_IDENTIFIER && strcasecmp(option.text, "_OFF") == 0)) {
+                mode = FULLSCREEN_OFF;
+            } else if (option.type == TOKEN_IDENTIFIER && strcasecmp(option.text, "_STRETCH") == 0) {
+                mode = FULLSCREEN_STRETCH;
+            } else if (option.type == TOKEN_IDENTIFIER && strcasecmp(option.text, "_SQUAREPIXELS") == 0) {
+                mode = FULLSCREEN_SQUAREPIXELS;
+            } else {
+                ptr = saved;
+            }
+            saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_COMMA) {
+                Token smoothing = get_next_token(&ptr);
+                if (smoothing.type != TOKEN_IDENTIFIER || strcasecmp(smoothing.text, "_SMOOTH") != 0) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                smooth = 1;
+            } else {
+                ptr = saved;
+            }
+            if (!graphics_statement_end(&ptr)) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            if (!graphics_is_active()) init_graphics();
+            graphics_set_fullscreen(mode, smooth);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_PRINTMODE") == 0) {
             // _PRINTMODE {_KEEPBACKGROUND|_ONLYBACKGROUND|_FILLBACKGROUND}[, handle]
             Token mode_tok = get_next_token(&ptr);
@@ -10133,9 +10225,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 ptr = saved_comma;
             }
         } else if (t.type == TOKEN_SYSTEM || t.type == TOKEN_QUIT) {
-            // Ends the program and the interpreter, without waiting for a key.
+            // SYSTEM [code]: ends the program and the interpreter, without waiting
+            // for a key; QB64's optional code is the process's exit status.
+            int code = 0;
+            if (!graphics_statement_end(&ptr)) code = evaluate_int_text(&ptr);
             fflush(NULL);
-            exit(0);
+            exit(code & 0xFF);
         } else if (t.type == TOKEN_REM || t.type == TOKEN_APOSTROPHE) { // APOSTROPHE is also a comment
             while (*ptr) ptr++;
         } else if (t.type == TOKEN_SWAP) {
@@ -10702,7 +10797,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
         } else if (t.type == TOKEN_OPTION) {
             Token base = get_next_token(&ptr);
-            if (base.type == TOKEN_IDENTIFIER && strcasecmp(base.text, "_EXPLICIT") == 0) {
+            if (base.type == TOKEN_IDENTIFIER && (strcasecmp(base.text, "_EXPLICIT") == 0 ||
+                                                  strcasecmp(base.text, "_EXPLICITARRAY") == 0)) {
                 // Checked for the whole program before it runs (check_explicit_declarations).
             } else if (base.type != TOKEN_BASE) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
@@ -10730,6 +10826,19 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             else ptr = shared_saved;
             const ProcedureDef *dim_scope = current_declaration_scope();
             if (dim_scope) dim_shared = 0; /* DIM SHARED is only meaningful at module level */
+            // QB64's DIM [SHARED] AS type name, name...: one type for every name.
+            UserType *lead_user_type = NULL;
+            const char *lead_suffix = NULL;
+            int lead_fixed_length = -1;
+            const char *as_saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_AS) {
+                if (!parse_dim_type(&ptr, &lead_user_type, &lead_suffix, &lead_fixed_length)) {
+                    *ptr_addr = ptr;
+                    return;
+                }
+            } else {
+                ptr = as_saved;
+            }
             while (1) {
                 Token var = get_next_token(&ptr);
                 if (var.type != TOKEN_IDENTIFIER) break;
@@ -10766,41 +10875,12 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     ptr = saved;
                 }
 
-                UserType *user_type = NULL;
-                const char *suffix = NULL;
-                int fixed_length = -1;
+                UserType *user_type = lead_user_type;
+                const char *suffix = lead_suffix;
+                int fixed_length = lead_fixed_length;
                 saved = ptr;
                 if (get_next_token(&ptr).type == TOKEN_AS) {
-                    Token type = get_next_token(&ptr);
-                    user_type = find_user_type(type.text);
-                    if (!user_type) {
-                        const char *type_name = type.text;
-                        const char *unsigned_saved = ptr;
-                        if (strcasecmp(type_name, "_UNSIGNED") == 0) {
-                            Token width = get_next_token(&ptr);
-                            if (unsigned_type_name(type_name, width.text)) type_name = unsigned_type_name(type_name, width.text);
-                            else ptr = unsigned_saved;
-                        }
-                        suffix = primitive_type_suffix(type_name);
-                        if (!suffix) {
-                            report_runtime_error(ERR_SYNTAX_ERROR);
-                            break;
-                        }
-                        if (suffix[0] == '$') {
-                            const char *star_saved = ptr;
-                            if (get_next_token(&ptr).type == TOKEN_STAR) {
-                                Token length_token = get_next_token(&ptr);
-                                if (length_token.type != TOKEN_NUMBER || length_token.int_val < 0) {
-                                    report_runtime_error(ERR_SYNTAX_ERROR);
-                                    break;
-                                }
-                                fixed_length = length_token.int_val;
-                                suffix = NULL; /* fixed-length strings keep their own storage */
-                            } else {
-                                ptr = star_saved;
-                            }
-                        }
-                    }
+                    if (!parse_dim_type(&ptr, &user_type, &suffix, &fixed_length)) break;
                 } else {
                     ptr = saved;
                 }
@@ -11792,7 +11872,7 @@ static int explicit_is_declared(const char *name, int scope) {
 
 /* Names that are not variables: built-ins Basika reads as identifiers. */
 static int explicit_is_builtin_name(const char *name, TokenType statement) {
-    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT"};
+    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT", "IS"};
     for (size_t i = 0; i < sizeof(always) / sizeof(always[0]); i++) {
         if (strcasecmp(name, always[i]) == 0) return 1;
     }
@@ -11836,6 +11916,13 @@ static void explicit_scan_declarations(const Statement *stmt, int start, int end
         i++;
     }
     if (first->type == TOKEN_CONST && scope == 0) everywhere = 1;
+    // QB64's DIM AS type name, name...: skip the leading type.
+    if (i < end && stmt->tokens[i].type == TOKEN_AS) {
+        i++;
+        if (i < end && stmt->tokens[i].type == TOKEN_IDENTIFIER && strcasecmp(stmt->tokens[i].text, "_UNSIGNED") == 0) i++;
+        if (i < end) i++; // the type name
+        if (i + 1 < end && stmt->tokens[i].type == TOKEN_STAR) i += 2; // STRING * length
+    }
     int item_start = 1, depth = 0, in_type = 0;
     for (; i < end; i++) {
         const Token *token = &stmt->tokens[i];
@@ -11866,7 +11953,7 @@ static void explicit_scan_declarations(const Statement *stmt, int start, int end
 
 /* Returns 0 (with the error reported at its line) if a variable is used
  * that was never declared. */
-static int check_explicit_declarations(void) {
+static int check_explicit_declarations(int arrays_only) {
     explicit_name_count = 0;
     // Pass 1: every declaration, by scope.
     int scope = 0;
@@ -11942,6 +12029,7 @@ static int check_explicit_declarations(void) {
                 if (token->type == TOKEN_AS) { after_as = 1; continue; }
                 if (token->type == TOKEN_COMMA) after_as = 0;
                 if (token->type != TOKEN_IDENTIFIER || after_as) continue;
+                if (arrays_only && (i + 1 >= end || stmt->tokens[i + 1].type != TOKEN_LPAREN)) continue;
                 const char *name = token->text;
                 // A label where the line starts ("Name:"), or one named by GOTO and the like.
                 if (i == 0 && stmt->label[0]) continue;
@@ -11965,14 +12053,18 @@ static int check_explicit_declarations(void) {
     return 1;
 }
 
-static int program_has_option_explicit(void) {
+/* OPTION _EXPLICIT checks every variable; OPTION _EXPLICITARRAY alone
+ * checks only arrays. Returns 2, 1, or 0 when neither is used. */
+static int program_explicit_option(void) {
+    int option = 0;
     for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
         if (stmt->token_count > 1 && stmt->tokens[0].type == TOKEN_OPTION &&
-            stmt->tokens[1].type == TOKEN_IDENTIFIER && strcasecmp(stmt->tokens[1].text, "_EXPLICIT") == 0) {
-            return 1;
+            stmt->tokens[1].type == TOKEN_IDENTIFIER) {
+            if (strcasecmp(stmt->tokens[1].text, "_EXPLICIT") == 0) return 2;
+            if (strcasecmp(stmt->tokens[1].text, "_EXPLICITARRAY") == 0) option = 1;
         }
     }
-    return 0;
+    return option;
 }
 
 static void run_program_from(Statement *start);
@@ -11997,7 +12089,8 @@ static void run_program_from(Statement *start) {
     frames_being_built = 0;
     scan_procedures();
     scanned_generation = program_edit_generation();
-    if (program_has_option_explicit() && !check_explicit_declarations()) return;
+    int explicit_option = program_explicit_option();
+    if (explicit_option && !check_explicit_declarations(explicit_option == 1)) return;
     // $RESIZE is a metacommand: it applies wherever it appears in the program.
     int resize_set = 0;
     for (Statement *s = get_head(); s; s = s->next) {
@@ -12857,6 +12950,16 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 t = current_token;
                 /* fall through */
             case TOKEN_IDENTIFIER: {
+                // A metacommand ($RESIZE:ON, $NOPREFIX) takes the whole line and was
+                // applied before the program ran; it is not a "$RESIZE:" label.
+                if (t->text[0] == '$') {
+                    if (strcasecmp(t->text, "$RESIZE") == 0 && !apply_resize_metacommand(t->start_ptr, 1)) {
+                        report_runtime_error(ERR_SYNTAX_ERROR);
+                        break;
+                    }
+                    ts.pos = exec_stmt->token_count;
+                    continue;
+                }
                 // "Name:" is a line label only at the start of a line; after THEN or
                 // another statement it calls SUB Name.
                 if (current_token == ts.tokens && ts.tokens[ts.pos].type == TOKEN_COLON) {
