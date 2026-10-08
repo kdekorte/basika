@@ -25,7 +25,7 @@ This document lists the runtime error codes supported by Basika. These codes can
 | 50 | FIELD overflow | (Placeholder) A `FIELD` statement exceeded record length. |
 | 51 | Internal error | An internal error occurred in the interpreter. |
 | 52 | Bad file number | An invalid or unopened file number was referenced. |
-| 53 | File not found | The specified file does not exist. Image and font loading failures return handle `0`; callers should handle that result before drawing or selecting the resource. |
+| 53 | File not found | The specified file does not exist. `_LOADIMAGE` and `_LOADFONT` do not raise it: they return handle `-1`, which callers should check before drawing or selecting the resource. |
 | 54 | Bad file mode | An illegal operation for the current file mode was attempted. |
 | 55 | File already open | `OPEN` was called for a file number that is already in use. |
 | 57 | Device I/O error | An error occurred during hardware input or output. |
@@ -42,3 +42,4 @@ This document lists the runtime error codes supported by Basika. These codes can
 | 76 | Path not found | The specified directory path does not exist. |
 | 90 | DO without LOOP | A `DO` loop was started but no matching `LOOP` was found. |
 | 91 | LOOP without DO | A `LOOP` statement was encountered without a matching `DO`. |
+| 92 | Variable not defined | Basika-specific: under `OPTION _EXPLICIT`, a variable is used that was never declared. Reported before the program runs, with the variable's name. |

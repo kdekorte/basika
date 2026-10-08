@@ -37,7 +37,7 @@ void handle_sigint(int sig) {
  * header and "Ok" prompt, reads lines from either the graphics window or
  * stdin, and feeds each line to the interpreter */
 void repl() {
-    char buffer[256];
+    char buffer[BASIC_LINE_MAX];
     int active = graphics_is_active();
     char header[128];
     snprintf(header, sizeof(header), "IBM BASIKA Clone (DOS 2.1) v%s\nREADY.\n", BASIKA_VERSION);
@@ -64,7 +64,7 @@ void repl() {
             if (edit[0]) printf("%s\n", edit);
             if (auto_line >= 0) printf("%s", prefix);
             fflush(stdout);
-            char typed[256];
+            char typed[BASIC_LINE_MAX];
             if (!fgets(typed, sizeof(typed), stdin)) break;
             typed[strcspn(typed, "\n")] = 0;
             snprintf(buffer, sizeof(buffer), "%s%s", auto_line >= 0 ? prefix : "", typed);
@@ -97,13 +97,14 @@ void run_file(const char *filename) {
         perror("Error opening file");
         return;
     }
-    char buffer[256];
+    char buffer[BASIC_LINE_MAX];
     int first_line = 1;
     int last_line_num = 0;
-    int source_line_number = 0;
-    while (fgets(buffer, sizeof(buffer), f)) {
-        source_line_number++;
-        buffer[strcspn(buffer, "\n")] = 0;
+    int physical_line = 0;
+    while (1) {
+        // Errors name the first file line of a line continued with " _".
+        int source_line_number = physical_line + 1;
+        if (!read_program_line(f, buffer, sizeof(buffer), &physical_line)) break;
         // Skip shebang line so .bas files can be marked executable
         if (first_line) {
             first_line = 0;

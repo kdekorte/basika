@@ -74,8 +74,8 @@ void add_line(int line_num, const char *text, int source_line_number, int has_ex
         free_statement_expressions(*curr);
         free((*curr)->tokens);
         (*curr)->tokens = NULL;
-        strncpy((*curr)->raw_command, text, 255);
-        (*curr)->raw_command[255] = '\0';
+        strncpy((*curr)->raw_command, text, BASIC_LINE_MAX - 1);
+        (*curr)->raw_command[BASIC_LINE_MAX - 1] = '\0';
         (*curr)->source_line_number = source_line_number;
         (*curr)->has_explicit_line_number = has_explicit_line_number;
         tokenize_line(*curr);
@@ -87,8 +87,8 @@ void add_line(int line_num, const char *text, int source_line_number, int has_ex
         new_stmt->line_number = line_num;
         new_stmt->source_line_number = source_line_number;
         new_stmt->has_explicit_line_number = has_explicit_line_number;
-        strncpy(new_stmt->raw_command, text, 255);
-        new_stmt->raw_command[255] = '\0';
+        strncpy(new_stmt->raw_command, text, BASIC_LINE_MAX - 1);
+        new_stmt->raw_command[BASIC_LINE_MAX - 1] = '\0';
         new_stmt->next = *curr;
         *curr = new_stmt;
         tokenize_line(new_stmt);
@@ -158,7 +158,7 @@ void list_program_range(int first_line, int last_line) {
         if (curr->line_number >= first_line && curr->line_number <= last_line) {
             const char *text = curr->raw_command;
             if (*text == ' ') text++; // stored text keeps the space after the number
-            char out_buf[256 + 16]; // Enough for line number + command + newline
+            char out_buf[BASIC_LINE_MAX + 16]; // Enough for line number + command + newline
             snprintf(out_buf, sizeof(out_buf), "%d %s\n", curr->line_number, text);
             basic_output(out_buf);
         }

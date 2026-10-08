@@ -1,0 +1,9 @@
+CVS(MKS$(25)) = 25 
+via var: 25 
+no NUL, MID$: 25 
+LEN: 6  MID$ len: 4  CVS(MID$): 25 
+MID$ into var: 4   25 
+bytes: 5  0  0  0  200  65 
+CVI(a$) = 5  CVI(MID$(a$,1)) = 5 
+ 3   4   1   0   0 
+ 3   2   3   0   12.5 

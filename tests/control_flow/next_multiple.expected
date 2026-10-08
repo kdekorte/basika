@@ -1,0 +1,6 @@
+ 1   1  1   2  2   1  2   2 | done
+same line after NEXT: 1  2  3  after
+skip inner, a = 3 
+skip outer, a = 3 
+bare NEXTs 3   3 
+ 11  12  21  22 | sub skip ok

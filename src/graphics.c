@@ -68,6 +68,10 @@ static void reset_draw_colors(int mode);
 static void restore_default_palette(void);
 static void reset_dest_to_screen(void);
 
+/* _PRINTMODE of the current image: how PRINT and _PRINTSTRING treat the
+ * background behind text. */
+static int print_mode = PRINTMODE_FILL;
+
 static int view_active = 0;
 static int view_screen = 0;
 static int view_x1 = 0, view_y1 = 0, view_x2 = -1, view_y2 = -1;
@@ -303,6 +307,7 @@ int graphics_copy_page(int source, int destination) {
 void set_screen_mode(int mode) {
     reset_dest_to_screen();
     current_screen_mode = mode;
+    print_mode = PRINTMODE_FILL; // a new screen starts with _FILLBACKGROUND, as in QB64
     switch(mode) {
         case 1:  mode_res_w = 320; mode_res_h = 200; break;
         case 2:  mode_res_w = 640; mode_res_h = 200; break;
@@ -358,6 +363,7 @@ void set_screen_mode(int mode) {
 void set_screen_newimage(int width, int height, int colors) {
     if (width <= 0 || height <= 0) return;
     reset_dest_to_screen();
+    print_mode = PRINTMODE_FILL;
     color_mode_32 = (colors == 32);
     palette_mode_256 = !color_mode_32;
     current_screen_mode = -1;
@@ -556,15 +562,32 @@ static int map_key_to_trap_index(SDL_Keycode key) {
     return 0;
 }
 
-static void clear_text_cell(int x, int y) {
-    if (!renderer || !canvas) return;
+/* Fills the box behind text with the COLOR background, unless _PRINTMODE
+ * is _KEEPBACKGROUND. A 32-bit background blends by its alpha. */
+static void fill_text_background(float x, float y, float w, float h) {
+    if (!renderer || !canvas || print_mode == PRINTMODE_KEEP) return;
     SDL_Color background = get_graphics_color(bg_color);
     SDL_SetRenderTarget(renderer, canvas);
+    if (color_mode_32) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, background.a);
+    } else {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, 255);
+    }
+    SDL_FRect box = {x, y, w, h};
+    SDL_RenderFillRect(renderer, &box);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-    SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, 255);
-    SDL_FRect cell = {(float)x, (float)y, (float)current_col_width, (float)current_row_height};
-    SDL_RenderFillRect(renderer, &cell);
 }
+
+static void clear_text_cell(int x, int y) {
+    fill_text_background((float)x, (float)y, (float)current_col_width, (float)current_row_height);
+}
+
+static void graphics_set_printmode(int mode) {
+    if (mode >= PRINTMODE_KEEP && mode <= PRINTMODE_FILL) print_mode = mode;
+}
+
 
 void graphics_print(const char *text) {
     if (!font || !canvas || !text) return;
@@ -592,7 +615,9 @@ void graphics_print(const char *text) {
             clear_text_cell(cursor_x, cursor_y);
             unsigned char c = (unsigned char)*text;
             SDL_Texture **cache = get_active_glyph_cache();
-            if (c < 128 && cache[c]) {
+            if (print_mode == PRINTMODE_ONLY) {
+                text += c < 128 ? 1 : utf8_char_len(c);
+            } else if (c < 128 && cache[c]) {
                 SDL_SetTextureColorMod(cache[c], current_text_color.r, current_text_color.g, current_text_color.b);
                 SDL_FRect dest = {(float)cursor_x, (float)cursor_y, (float)current_col_width, (float)current_row_height};
                 SDL_RenderTexture(renderer, cache[c], NULL, &dest);
@@ -630,7 +655,8 @@ void graphics_printstring(int px, int py, const char *text) {
 
     SDL_Surface* surf = TTF_RenderText_Blended(font, text, 0, current_text_color);
     if (surf) {
-        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+        fill_text_background((float)px, (float)py, (float)surf->w, (float)surf->h);
+        SDL_Texture* tex = print_mode == PRINTMODE_ONLY ? NULL : SDL_CreateTextureFromSurface(renderer, surf);
         if (tex) {
             SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
             SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
@@ -672,6 +698,7 @@ typedef struct {
     int view_active, view_screen, view_x1, view_y1, view_x2, view_y2;
     int window_active, window_screen;
     double win_x1, win_y1, win_x2, win_y2;
+    int print_mode;
 } DrawState;
 
 typedef struct {
@@ -690,7 +717,7 @@ static void save_draw_state(DrawState *s) {
                      fg_color, bg_color, current_text_color, gfx_cursor_x, gfx_cursor_y,
                      cursor_x, cursor_y, text_columns, text_rows, current_col_width, current_row_height,
                      view_active, view_screen, view_x1, view_y1, view_x2, view_y2,
-                     window_active, window_screen, win_x1, win_y1, win_x2, win_y2};
+                     window_active, window_screen, win_x1, win_y1, win_x2, win_y2, print_mode};
 }
 
 static void load_draw_state(const DrawState *s) {
@@ -707,6 +734,7 @@ static void load_draw_state(const DrawState *s) {
     view_x1 = s->view_x1; view_y1 = s->view_y1; view_x2 = s->view_x2; view_y2 = s->view_y2;
     window_active = s->window_active; window_screen = s->window_screen;
     win_x1 = s->win_x1; win_y1 = s->win_y1; win_x2 = s->win_x2; win_y2 = s->win_y2;
+    print_mode = s->print_mode;
 }
 
 static ImageSlot *image_for_handle(int handle) {
@@ -721,6 +749,21 @@ static DrawState *state_for_handle(int handle) {
     ImageSlot *image = image_for_handle(handle);
     return image ? &image->state : NULL;
 }
+
+/* _PRINTMODE [, handle]: sets or reads the mode of an image (0 = screen).
+ * Returns 0 for an invalid handle. */
+int graphics_printmode_for(int handle, int mode) {
+    if (handle == dest_handle) {
+        if (mode) graphics_set_printmode(mode);
+        return print_mode;
+    }
+    DrawState *state = state_for_handle(handle);
+    if (!state) return 0;
+    if (mode) state->print_mode = mode;
+    return state->print_mode;
+}
+
+int graphics_get_dest_handle(void) { return dest_handle; }
 
 /* Makes handle the current canvas, saving the previous one's state. */
 static int switch_canvas(int handle) {
@@ -818,6 +861,7 @@ static int create_image(int width, int height, int mode, SDL_Texture *contents, 
     st->screen_mode = (mode == 32 || mode == 256) ? -1 : mode;
     st->fg_color = mode == 32 ? 0xFFFFFFFFu : 15;
     st->bg_color = mode == 32 ? 0xFF000000u : 0;
+    st->print_mode = PRINTMODE_FILL;
     st->gfx_cursor_x = width / 2;
     st->gfx_cursor_y = height / 2;
     st->cursor_x = st->cursor_y = 0;
@@ -1016,8 +1060,18 @@ static void build_slot_glyph_cache(FontSlot *slot) {
     }
 }
 
-int graphics_loadfont(const char *filename, int size) {
-    if (!filename || size <= 0) return 0;
+/* Font handles follow QB64: loaded fonts are FONT_HANDLE_BASE and up, -1 is
+ * a failed _LOADFONT, and QB64's built-in font handles (8, 9, 14, 15, 16 and
+ * 17) as well as 0 all mean the default font. */
+#define FONT_HANDLE_BASE 32
+#define DEFAULT_FONT_HANDLE 16
+
+static int is_default_font_handle(int handle) {
+    return handle == 0 || handle == 8 || handle == 9 || (handle >= 14 && handle <= 17);
+}
+
+int graphics_loadfont(const char *filename, int size, int style) {
+    if (!filename || size <= 0) return -1;
     TTF_Init();
 
     /* Find a free slot (slots 0..MAX_FONT_SLOTS-1) */
@@ -1025,7 +1079,7 @@ int graphics_loadfont(const char *filename, int size) {
     for (int i = 0; i < MAX_FONT_SLOTS; i++) {
         if (!font_slots[i].in_use) { slot_idx = i; break; }
     }
-    if (slot_idx < 0) return 0;  /* no free slots */
+    if (slot_idx < 0) return -1;  /* no free slots */
 
     TTF_Font *loaded = TTF_OpenFont(filename, (float)size);
     const char *search_prefixes[] = {
@@ -1055,10 +1109,12 @@ int graphics_loadfont(const char *filename, int size) {
             if (loaded) break;
         }
     }
-    if (!loaded) {
-        fprintf(stderr, "_LOADFONT error: Could not open font '%s': %s\n", filename, SDL_GetError());
-        return 0;
-    }
+    if (!loaded) return -1;
+    int ttf_style = TTF_STYLE_NORMAL;
+    if (style & FONT_STYLE_BOLD) ttf_style |= TTF_STYLE_BOLD;
+    if (style & FONT_STYLE_ITALIC) ttf_style |= TTF_STYLE_ITALIC;
+    if (style & FONT_STYLE_UNDERLINE) ttf_style |= TTF_STYLE_UNDERLINE;
+    TTF_SetFontStyle(loaded, ttf_style);
 
     FontSlot *slot = &font_slots[slot_idx];
     slot->font = loaded;
@@ -1080,16 +1136,19 @@ int graphics_loadfont(const char *filename, int size) {
 
     if (renderer) build_slot_glyph_cache(slot);
 
-    /* Handle is slot_idx + 1 (handles are 1-based; 0 means error) */
-    return slot_idx + 1;
+    return FONT_HANDLE_BASE + slot_idx;
+}
+
+/* _FONT as a function: the handle of the font in use. */
+int graphics_current_font(void) {
+    return active_font_slot >= 0 ? FONT_HANDLE_BASE + active_font_slot : DEFAULT_FONT_HANDLE;
 }
 
 static TTF_Font *default_font = NULL;
 
 int graphics_setfont(int handle) {
-    if (handle <= 0 || handle > MAX_FONT_SLOTS) {
-        /* Handle 0 or negative: revert to the default built-in font */
-        if (handle == 0) {
+    if (handle < FONT_HANDLE_BASE || handle >= FONT_HANDLE_BASE + MAX_FONT_SLOTS) {
+        if (is_default_font_handle(handle)) {
             active_font_slot = -1;
             if (default_font) font = default_font;
             /* Restore default font metrics */
@@ -1108,7 +1167,7 @@ int graphics_setfont(int handle) {
         return 0;
     }
 
-    int slot_idx = handle - 1;
+    int slot_idx = handle - FONT_HANDLE_BASE;
     if (!font_slots[slot_idx].in_use) return 0;
 
     FontSlot *slot = &font_slots[slot_idx];
@@ -1130,8 +1189,8 @@ int graphics_setfont(int handle) {
 }
 
 int graphics_freefont(int handle) {
-    if (handle <= 0 || handle > MAX_FONT_SLOTS) return 0;
-    int slot_idx = handle - 1;
+    if (handle < FONT_HANDLE_BASE || handle >= FONT_HANDLE_BASE + MAX_FONT_SLOTS) return 0;
+    int slot_idx = handle - FONT_HANDLE_BASE;
     if (!font_slots[slot_idx].in_use) return 0;
 
     /* Cannot free the currently active font */
@@ -1370,13 +1429,22 @@ static void init_palette256(void) {
     palette_initialized = 1;
 }
 
+/* The highest color number of the current palette mode. As on the VGA, a
+ * color number keeps only these low bits (in SCREEN 12, -4 is color 12). */
+static unsigned int mode_color_mask(void) {
+    if (palette_mode_256) return 255;
+    if (current_screen_mode == 1) return 3;
+    if (current_screen_mode == 2) return 1;
+    return 15;
+}
+
 static SDL_Color get_graphics_color(unsigned int color_value) {
     if (color_mode_32) {
         return (SDL_Color){(Uint8)((color_value >> 16) & 0xFF), (Uint8)((color_value >> 8) & 0xFF),
                            (Uint8)(color_value & 0xFF), (Uint8)((color_value >> 24) & 0xFF)};
     }
     if (!palette_initialized) init_palette256();
-    return palette256[color_value & 0xFF];
+    return palette256[color_value & mode_color_mask()];
 }
 
 /* Color for a PALETTE value in the current mode: VGA modes (12, 13 and
@@ -1681,7 +1749,7 @@ double get_pixel(double user_x, double user_y) {
     if (!palette_initialized) init_palette256();
     int closest = 0;
     int closest_distance = 3 * 255 * 255 + 1;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i <= (int)mode_color_mask(); i++) {
         SDL_Color c = palette256[i];
         int dr = (int)c.r - r;
         int dg = (int)c.g - g;

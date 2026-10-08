@@ -160,6 +160,7 @@ SUB SetScreenSize (w AS INTEGER, h AS INTEGER)
     IF h < MIN_H THEN h = MIN_H
     ScreenW = w: ScreenH = h
     SCREEN _NEWIMAGE(ScreenW, ScreenH, 32)
+    _PRINTMODE _KEEPBACKGROUND ' labels are drawn over the window chrome
     AreaW = ScreenW - CANVAS_X - MARGIN_RIGHT
     AreaH = ScreenH - CANVAS_Y - PANEL_H
     IF Picture THEN GrowPicture: UpdateScrollBars

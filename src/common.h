@@ -4,6 +4,8 @@
 #define BASIKA_VERSION "0.99.6"
 #define BASIC_STRING_MAX (64 * 1024) // Legacy temporary-buffer limit; runtime strings grow dynamically.
 #define BASIC_TOKEN_TEXT_MAX 256
+/* Longest program line, after joining " _" continuation lines. */
+#define BASIC_LINE_MAX 1024
 
 typedef enum {
     TOKEN_NUMBER, TOKEN_STRING, TOKEN_IDENTIFIER,
@@ -116,7 +118,7 @@ typedef struct Statement {
     int source_line_number;
     int has_explicit_line_number;
     char label[64];
-    char raw_command[256];
+    char raw_command[BASIC_LINE_MAX];
     Token *tokens;
     int token_count;
     CompiledExpression **compiled_expressions;
@@ -182,6 +184,7 @@ typedef enum {
     ERR_WEND_WITHOUT_WHILE = 30,
     ERR_DO_WITHOUT_LOOP = 90,
     ERR_LOOP_WITHOUT_DO = 91,
+    ERR_VARIABLE_NOT_DEFINED = 92, /* OPTION _EXPLICIT */
     ERR_FIELD_OVERFLOW = 50,
     ERR_INTERNAL_ERROR = 51,
     ERR_BAD_FILE_NUMBER = 52,

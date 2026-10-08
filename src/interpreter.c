@@ -830,10 +830,11 @@ static Statement* skip_to_matching_token(Statement *start_stmt, int start_ts_pos
     return NULL; // Matching end token not found
 }
 
-// Helper to skip tokens until a matching NEXT token for a specific FOR variable is found
-// Returns the statement *after* the NEXT token, and the token position within that statement.
-// If not found, returns NULL for statement.
-static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int for_var_idx, int *out_ts_pos) {
+// Skips a FOR loop's body to the NEXT that closes it. Each name in a NEXT
+// closes one loop (NEXT j, i closes two), and a NEXT without one closes one.
+// Returns the statement and token position just after the closing name, which
+// may be a comma before further names, or NULL if there is no such NEXT.
+static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int *out_ts_pos) {
     Statement *current_stmt = start_stmt;
     int current_ts_pos = start_ts_pos;
     int nest_depth = 1;
@@ -845,10 +846,13 @@ static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int fo
                 nest_depth++;
             } else if (t.type == TOKEN_NEXT) {
                 if (current_ts_pos < current_stmt->token_count && current_stmt->tokens[current_ts_pos].type == TOKEN_IDENTIFIER) {
-                    int next_var_idx = resolve_token_variable(&current_stmt->tokens[current_ts_pos]);
-                    if (next_var_idx == for_var_idx) {
+                    while (1) {
                         nest_depth--;
-                        current_ts_pos++; // Consume the variable name
+                        current_ts_pos++; // the name
+                        if (nest_depth == 0 || current_ts_pos + 1 >= current_stmt->token_count ||
+                            current_stmt->tokens[current_ts_pos].type != TOKEN_COMMA ||
+                            current_stmt->tokens[current_ts_pos + 1].type != TOKEN_IDENTIFIER) break;
+                        current_ts_pos++; // the comma
                     }
                 } else {
                     nest_depth--; // NEXT without variable matches innermost FOR
@@ -894,6 +898,16 @@ static Statement* skip_do_block(Statement *start_stmt, int start_ts_pos, int *ou
             if (t.type == TOKEN_DO) nest_depth++;
             else if (t.type == TOKEN_LOOP) nest_depth--;
             if (nest_depth == 0) {
+                // Skip a LOOP WHILE / LOOP UNTIL condition: execution resumes
+                // after the whole LOOP statement.
+                if (current_ts_pos < current_stmt->token_count &&
+                    (current_stmt->tokens[current_ts_pos].type == TOKEN_WHILE ||
+                     current_stmt->tokens[current_ts_pos].type == TOKEN_UNTIL)) {
+                    while (current_ts_pos < current_stmt->token_count &&
+                           current_stmt->tokens[current_ts_pos].type != TOKEN_COLON) {
+                        current_ts_pos++;
+                    }
+                }
                 if (current_ts_pos < current_stmt->token_count) {
                     *out_ts_pos = current_ts_pos;
                     return current_stmt;
@@ -912,8 +926,15 @@ static Statement* skip_do_block(Statement *start_stmt, int start_ts_pos, int *ou
     return NULL;
 }
 
+/* The name an OPTION _EXPLICIT check found undeclared, for its message. */
+static char undefined_variable_name[64];
+
 static const char* get_error_message(RuntimeError code) {
+    static char variable_message[96];
     switch (code) {
+        case ERR_VARIABLE_NOT_DEFINED:
+            snprintf(variable_message, sizeof(variable_message), "Variable not defined: %s", undefined_variable_name);
+            return variable_message;
         case ERR_NEXT_WITHOUT_FOR: return "NEXT without FOR";
         case ERR_SYNTAX_ERROR: return "Syntax error";
         case ERR_RETURN_WITHOUT_GOSUB: return "RETURN without GOSUB";
@@ -1022,11 +1043,21 @@ static void clear_data_pointer(void) {
     data_ptr = NULL;
 }
 
-static int is_data_statement(Statement *stmt) {
-    if (!stmt) return 0;
+/* The text after the DATA keyword in stmt's line, or NULL. As in QBasic,
+ * DATA may follow other statements on its line (after a colon or ELSE) and
+ * runs to the end of the line. */
+static const char *data_items_in(Statement *stmt) {
+    if (!stmt) return NULL;
     const char *p = stmt->raw_command;
-    Token t = get_next_token(&p);
-    return t.type == TOKEN_DATA;
+    while (1) {
+        Token t = get_next_token(&p);
+        if (t.type == TOKEN_DATA) return p;
+        if (t.type == TOKEN_EOF || t.type == TOKEN_REM) return NULL;
+    }
+}
+
+static int is_data_statement(Statement *stmt) {
+    return data_items_in(stmt) != NULL;
 }
 
 static Statement *find_next_data_statement(Statement *start) {
@@ -1042,8 +1073,7 @@ static void reset_data_pointer(void) {
     Statement *head = get_head();
     data_stmt = find_next_data_statement(head);
     if (data_stmt) {
-        data_ptr = data_stmt->raw_command;
-        get_next_token(&data_ptr);
+        data_ptr = data_items_in(data_stmt);
     } else {
         data_ptr = NULL;
     }
@@ -1056,8 +1086,7 @@ static int advance_data_statement(void) {
         data_ptr = NULL;
         return 0;
     }
-    data_ptr = data_stmt->raw_command;
-    get_next_token(&data_ptr);
+    data_ptr = data_items_in(data_stmt);
     return 1;
 }
 
@@ -1090,9 +1119,8 @@ static void restore_data_to_statement(Statement *stmt) {
         return;
     }
     data_stmt = stmt;
-    data_ptr = data_stmt->raw_command;
-    Token t = get_next_token(&data_ptr);
-    if (t.type != TOKEN_DATA) {
+    data_ptr = data_items_in(data_stmt);
+    if (!data_ptr) {
         if (!advance_data_statement()) {
             clear_data_pointer();
         }
@@ -1507,6 +1535,13 @@ static int num_to_integer_type(Num n, int vt, int64_t *out) {
     if (n.kind == NUM_UINT64 && n.i < 0) {
         report_runtime_error(ERR_OVERFLOW);
         return 0;
+    }
+    // As in QB64, a whole number up to 2^32 - 1 stored in a LONG keeps its bit
+    // pattern, so 32-bit colors (POINT, _RGB32, _UNSIGNED LONG values) fit:
+    // &HFFFFFFFF becomes -1. Floating-point values still Overflow.
+    if (bits == 32 && n.i >= (INT64_C(1) << 31) && n.i < (INT64_C(1) << 32)) {
+        *out = n.i - (INT64_C(1) << 32);
+        return 1;
     }
     if (bits < 64) {
         int64_t limit = INT64_C(1) << (bits - 1);
@@ -3524,6 +3559,54 @@ static inline __attribute__((always_inline)) int for_loop_next(ForLoop *loop) {
     return for_loop_condition(load_num(v, -1), loop->end_val, loop->step_val);
 }
 
+static int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat);
+
+/* After skipping a loop that runs zero times to its NEXT (stmt, *pos): when
+ * that NEXT names more loops (NEXT j, i), steps them. Returns 1 with *repeat
+ * set if one goes round again, 0 to carry on at *pos, -1 on error. */
+static int finish_skipped_next(Statement *stmt, int *pos, ForLoop **repeat) {
+    if (*pos + 1 >= stmt->token_count || stmt->tokens[*pos].type != TOKEN_COMMA ||
+        stmt->tokens[*pos + 1].type != TOKEN_IDENTIFIER) {
+        return 0;
+    }
+    TokenStream rest = {stmt->tokens, *pos + 1, stmt};
+    int result = run_next_list(&rest, stmt, repeat);
+    *pos = rest.pos;
+    return result;
+}
+
+/* NEXT [var[, var...]] with ts at the first name: each name steps its loop
+ * (no name: the innermost one), and NEXT j, i goes on to i once j is done.
+ * Returns 1 with *repeat set when a loop goes round again (loops inside it
+ * are dropped), 0 when every loop named has ended (ts after the list), and
+ * -1 on NEXT without FOR. */
+static int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat) {
+    while (1) {
+        int f = for_ptr - 1;
+        if (ts->pos < stmt->token_count && ts->tokens[ts->pos].type == TOKEN_IDENTIFIER) {
+            int var_idx = resolve_token_variable(&ts->tokens[ts->pos++]);
+            for (f = for_ptr - 1; f >= 0 && for_stack[f].var_idx != var_idx; f--) {}
+        }
+        if (f < 0) {
+            report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+            return -1;
+        }
+        if (for_loop_next(&for_stack[f])) {
+            for_ptr = f + 1;
+            *repeat = &for_stack[f];
+            return 1;
+        }
+        for_ptr = f; // the loop ends
+        if (runtime_error_occurred) return -1;
+        if (ts->pos + 1 < stmt->token_count && ts->tokens[ts->pos].type == TOKEN_COMMA &&
+            ts->tokens[ts->pos + 1].type == TOKEN_IDENTIFIER) {
+            ts->pos++;
+            continue;
+        }
+        return 0;
+    }
+}
+
 typedef struct {
     Statement *stmt;
     const char *ptr;
@@ -3968,37 +4051,6 @@ static void get_string_variable_value(int idx, int array_idx, char *dest, int de
     dest[dest_size - 1] = '\0';
 }
 
-static int get_string_variable_raw(int idx, int array_idx, char *dest, int dest_size) {
-    int fnum = 0;
-    FieldBinding binding;
-    if (get_field_binding_for_var(idx, array_idx, &fnum, &binding)) {
-        FileFieldState *state = &file_field_state[fnum];
-        if (state->buffer && binding.offset >= 0 && binding.offset < state->size) {
-            int copy_len = binding.len;
-            if (binding.offset + copy_len > state->size) copy_len = state->size - binding.offset;
-            if (copy_len < 0) copy_len = 0;
-            if (copy_len >= dest_size) copy_len = dest_size - 1;
-            memcpy(dest, state->buffer + binding.offset, (size_t)copy_len);
-            dest[copy_len] = '\0';
-            return copy_len;
-        }
-    }
-
-    const char *src = "";
-    Variable *v = get_variable_ptr(idx);
-    if (array_idx >= 0) {
-        if (v->s_array && array_idx >= 0 && array_idx < v->array_size && v->s_array[array_idx]) {
-            src = (const char *)v->s_array[array_idx]->data;
-        }
-    } else {
-        if (v->s_value) src = (const char *)v->s_value->data;
-    }
-    int len = (int)strlen(src);
-    if (len >= dest_size) len = dest_size - 1;
-    memcpy(dest, src, (size_t)len);
-    dest[len] = '\0';
-    return len;
-}
 
 static void basic_string_to_buffer(const BasicString *src, char *out, int out_size) {
     if (!out || out_size <= 0) return;
@@ -6237,10 +6289,25 @@ static void scan_procedures(void) {
     proc_count = 0;
     clear_procedure_declared_types();
     clear_static_locals();
+    // DEFINT, DEFLNG, ... apply to the parameters of the procedures after
+    // them, so follow them in source order here; running the program applies
+    // them again as it reaches them.
+    char saved_type_map[26];
+    memcpy(saved_type_map, default_type_map, sizeof(saved_type_map));
     Statement *stmt = get_head();
     while (stmt) {
         if (stmt->token_count > 0) {
             Token t0 = stmt->tokens[0];
+            static const struct { TokenType type; char suffix; } def_statements[] = {
+                {TOKEN_DEFINT, '%'}, {TOKEN_DEFLNG, '&'}, {TOKEN_DEFSTR, '$'},
+                {TOKEN_DEFSNG, '!'}, {TOKEN_DEFDBL, '#'},
+            };
+            for (size_t d = 0; d < sizeof(def_statements) / sizeof(def_statements[0]); d++) {
+                if (t0.type != def_statements[d].type) continue;
+                const char *def_ptr = stmt->raw_command;
+                get_next_token(&def_ptr);
+                parse_def_range(&def_ptr, def_statements[d].suffix);
+            }
             if (t0.type == TOKEN_SUB || t0.type == TOKEN_FUNCTION) {
                 if (proc_count >= MAX_PROCEDURES) break;
                 ProcedureDef *p = &registered_procs[proc_count];
@@ -6360,6 +6427,7 @@ static void scan_procedures(void) {
         }
         stmt = stmt->next;
     }
+    memcpy(default_type_map, saved_type_map, sizeof(saved_type_map));
     // Names cached as numeric may now be string FUNCTIONs called without "$".
     default_type_generation++;
     if (default_type_generation == 0) default_type_generation = 1;
@@ -6401,10 +6469,22 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
         frame->byref_caller_frame[p] = -1;
     }
 
+    /* Parentheses wrap the argument list only when they close at the end of
+     * the statement, as in CALL Name(a, b); in "Name (a) * 2, b" they belong
+     * to the first argument. */
     int has_parens = 0;
     if (ts->pos < exec_stmt->token_count && ts->tokens[ts->pos].type == TOKEN_LPAREN) {
-        has_parens = 1;
-        ts->pos++;
+        int depth = 0, close = ts->pos;
+        for (; close < exec_stmt->token_count; close++) {
+            TokenType type = ts->tokens[close].type;
+            if (type == TOKEN_LPAREN) depth++;
+            else if (type == TOKEN_RPAREN && --depth == 0) break;
+        }
+        TokenType after = close < exec_stmt->token_count ? ts->tokens[close + 1].type : TOKEN_EOF;
+        if (after == TOKEN_EOF || after == TOKEN_COLON || after == TOKEN_ELSE || after == TOKEN_REM) {
+            has_parens = 1;
+            ts->pos++;
+        }
     }
 
     int arg_idx = 0;
@@ -6603,7 +6683,6 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     while (s && s != proc->end_stmt && depth > 0) {
                         if (s->token_count > 0) {
                             TokenType first_t = s->tokens[0].type;
-                            fprintf(stderr, "DEBUG_SKIP_IF: line=%d depth=%d count=%d t0=%d t1=%d\n", s->line_number, depth, s->token_count, s->tokens[0].type, s->token_count > 1 ? s->tokens[1].type : -1);
                             if (first_t == TOKEN_IF && s->tokens[s->token_count - 1].type == TOKEN_THEN) {
                                 depth++;
                             } else if (first_t == TOKEN_ELSE) {
@@ -6940,7 +7019,16 @@ static void execute_procedure_statements(ProcedureDef *proc) {
 
                 if (!runs) {
                     int end_ts_pos = ts.pos;
-                    Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, idx, &end_ts_pos);
+                    Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, &end_ts_pos);
+                    ForLoop *repeat = NULL;
+                    int finished = target_stmt ? finish_skipped_next(target_stmt, &end_ts_pos, &repeat) : 0;
+                    if (finished < 0) break;
+                    if (finished > 0) {
+                        curr_proc_stmt = repeat->start_stmt;
+                        resume_proc_pos = repeat->start_ts_pos;
+                        jumped = 1;
+                        break;
+                    }
                     if (target_stmt) {
                         // Continue after the matching NEXT, which may share this line.
                         if (end_ts_pos < target_stmt->token_count) {
@@ -6968,31 +7056,13 @@ static void execute_procedure_statements(ProcedureDef *proc) {
             }
 
             case TOKEN_NEXT: {
-                if (for_ptr > 0) {
-                    int for_idx = for_ptr - 1;
-                    if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_IDENTIFIER) {
-                        int next_var_idx = resolve_token_variable(&ts.tokens[ts.pos]);
-                        for (int i = for_ptr - 1; i >= 0; i--) {
-                            if (for_stack[i].var_idx == next_var_idx) {
-                                for_idx = i;
-                                break;
-                            }
-                        }
-                        ts.pos++;
-                    }
-                    int loop_done = !for_loop_next(&for_stack[for_idx]);
-
-                    if (loop_done) {
-                        for_ptr = for_idx;
-                    } else {
-                        for_ptr = for_idx + 1;
-                        curr_proc_stmt = for_stack[for_idx].start_stmt;
-                        resume_proc_pos = for_stack[for_idx].start_ts_pos;
-                        jumped = 1;
-                        break;
-                    }
-                } else {
-                    report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+                ForLoop *repeat = NULL;
+                int result = run_next_list(&ts, exec_stmt, &repeat);
+                if (result > 0) {
+                    curr_proc_stmt = repeat->start_stmt;
+                    resume_proc_pos = repeat->start_ts_pos;
+                    jumped = 1;
+                    break;
                 }
                 continue;
             }
@@ -7006,6 +7076,20 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 // another statement it calls SUB Name.
                 if (current_token == ts.tokens && ts.tokens[ts.pos].type == TOKEN_COLON) {
                     ts.pos++;
+                    continue;
+                }
+                // A SUB name is never a variable: "Name (a) * 2, b" calls it rather
+                // than reading Name(a) as an array element first.
+                ProcedureDef *sub = find_procedure_tok(current_token);
+                if (sub && !sub->is_function) {
+                    // Inside a FUNCTION a SUB runs to completion here, then the
+                    // calling statement continues.
+                    ts.pos = (int)(current_token - ts.tokens) + 1;
+                    if (execute_sub_call(sub, &ts, exec_stmt)) {
+                        CallFrame *sub_frame = &call_stack[call_stack_depth - 1];
+                        execute_procedure_statements(sub);
+                        call_stack_depth = sub_frame->return_depth;
+                    }
                     continue;
                 }
                 name_string_function_result(current_token);
@@ -7045,18 +7129,6 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         Num value = evaluate_num_tok(&ts);
                         // An error while evaluating aborts the assignment, as in QBasic.
                         if (!runtime_error_occurred) set_numeric_variable_num(idx, array_idx, value);
-                    }
-                    continue;
-                }
-                ProcedureDef *sub = find_procedure(t->text);
-                if (sub && !sub->is_function) {
-                    // Inside a FUNCTION a SUB runs to completion here, then the
-                    // calling statement continues.
-                    ts.pos = (int)(current_token - ts.tokens) + 1;
-                    if (execute_sub_call(sub, &ts, exec_stmt)) {
-                        CallFrame *sub_frame = &call_stack[call_stack_depth - 1];
-                        execute_procedure_statements(sub);
-                        call_stack_depth = sub_frame->return_depth;
                     }
                     continue;
                 }
@@ -7416,7 +7488,7 @@ enum {
     QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT,
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
     QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
-    QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT
+    QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE
 };
 
 static int qb64_function_id(const char *name) {
@@ -7433,7 +7505,8 @@ static int qb64_function_id(const char *name) {
         {"_MOUSEBUTTON", QB64_FN_MOUSEBUTTON}, {"_MOUSEINPUT", QB64_FN_MOUSEINPUT},
         {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
         {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
-        {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT},
+        {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT}, {"_ROUND", QB64_FN_ROUND},
+        {"_PRINTMODE", QB64_FN_PRINTMODE},
     };
     if (name[0] != '_') return QB64_FN_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -7537,6 +7610,18 @@ static double qb64_function_value(int id, const double *args, int argc) {
             return graphics_is_active() ? graphics_resize_width() : 0;
         case QB64_FN_RESIZEHEIGHT:
             return graphics_is_active() ? graphics_resize_height() : 0;
+        case QB64_FN_PRINTMODE: {
+            // _PRINTMODE[(handle)]: 1 _KEEPBACKGROUND, 2 _ONLYBACKGROUND, 3 _FILLBACKGROUND.
+            if (!graphics_is_active()) return PRINTMODE_FILL;
+            int mode = graphics_printmode_for(argc >= 1 ? round_to_int(args[0]) : graphics_get_dest_handle(), 0);
+            if (!mode) break;
+            return mode;
+        }
+        case QB64_FN_ROUND:
+            // _ROUND(x): the nearest whole number, halves to even, like CINT
+            // but for any size.
+            if (argc != 1) break;
+            return nearbyint(args[0]);
     }
     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
     return 0;
@@ -7635,7 +7720,12 @@ static Num primary_tok(TokenStream *ts) {
                     }
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                 }
-                return num_d(qb64_function_value(function_id, args, argc > 4 ? 5 : argc));
+                double value = qb64_function_value(function_id, args, argc > 4 ? 5 : argc);
+                // Colors are _UNSIGNED LONG values in QB64, so they can be stored in a LONG.
+                if (function_id >= QB64_FN_RGB32 && function_id <= QB64_FN_RGBA) {
+                    return num_i((int64_t)value, NUM_INT64);
+                }
+                return num_d(value);
             }
         }
 
@@ -7648,7 +7738,7 @@ static Num primary_tok(TokenStream *ts) {
                     double y = evaluate_expression_tok(ts);
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                     if (!graphics_is_active()) init_graphics();
-                    return num_d(graphics_point(x, y));
+                    return num_i((int64_t)graphics_point(x, y), NUM_INT64); // a color: an _UNSIGNED LONG
                 } else {
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                     return num_d(graphics_cursor_query(round_to_int(x)));
@@ -7799,22 +7889,42 @@ static Num primary_tok(TokenStream *ts) {
 
 static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, Token *token) {
     if (token->type == TOKEN_LOADFONT) {
-        /* _LOADFONT(filename$, size%) -> handle */
-        if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
-            ts->pos++;
-            char buf[BASIC_STRING_MAX] = "";
-            parse_string_expression_tok(ts, buf, sizeof(buf));
-            if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
-            int size = evaluate_int_tok(ts);
-            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-            if (!graphics_is_active()) init_graphics();
-            fprintf(stderr, "DEBUG _LOADFONT: buf='%s' size=%d\n", buf, size);
-            int result = graphics_loadfont(buf, size);
-            fprintf(stderr, "DEBUG _LOADFONT: result=%d\n", result);
-            return (double)result;
+        /* _LOADFONT(filename$, size%[, style$]) -> handle, or -1 if the font
+         * cannot be loaded. style$ lists BOLD, ITALIC and UNDERLINE; MONOSPACE,
+         * UNICODE and DONTBLEND are accepted, and MEMORY (font data in
+         * filename$) is not supported. */
+        if (ts->tokens[ts->pos].type != TOKEN_LPAREN) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 0;
         }
-        return 0;
+        ts->pos++;
+        char buf[BASIC_STRING_MAX] = "";
+        parse_string_expression_tok(ts, buf, sizeof(buf));
+        if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
+        int size = evaluate_int_tok(ts);
+        char style_text[BASIC_STRING_MAX] = "";
+        if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+            ts->pos++;
+            parse_string_expression_tok(ts, style_text, sizeof(style_text));
+        }
+        if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+        int style = 0, from_memory = 0;
+        for (char *word = strtok(style_text, " ,"); word; word = strtok(NULL, " ,")) {
+            if (strcasecmp(word, "BOLD") == 0) style |= FONT_STYLE_BOLD;
+            else if (strcasecmp(word, "ITALIC") == 0) style |= FONT_STYLE_ITALIC;
+            else if (strcasecmp(word, "UNDERLINE") == 0) style |= FONT_STYLE_UNDERLINE;
+            else if (strcasecmp(word, "MEMORY") == 0) from_memory = 1;
+            else if (strcasecmp(word, "MONOSPACE") != 0 && strcasecmp(word, "UNICODE") != 0 &&
+                     strcasecmp(word, "DONTBLEND") != 0) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                return 0;
+            }
+        }
+        if (from_memory) return -1;
+        if (!graphics_is_active()) init_graphics();
+        return (double)graphics_loadfont(buf, size, style);
     }
+    if (token->type == TOKEN_FONT) return graphics_is_active() ? graphics_current_font() : 16;
     if (token->type == TOKEN_DEST) return graphics_get_dest();
     if (token->type == TOKEN_SOURCE) return graphics_get_source();
     if (token->type == TOKEN_NEWIMAGE) {
@@ -7879,21 +7989,15 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 return 61440.0 + var_idx * 256.0;
             }
             if (ft == TOKEN_CVI || ft == TOKEN_CVL || ft == TOKEN_CVS || ft == TOKEN_CVD) {
-                char buf[BASIC_STRING_MAX] = "";
-                int len = 0;
-                Token *arg_token = &ts->tokens[ts->pos];
-                Token arg_tok = *arg_token;
-                if (arg_tok.type == TOKEN_IDENTIFIER && is_string_var(arg_tok.text)) {
-                    int idx = resolve_token_variable(arg_token);
-                    ts->pos++;
-                    int array_idx = parse_array_index_tok(ts, idx);
-                    len = get_string_variable_raw(idx, array_idx, buf, sizeof(buf));
-                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                } else {
-                    parse_string_expression_tok(ts, buf, sizeof(buf));
-                    len = (int)strlen(buf);
-                    if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                }
+                // The argument is binary data, so it is kept with its length:
+                // MKS$(25) starts with two zero bytes.
+                char buf[8] = {0};
+                BasicString argument = {0};
+                parse_string_expression_tok_heap(ts, &argument);
+                if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+                int len = argument.length < sizeof(buf) ? (int)argument.length : (int)sizeof(buf);
+                if (len > 0) memcpy(buf, argument.data, (size_t)len);
+                basic_string_release(&argument);
                 if (ft == TOKEN_CVI) {
                     int16_t val = 0;
                     int cpy = (len > 2) ? 2 : len;
@@ -7934,30 +8038,44 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                     }
                     ts->pos = length_start;
                 }
-                char buf[BASIC_STRING_MAX] = "";
-                parse_string_expression_tok(ts, buf, sizeof(buf));
+                // Kept with its length, so zero bytes inside count (LEN(MKI$(5)) is 2).
+                BasicString argument = {0};
+                parse_string_expression_tok_heap(ts, &argument);
                 if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                if (ft == TOKEN_ASC) return buf[0] ? (double)(unsigned char)buf[0] : 0;
-                if (ft == TOKEN_LEN) return (double)strlen(buf);
-                if (ft == TOKEN_VAL) return atof(buf);
-                if (ft == TOKEN_PRINTWIDTH) return (double)graphics_printwidth(buf);
+                const char *text = argument.data ? (const char *)argument.data : "";
+                double result = 0;
+                if (ft == TOKEN_ASC) result = argument.length ? (unsigned char)text[0] : 0;
+                else if (ft == TOKEN_LEN) result = (double)argument.length;
+                else if (ft == TOKEN_VAL) result = atof(text);
+                else result = graphics_printwidth(text);
+                basic_string_release(&argument);
+                return result;
             }
             if (ft == TOKEN_INSTR) {
-                char s1[BASIC_STRING_MAX] = "";
-                char s2[BASIC_STRING_MAX] = "";
+                BasicString s1 = {0}, s2 = {0};
                 int start = 1;
                 Token next = ts->tokens[ts->pos];
                 if (next.type != TOKEN_STRING && next.type != TOKEN_IDENTIFIER) {
                     start = evaluate_int_tok(ts);
                     ts->pos++; // comma
                 }
-                parse_string_expression_tok(ts, s1, sizeof(s1));
+                parse_string_expression_tok_heap(ts, &s1);
                 ts->pos++; // comma
-                parse_string_expression_tok(ts, s2, sizeof(s2));
+                parse_string_expression_tok_heap(ts, &s2);
                 if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-                if (start < 1) return 0;
-                char *pos = strstr(s1 + start - 1, s2);
-                return pos ? (double)(pos - s1 + 1) : 0;
+                // A byte-by-byte search, so strings with zero bytes match too.
+                double found = 0;
+                if (start >= 1) {
+                    for (size_t at = (size_t)start - 1; at + s2.length <= s1.length; at++) {
+                        if (s2.length == 0 || memcmp(s1.data + at, s2.data, s2.length) == 0) {
+                            found = (double)(at + 1);
+                            break;
+                        }
+                    }
+                }
+                basic_string_release(&s1);
+                basic_string_release(&s2);
+                return found;
             }
             arg = evaluate_expression_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
@@ -8651,7 +8769,7 @@ static unsigned int cont_generation;
 
 static int auto_next_line = -1;
 static int auto_increment = 10;
-static char edit_text[300] = "";
+static char edit_text[BASIC_LINE_MAX + 16] = "";
 
 /* AUTO: the line number the REPL should offer next, or -1. advance moves on. */
 int basika_auto_line(int advance) {
@@ -8802,7 +8920,7 @@ static int execute_editor_command(const char *line) {
             report_runtime_error(path[0] ? ERR_PATH_FILE_ACCESS_ERROR : ERR_BAD_FILE_NAME);
             return 1;
         }
-        char text[320];
+        char text[BASIC_LINE_MAX + 16];
         for (Statement *s = get_head(); s; s = s->next) {
             format_program_line(s, text, sizeof(text));
             fprintf(file, "%s\n", text);
@@ -8829,11 +8947,11 @@ static int execute_editor_command(const char *line) {
             clear_variables(0);
             clear_data_pointer();
         }
-        char buffer[256];
-        int first_line = 1, source_line_number = 0;
-        while (fgets(buffer, sizeof(buffer), file)) {
-            source_line_number++;
-            buffer[strcspn(buffer, "\r\n")] = 0;
+        char buffer[BASIC_LINE_MAX];
+        int first_line = 1, physical_line = 0;
+        while (1) {
+            int source_line_number = physical_line + 1;
+            if (!read_program_line(file, buffer, sizeof(buffer), &physical_line)) break;
             if (first_line) {
                 first_line = 0;
                 if (buffer[0] == '#' && buffer[1] == '!') continue;
@@ -9099,15 +9217,54 @@ static void execute_chain(const char **ptr) {
 }
 
 /* Replaces the program with the lines of a .bas file (CHAIN and LOAD). */
+/* True when line ends in a QB64 line continuation: a "_" after a space,
+ * outside strings and ' comments. Removes the "_". */
+static int take_line_continuation(char *line) {
+    size_t n = strlen(line);
+    while (n > 0 && (line[n - 1] == ' ' || line[n - 1] == '\t')) n--;
+    if (n == 0 || line[n - 1] != '_' || (n >= 2 && line[n - 2] != ' ' && line[n - 2] != '\t')) return 0;
+    int in_string = 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (line[i] == '"') in_string = !in_string;
+        else if (!in_string && line[i] == '\'') return 0;
+    }
+    if (in_string) return 0;
+    line[n - 1] = '\0';
+    return 1;
+}
+
+/* Reads one program line from a file: any length up to size - 1 characters,
+ * without its CR/LF, with " _" continuation lines joined on. *physical_line
+ * counts the file lines read. Returns 0 at the end of the file. */
+int read_program_line(FILE *file, char *line, size_t size, int *physical_line) {
+    static char *buffer = NULL;
+    static size_t capacity = 0;
+    size_t used = 0;
+    line[0] = '\0';
+    while (1) {
+        ssize_t got = getline(&buffer, &capacity, file);
+        if (got < 0) return used > 0 || line[0];
+        (*physical_line)++;
+        buffer[strcspn(buffer, "\r\n")] = '\0';
+        size_t length = strlen(buffer);
+        if (used + length >= size) length = size - 1 - used;
+        memcpy(line + used, buffer, length);
+        used += length;
+        line[used] = '\0';
+        if (!take_line_continuation(line)) return 1;
+        used = strlen(line);
+    }
+}
+
 static int load_program_file(const char *path) {
     FILE *file = fopen(path, "r");
     if (!file) return 0;
     clear_program();
-    char buffer[256];
-    int first_line = 1, last_line_num = 0, source_line_number = 0;
-    while (fgets(buffer, sizeof(buffer), file)) {
-        source_line_number++;
-        buffer[strcspn(buffer, "\r\n")] = 0;
+    char buffer[BASIC_LINE_MAX];
+    int first_line = 1, last_line_num = 0, physical_line = 0;
+    while (1) {
+        int source_line_number = physical_line + 1;
+        if (!read_program_line(file, buffer, sizeof(buffer), &physical_line)) break;
         if (first_line) {
             first_line = 0;
             if (buffer[0] == '#' && buffer[1] == '!') continue;
@@ -9214,6 +9371,41 @@ static void execute_resize_statement(const char **ptr) {
         *ptr = saved;
     }
     graphics_set_resize(allow, scaling);
+}
+
+/* DIM SHARED: makes the module variable full (declared as name) visible
+ * inside every procedure. */
+static void share_with_procedures(const char *full, const char *name) {
+    if (global_shared_count >= MAX_GLOBAL_SHARED) return;
+    GlobalSharedName *entry = &global_shared_names[global_shared_count++];
+    snprintf(entry->full, sizeof(entry->full), "%s", full);
+    size_t base_len = 0;
+    while (name[base_len] && base_len < sizeof(entry->base) - 1 &&
+           !is_type_suffix_char(name[base_len]) && name[base_len] != '~') {
+        entry->base[base_len] = (char)toupper((unsigned char)name[base_len]);
+        base_len++;
+    }
+    entry->base[base_len] = '\0';
+    for (int f = 0; f < call_stack_depth; f++) {
+        clear_resolved_variables(&call_stack[f]);
+    }
+}
+
+/* CONST name = "text": a string constant is kept as a string variable of
+ * that name (shared with every procedure when declared in the module). */
+static void define_string_constant(const char *name, const char **ptr) {
+    size_t len = strlen(name);
+    const ProcedureDef *scope = current_declaration_scope();
+    if (len > 0 && name[len - 1] != '$' && !declare_variable_type(name, "$", scope, scope == NULL)) {
+        report_runtime_error(ERR_DUPLICATE_DEFINITION);
+        return;
+    }
+    char value[BASIC_STRING_MAX] = "";
+    parse_string_expression(ptr, value, sizeof(value));
+    int idx = find_variable(name);
+    if (runtime_error_occurred || idx < 0) return;
+    set_string_variable(idx, -1, value);
+    if (!scope) share_with_procedures(vars[idx].name, name);
 }
 
 void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_num) {
@@ -9547,6 +9739,25 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_PRINTMODE") == 0) {
+            // _PRINTMODE {_KEEPBACKGROUND|_ONLYBACKGROUND|_FILLBACKGROUND}[, handle]
+            Token mode_tok = get_next_token(&ptr);
+            int mode = 0;
+            if (mode_tok.type == TOKEN_IDENTIFIER) {
+                if (strcasecmp(mode_tok.text, "_KEEPBACKGROUND") == 0) mode = PRINTMODE_KEEP;
+                else if (strcasecmp(mode_tok.text, "_ONLYBACKGROUND") == 0) mode = PRINTMODE_ONLY;
+                else if (strcasecmp(mode_tok.text, "_FILLBACKGROUND") == 0) mode = PRINTMODE_FILL;
+            }
+            if (!mode) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            if (!graphics_is_active()) init_graphics();
+            int handle = graphics_get_dest_handle();
+            const char *saved = ptr;
+            if (get_next_token(&ptr).type == TOKEN_COMMA) handle = evaluate_int_text(&ptr);
+            else ptr = saved;
+            if (!graphics_printmode_for(handle, mode)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
         } else if (t.type == TOKEN_LET || t.type == TOKEN_IDENTIFIER) {
             Token var_token = (t.type == TOKEN_LET) ? get_next_token(&ptr) : t;
             execute_assignment(&ptr, var_token);
@@ -9761,25 +9972,39 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         } else if (t.type == TOKEN_RANDOMIZE) {
             parse_randomize(&ptr);
         } else if (t.type == TOKEN_CONST) {
-            Token name_tok = get_next_token(&ptr);
-            if (name_tok.type != TOKEN_IDENTIFIER) {
-                report_runtime_error(ERR_SYNTAX_ERROR);
-                *ptr_addr = ptr;
-                return;
-            }
-            const char *eq_saved = ptr;
-            Token eq = get_next_token(&ptr);
-            if (eq.type != TOKEN_EQUALS) {
-                ptr = eq_saved;
-                report_runtime_error(ERR_SYNTAX_ERROR);
-                *ptr_addr = ptr;
-                return;
-            }
-            last_expression_is_double = 0;
-            // CONST X% = ... has the suffix's type; otherwise the expression's.
-            Num value = num_as_name_type(evaluate_num_text(&ptr), name_tok.text);
-            if (!add_named_constant(name_tok.text, value, last_expression_is_double)) {
-                report_runtime_error(ERR_OUT_OF_MEMORY);
+            // CONST name = value[, name = value...]
+            while (1) {
+                Token name_tok = get_next_token(&ptr);
+                if (name_tok.type != TOKEN_IDENTIFIER) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                const char *eq_saved = ptr;
+                Token eq = get_next_token(&ptr);
+                if (eq.type != TOKEN_EQUALS) {
+                    ptr = eq_saved;
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                const char *value_ptr = ptr;
+                Token first_value = get_next_token(&value_ptr);
+                size_t name_len = strlen(name_tok.text);
+                if ((name_len > 0 && name_tok.text[name_len - 1] == '$') || is_string_token(&first_value)) {
+                    define_string_constant(name_tok.text, &ptr);
+                } else {
+                    last_expression_is_double = 0;
+                    // CONST X% = ... has the suffix's type; otherwise the expression's.
+                    Num value = num_as_name_type(evaluate_num_text(&ptr), name_tok.text);
+                    if (!runtime_error_occurred && !add_named_constant(name_tok.text, value, last_expression_is_double)) {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
+                    }
+                }
+                if (runtime_error_occurred) break;
+                const char *comma_saved = ptr;
+                if (get_next_token(&ptr).type != TOKEN_COMMA) {
+                    ptr = comma_saved;
+                    break;
+                }
             }
             *ptr_addr = ptr;
             return;
@@ -10477,7 +10702,9 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
         } else if (t.type == TOKEN_OPTION) {
             Token base = get_next_token(&ptr);
-            if (base.type != TOKEN_BASE) {
+            if (base.type == TOKEN_IDENTIFIER && strcasecmp(base.text, "_EXPLICIT") == 0) {
+                // Checked for the whole program before it runs (check_explicit_declarations).
+            } else if (base.type != TOKEN_BASE) {
                 report_runtime_error(ERR_SYNTAX_ERROR);
             } else {
                 Token val_tok = get_next_token(&ptr);
@@ -10664,20 +10891,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     snprintf(shared_full, sizeof(shared_full), "%s", vars[idx].name);
                 }
 
-                if (dim_shared && global_shared_count < MAX_GLOBAL_SHARED) {
-                    GlobalSharedName *entry = &global_shared_names[global_shared_count++];
-                    snprintf(entry->full, sizeof(entry->full), "%s", shared_full);
-                    size_t base_len = 0;
-                    while (base_len < var_len && base_len < sizeof(entry->base) - 1 &&
-                           !is_type_suffix_char(var.text[base_len]) && var.text[base_len] != '~') {
-                        entry->base[base_len] = (char)toupper((unsigned char)var.text[base_len]);
-                        base_len++;
-                    }
-                    entry->base[base_len] = '\0';
-                    for (int f = 0; f < call_stack_depth; f++) {
-                        clear_resolved_variables(&call_stack[f]);
-                    }
-                }
+                if (dim_shared) share_with_procedures(shared_full, var.text);
 
                 saved = ptr;
                 if (get_next_token(&ptr).type != TOKEN_COMMA) {
@@ -11529,6 +11743,238 @@ static unsigned int scanned_generation = 0;
 
 static void execute_statements(Statement *curr, const char *resume_ptr, int resume_ts_pos);
 
+
+/* ---- OPTION _EXPLICIT ----
+ * As in QB64, every variable must be declared before the program runs: by
+ * DIM, STATIC, COMMON or CONST in its scope, DIM SHARED or COMMON SHARED or a
+ * module-level CONST for every scope, SHARED inside a procedure, or as a
+ * parameter or the FUNCTION's own name. Names are compared without their
+ * type suffix. */
+typedef struct {
+    char name[64];
+    int scope;       /* 0 for the module, otherwise 1 + the procedure's index */
+    int everywhere;  /* DIM SHARED, COMMON SHARED or a module-level CONST */
+} ExplicitName;
+
+static ExplicitName *explicit_names = NULL;
+static int explicit_name_count = 0, explicit_name_capacity = 0;
+
+static void explicit_base_name(const char *name, char *out, size_t size) {
+    size_t n = 0;
+    for (; name[n] && name[n] != '.' && n + 1 < size; n++) out[n] = (char)toupper((unsigned char)name[n]);
+    while (n > 0 && strchr("$%&!#~", out[n - 1])) n--;
+    out[n] = '\0';
+}
+
+static void explicit_declare(const char *name, int scope, int everywhere) {
+    if (explicit_name_count == explicit_name_capacity) {
+        int capacity = explicit_name_capacity ? explicit_name_capacity * 2 : 64;
+        ExplicitName *grown = realloc(explicit_names, (size_t)capacity * sizeof(*grown));
+        if (!grown) return;
+        explicit_names = grown;
+        explicit_name_capacity = capacity;
+    }
+    ExplicitName *entry = &explicit_names[explicit_name_count++];
+    explicit_base_name(name, entry->name, sizeof(entry->name));
+    entry->scope = scope;
+    entry->everywhere = everywhere;
+}
+
+static int explicit_is_declared(const char *name, int scope) {
+    char base[64];
+    explicit_base_name(name, base, sizeof(base));
+    for (int i = 0; i < explicit_name_count; i++) {
+        const ExplicitName *entry = &explicit_names[i];
+        if ((entry->scope == scope || entry->everywhere) && strcmp(entry->name, base) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Names that are not variables: built-ins Basika reads as identifiers. */
+static int explicit_is_builtin_name(const char *name, TokenType statement) {
+    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT"};
+    for (size_t i = 0; i < sizeof(always) / sizeof(always[0]); i++) {
+        if (strcasecmp(name, always[i]) == 0) return 1;
+    }
+    if (statement == TOKEN_LINE && (strcasecmp(name, "B") == 0 || strcasecmp(name, "BF") == 0)) return 1;
+    if (statement == TOKEN_OPEN) {
+        static const char *const modes[] = {"OUTPUT", "APPEND", "BINARY", "RANDOM", "RW", "RWB"};
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+            if (strcasecmp(name, modes[i]) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static int explicit_is_declaring_statement(const Token *first) {
+    return first->type == TOKEN_DIM || first->type == TOKEN_STATIC || first->type == TOKEN_SHARED ||
+           first->type == TOKEN_COMMON || first->type == TOKEN_CONST;
+}
+
+/* The statement of a line that begins at token start ends at *end, at a colon
+ * or before THEN / ELSE. Returns where the next one begins. */
+static int explicit_next_statement(const Statement *stmt, int start, int *end) {
+    int depth = 0, i = start;
+    for (; i < stmt->token_count; i++) {
+        TokenType type = stmt->tokens[i].type;
+        if (type == TOKEN_LPAREN) depth++;
+        else if (type == TOKEN_RPAREN) depth--;
+        else if (depth <= 0 && (type == TOKEN_COLON || (i > start && (type == TOKEN_THEN || type == TOKEN_ELSE)))) break;
+    }
+    *end = i;
+    return i < stmt->token_count && stmt->tokens[i].type == TOKEN_COLON ? i + 1 : i;
+}
+
+/* In DIM, STATIC, SHARED, COMMON and CONST, the names at the start of each
+ * comma-separated item are declarations, and AS clauses name types. */
+static void explicit_scan_declarations(const Statement *stmt, int start, int end, int scope, int check,
+                                       const char **undefined) {
+    const Token *first = &stmt->tokens[start];
+    int everywhere = 0, i = start + 1;
+    if (i < end && stmt->tokens[i].type == TOKEN_SHARED) {
+        if (scope == 0) everywhere = 1;
+        i++;
+    }
+    if (first->type == TOKEN_CONST && scope == 0) everywhere = 1;
+    int item_start = 1, depth = 0, in_type = 0;
+    for (; i < end; i++) {
+        const Token *token = &stmt->tokens[i];
+        if (token->type == TOKEN_LPAREN) depth++;
+        else if (token->type == TOKEN_RPAREN) depth--;
+        if (depth == 0 && token->type == TOKEN_COMMA) {
+            item_start = 1;
+            in_type = 0;
+            continue;
+        }
+        if (depth == 0 && token->type == TOKEN_AS) {
+            in_type = 1;
+            continue;
+        }
+        if (token->type != TOKEN_IDENTIFIER || in_type) {
+            if (token->type != TOKEN_LPAREN) item_start = 0;
+            continue;
+        }
+        if (item_start && depth == 0) {
+            if (!check) explicit_declare(token->text, scope, everywhere);
+        } else if (check && !*undefined && !explicit_is_declared(token->text, scope) &&
+                   !find_procedure(token->text) && !qb64_function_id(token->text)) {
+            *undefined = token->text;
+        }
+        item_start = 0;
+    }
+}
+
+/* Returns 0 (with the error reported at its line) if a variable is used
+ * that was never declared. */
+static int check_explicit_declarations(void) {
+    explicit_name_count = 0;
+    // Pass 1: every declaration, by scope.
+    int scope = 0;
+    for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
+        if (stmt->token_count == 0) continue;
+        TokenType t0 = stmt->tokens[0].type;
+        if (t0 == TOKEN_SUB || t0 == TOKEN_FUNCTION) {
+            ProcedureDef *proc = find_procedure_by_header(stmt);
+            if (proc) {
+                scope = 1 + (int)(proc - registered_procs);
+                for (int p = 0; p < proc->param_count; p++) explicit_declare(proc->params[p].name, scope, 0);
+                if (proc->is_function) explicit_declare(proc->name, scope, 0);
+            }
+            continue;
+        }
+        if (t0 == TOKEN_END && stmt->token_count > 1 &&
+            (stmt->tokens[1].type == TOKEN_SUB || stmt->tokens[1].type == TOKEN_FUNCTION)) {
+            scope = 0;
+            continue;
+        }
+        if (t0 == TOKEN_DEF && stmt->token_count > 1 && stmt->tokens[1].type == TOKEN_IDENTIFIER) {
+            explicit_declare(stmt->tokens[1].text, 0, 1); // DEF FNname
+            continue;
+        }
+        for (int start = 0, end = 0, next; start < stmt->token_count; start = next) {
+            next = explicit_next_statement(stmt, start, &end);
+            int s = start;
+            if (stmt->tokens[s].type == TOKEN_THEN || stmt->tokens[s].type == TOKEN_ELSE) s++;
+            if (s < end && explicit_is_declaring_statement(&stmt->tokens[s])) {
+                explicit_scan_declarations(stmt, s, end, scope, 0, NULL);
+            }
+        }
+    }
+
+    // Pass 2: every variable used.
+    scope = 0;
+    int in_type_block = 0;
+    for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
+        if (stmt->token_count == 0) continue;
+        const Token *first = &stmt->tokens[0];
+        if (first->type == TOKEN_TYPE) { in_type_block = 1; continue; }
+        if (first->type == TOKEN_END && stmt->token_count > 1) {
+            TokenType what = stmt->tokens[1].type;
+            if (what == TOKEN_TYPE) { in_type_block = 0; continue; }
+            if (what == TOKEN_SUB || what == TOKEN_FUNCTION) { scope = 0; continue; }
+        }
+        if (in_type_block) continue;
+        if (first->type == TOKEN_SUB || first->type == TOKEN_FUNCTION) {
+            ProcedureDef *proc = find_procedure_by_header(stmt);
+            if (proc) scope = 1 + (int)(proc - registered_procs);
+            continue;
+        }
+        if (first->type == TOKEN_DECLARE || first->type == TOKEN_DATA || first->type == TOKEN_DEF ||
+            first->type == TOKEN_OPTION || first->type == TOKEN_DEFINT || first->type == TOKEN_DEFLNG ||
+            first->type == TOKEN_DEFSTR || first->type == TOKEN_DEFSNG || first->type == TOKEN_DEFDBL ||
+            (first->type == TOKEN_IDENTIFIER && first->text[0] == '$')) {
+            continue;
+        }
+        const char *undefined = NULL;
+        for (int start = 0, end = 0, next; start < stmt->token_count && !undefined; start = next) {
+            next = explicit_next_statement(stmt, start, &end);
+            int s = start;
+            if (stmt->tokens[s].type == TOKEN_THEN || stmt->tokens[s].type == TOKEN_ELSE) s++;
+            if (s >= end) continue;
+            const Token *statement = &stmt->tokens[s];
+            if (explicit_is_declaring_statement(statement)) {
+                explicit_scan_declarations(stmt, s, end, scope, 1, &undefined);
+                continue;
+            }
+            int after_as = 0;
+            for (int i = s; i < end && !undefined; i++) {
+                const Token *token = &stmt->tokens[i];
+                if (token->type == TOKEN_AS) { after_as = 1; continue; }
+                if (token->type == TOKEN_COMMA) after_as = 0;
+                if (token->type != TOKEN_IDENTIFIER || after_as) continue;
+                const char *name = token->text;
+                // A label where the line starts ("Name:"), or one named by GOTO and the like.
+                if (i == 0 && stmt->label[0]) continue;
+                if (name[0] == '_' || find_label(name) || find_procedure(name) ||
+                    explicit_is_builtin_name(name, statement->type) ||
+                    explicit_is_declared(name, scope)) {
+                    continue;
+                }
+                undefined = name;
+            }
+        }
+        if (undefined) {
+            current_executing_line = stmt->line_number;
+            current_source_line_number = stmt->source_line_number;
+            current_has_explicit_line_number = stmt->has_explicit_line_number;
+            explicit_base_name(undefined, undefined_variable_name, sizeof(undefined_variable_name));
+            report_runtime_error(ERR_VARIABLE_NOT_DEFINED);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int program_has_option_explicit(void) {
+    for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
+        if (stmt->token_count > 1 && stmt->tokens[0].type == TOKEN_OPTION &&
+            stmt->tokens[1].type == TOKEN_IDENTIFIER && strcasecmp(stmt->tokens[1].text, "_EXPLICIT") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void run_program_from(Statement *start);
 
 void run_program() {
@@ -11551,6 +11997,7 @@ static void run_program_from(Statement *start) {
     frames_being_built = 0;
     scan_procedures();
     scanned_generation = program_edit_generation();
+    if (program_has_option_explicit() && !check_explicit_declarations()) return;
     // $RESIZE is a metacommand: it applies wherever it appears in the program.
     int resize_set = 0;
     for (Statement *s = get_head(); s; s = s->next) {
@@ -11907,7 +12354,17 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 // The body is skipped when the start is already past the limit.
                 if (!runs) {
                     int end_ts_pos = ts.pos; // Start searching from current position
-                    Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, idx, &end_ts_pos);
+                    Statement *target_stmt = skip_for_block(exec_stmt, end_ts_pos, &end_ts_pos);
+                    ForLoop *repeat = NULL;
+                    int finished = target_stmt ? finish_skipped_next(target_stmt, &end_ts_pos, &repeat) : 0;
+                    if (finished < 0) break;
+                    if (finished > 0) {
+                        curr = repeat->start_stmt;
+                        resume_ptr = NULL;
+                        resume_ts_pos = repeat->start_ts_pos;
+                        jumped = 1;
+                        break;
+                    }
 
                     if (target_stmt) {
                         curr = target_stmt;
@@ -12213,35 +12670,14 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
 
             // Handle NEXT
             case TOKEN_NEXT: {
-                Token next_var = (ts.pos < exec_stmt->token_count)
-                    ? ts.tokens[ts.pos]
-                    : (Token){.type = TOKEN_EOF};
-                int f = -1;
-                if (next_var.type == TOKEN_IDENTIFIER) {
-                    int target_idx = resolve_token_variable(&ts.tokens[ts.pos++]);
-                    for (int i = for_ptr - 1; i >= 0; i--) {
-                        if (for_stack[i].var_idx == target_idx) {
-                            f = i;
-                            break;
-                        }
-                    }
-                } else {
-                    if (for_ptr > 0) f = for_ptr - 1;
+                ForLoop *repeat = NULL;
+                if (run_next_list(&ts, exec_stmt, &repeat) > 0) {
+                    curr = repeat->start_stmt;
+                    resume_ptr = NULL;
+                    resume_ts_pos = repeat->start_ts_pos;
+                    jumped = 1;
                 }
-                if (f != -1) {
-                    if (for_loop_next(&for_stack[f])) {
-                        curr = for_stack[f].start_stmt;
-                        resume_ptr = NULL;
-                        resume_ts_pos = for_stack[f].start_ts_pos;
-                        jumped = 1;
-                        break;
-                    } else {
-                        for_ptr = f; // Pop the loop from the stack
-                    }
-                } else {
-                    report_runtime_error(ERR_NEXT_WITHOUT_FOR);
-                }
-                break; // NEXT is a line-level control, break from inner loop to advance 'curr'
+                break;
             }
 
             // Handle GOTO
@@ -12249,6 +12685,23 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 Token target = ts.tokens[ts.pos++];
                 int target_line = resolve_target_line(target);
                 Statement *target_stmt = find_line(target_line);
+                if (!target_stmt) {
+                    report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+                } else {
+                    curr = target_stmt;
+                    jumped = 1;
+                }
+                break;
+            }
+
+            case TOKEN_NUMBER: {
+                // IF ... THEN 30, ELSE 30 and IF ... GOTO 30: a line number alone is a GOTO.
+                TokenType before = ts.pos >= 2 ? ts.tokens[ts.pos - 2].type : TOKEN_EOF;
+                if (before != TOKEN_THEN && before != TOKEN_ELSE && before != TOKEN_GOTO) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    break;
+                }
+                Statement *target_stmt = find_line(t->int_val);
                 if (!target_stmt) {
                     report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
                 } else {
@@ -12410,6 +12863,17 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     ts.pos++; // Skip colon
                     continue;
                 }
+                // A SUB name is never a variable: "Name (a) * 2, b" calls it rather
+                // than reading Name(a) as an array element first. The arguments
+                // follow the name, which need not start the line (it may follow
+                // THEN, ELSE or a colon).
+                ProcedureDef *proc = find_procedure_tok(current_token);
+                if (proc && !proc->is_function) {
+                    ts.pos = (int)(current_token - ts.tokens) + 1;
+                    curr = execute_sub_call(proc, &ts, exec_stmt);
+                    jumped = 1;
+                    break;
+                }
                 // Direct handling of assignments
                 name_string_function_result(current_token);
                 int idx = resolve_token_variable(current_token);
@@ -12451,17 +12915,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     }
                     continue;
                 }
-                // Check if it's an implicit SUB call!
-                ProcedureDef *proc = find_procedure(t->text);
-                if (proc && !proc->is_function) {
-                    // Arguments follow this SubName token, which need not start the line
-                    // (it may follow THEN, ELSE or a colon).
-                    ts.pos = (int)(current_token - ts.tokens) + 1;
-                    curr = execute_sub_call(proc, &ts, exec_stmt);
-                    jumped = 1;
-                    break;
-                }
-                // If not an assignment or SUB call, fallback to interpret_line_at_ptr
+                // If not an assignment, fall back to interpret_line_at_ptr
                 ts.pos--; // Put identifier back
                 /* fall through */
             }

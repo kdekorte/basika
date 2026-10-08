@@ -65,6 +65,7 @@ TESTS=(
   "tests/strings/print_using"
   "tests/strings/print_using_ext"
   "tests/strings/print_using_qbasic"
+  "tests/strings/binary_strings"
   "tests/strings/tab_len"
   "tests/strings/string_funcs"
   "tests/strings/instr_val_str"
@@ -125,6 +126,7 @@ TESTS=(
   "tests/errors/syntax_error"
   "tests/errors/unnumbered_syntax_error"
   "tests/errors/return_error"
+  "tests/errors/option_explicit_undefined"
   "tests/file_io/lof_loc_test"
   "tests/file_io/files_redirect_test"
   "tests/system/shebang_test"
@@ -147,6 +149,9 @@ TESTS=(
   "tests/graphics/pen_stick"
   "tests/graphics/offscreen_images"
   "tests/graphics/resize_window"
+  "tests/graphics/color_wrap"
+  "tests/graphics/font_handles"
+  "tests/graphics/printmode"
   "tests/math/qb64_types"
   "tests/math/integer_math"
   "tests/math/restore_label"
@@ -167,9 +172,14 @@ TESTS=(
   "tests/procedures/builtin_function_arguments"
   "tests/procedures/function_suffix_optional"
   "tests/procedures/sub_call_before_colon"
+  "tests/procedures/sub_call_paren_argument"
+  "tests/procedures/deftype_parameters"
+  "tests/procedures/option_explicit"
+  "tests/procedures/string_constants"
   "tests/system/direct_mode"
   "tests/control_flow/stop_statement"
   "tests/math/integer_division"
+  "tests/math/qb64_round_long_colors"
   "tests/file_io/random_records"
   "tests/file_io/line_input_write"
   "tests/system/keyboard_input"
@@ -183,6 +193,11 @@ TESTS=(
   "tests/user_types/user_types_fixed_string_print"
   "tests/user_types/user_types_large_array"
   "tests/control_flow/select_case_inline"
+  "tests/control_flow/data_after_statements"
+  "tests/control_flow/line_continuation"
+  "tests/control_flow/next_multiple"
+  "tests/control_flow/then_line_number"
+  "tests/control_flow/exit_do_loop_condition"
   "tests/user_types/user_types"
   "tests/user_types/user_types_arrays"
   "tests/user_types/user_types_assignment"
@@ -271,7 +286,9 @@ for t in "${TESTS[@]}"; do
     rm -f tests/point_test.result
   elif [ "$t" = "tests/graphics/qbasic_primitives" ] || [ "$t" = "tests/graphics/rgb_functions" ] ||
        [ "$t" = "tests/graphics/palette_pages" ] || [ "$t" = "tests/graphics/pen_stick" ] ||
-       [ "$t" = "tests/graphics/offscreen_images" ] || [ "$t" = "tests/graphics/resize_window" ]; then
+       [ "$t" = "tests/graphics/offscreen_images" ] || [ "$t" = "tests/graphics/resize_window" ] ||
+       [ "$t" = "tests/graphics/color_wrap" ] || [ "$t" = "tests/graphics/font_handles" ] ||
+       [ "$t" = "tests/graphics/printmode" ]; then
     # Headless graphics tests write their assertion result to tests/<name>.result.
     name=$(basename "$t")
     rm -f "tests/$name.result" "tests/$name.png"

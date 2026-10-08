@@ -92,8 +92,15 @@ void graphics_limit(double fps);
 void graphics_print(const char *text);
 void graphics_printstring(int px, int py, const char *text);
 int graphics_printwidth(const char *text);
-int graphics_loadfont(const char *filename, int size);
+/* _LOADFONT styles, combined: */
+enum { FONT_STYLE_BOLD = 1, FONT_STYLE_ITALIC = 2, FONT_STYLE_UNDERLINE = 4 };
+/* _PRINTMODE values, as QB64 numbers them. */
+enum { PRINTMODE_KEEP = 1, PRINTMODE_ONLY = 2, PRINTMODE_FILL = 3 };
+int graphics_printmode_for(int handle, int mode);
+int graphics_get_dest_handle(void);
+int graphics_loadfont(const char *filename, int size, int style);
 int graphics_setfont(int handle);
+int graphics_current_font(void);
 int graphics_freefont(int handle);
 int get_graphics_key(void);
 int get_graphics_char(void);

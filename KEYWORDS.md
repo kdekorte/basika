@@ -40,7 +40,7 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
 `_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
-`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`.
+`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`.
 
 Metacommand: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`.
 
@@ -108,7 +108,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 
 ## Control Flow and Program Structure
 - `END`: Terminates program execution.
-- `FOR var = start TO end [STEP step] ... NEXT [var]`: Standard loop.
+- `FOR var = start TO end [STEP step] ... NEXT [var[, var...]]`: Standard loop. `NEXT j, i` closes the inner loop and then the outer one.
 - `GOSUB line|label ... RETURN`: Subroutine call and return.
 - `GOTO line|label`: Unconditional jump.
 - `IF condition THEN [line | label | statement] [ELSE statement]`: Conditional execution. Multiline `IF...THEN` blocks support `ELSEIF`, `ELSE`, and `END IF`, including nesting and use in procedures.
@@ -136,7 +136,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
   - `CASE ELSE`: Catch-all branch matched when no preceding `CASE` clause matches.
 
 ## Variables and Data
-- `DATA constant1[, constant2...]`: Internal data storage.
+- `DATA constant1[, constant2...]`: Internal data storage. As in QBasic, `DATA` may follow other statements on its line (`IF x THEN 10 ELSE DATA 1, 2`) and runs to the end of the line.
 - `DEF FNname(param) = expression`: Single-line user-defined function.
 - `DEFINT letter_range`: Defines variables starting with these letters as integers.
 - `DEFSTR letter_range`: Defines variables starting with these letters as strings.
@@ -144,6 +144,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `DEFDBL letter_range`: Defines variables starting with these letters as double-precision.
 - `DEFLNG letter_range`: Defines variables starting with these letters as LONG.
 - `DIM [SHARED] var([lower TO] upper[, ...])`: Array dimensioning (up to 3D). Each dimension may give explicit bounds, such as `DIM grid(-1 TO 1, 1 TO 10)`. Bounds and subscripts are rounded to whole numbers like `CINT` (`a(1.5)` is `a(2)`).
+- `CONST name = value[, name = value...]`: Defines constants, numbers or strings (`CONST TITLE = "Demo"` needs no `$`). Constants defined at module level can be used inside every procedure.
 - `LBOUND(array[, dimension])`, `UBOUND(array[, dimension])`: Lowest and highest subscript of an array dimension (default 1); "Subscript out of range" for an array that is not dimensioned.
 - `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
 - `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
@@ -235,10 +236,11 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `SCREEN _NEWIMAGE(width, height[, mode])`: Creates a graphics screen of any size. `mode` 32 makes a 32-bit image with alpha colors; any other value uses the 256-color palette.
 - `SCREEN handle`: Shows an off-screen image: the screen becomes a copy of it at its size.
 - `SCREENSHOT "filename.png"`: Saves the current graphics window content to a file. Supports `.png` and `.jpg`/`.jpeg` extensions.
-- `_FONT handle`: Sets the active font to the loaded font specified by `handle` (or `0` to restore default font).
-- `_FREEFONT handle`: Frees a loaded font handle.
-- `_LOADFONT("fontfile.ttf", size)`: Loads a TTF/OTF font file at the specified pixel size and returns a numeric font handle.
-- `_PRINTSTRING (x, y), text$`: Draws `text$` at pixel coordinates `(x, y)` using the current `COLOR`. Does not move the text cursor or scroll. Works like QB64's `_PRINTSTRING`.
+- `_FONT handle`: Sets the active font to a font from `_LOADFONT`. QB64's built-in font handles (8, 9, 14, 15, 16, 17) and 0 select the default font. As a function, `_FONT` returns the handle of the font in use (16 for the default).
+- `_FREEFONT handle`: Frees a loaded font; the font in use and the built-in fonts cannot be freed.
+- `_LOADFONT("fontfile.ttf", size[, style$])`: Loads a TTF/OTF font file at the given pixel size and returns its handle (32 and up, as in QB64), or -1 if it cannot be loaded. `style$` may list `BOLD`, `ITALIC` and `UNDERLINE`; `MONOSPACE`, `UNICODE` and `DONTBLEND` are accepted, and `MEMORY` (font data in the string) is not supported (-1).
+- `_PRINTSTRING (x, y), text$`: Draws `text$` at pixel coordinates `(x, y)` using the current `COLOR`, filling the box behind it with the background color unless `_PRINTMODE` says otherwise. Does not move the text cursor or scroll. Works like QB64's `_PRINTSTRING`.
+- `_PRINTMODE {_FILLBACKGROUND|_KEEPBACKGROUND|_ONLYBACKGROUND}[, handle]`: How `PRINT` and `_PRINTSTRING` treat the background behind text in an image (default the `_DEST` image): fill it with the `COLOR` background (the default, also for each new `SCREEN`), keep what is there, or draw only the background. In 32-bit images the background blends by its alpha. As a function, `_PRINTMODE[(handle)]` returns 1 (keep), 2 (only) or 3 (fill).
 - `_PRINTWIDTH(text$)`: Returns the pixel width that `text$` would occupy when rendered with the current font. Useful for centering text or layout calculations.
 - `SLEEP [seconds]`: Pauses for the given number of seconds or until a key is pressed (the key stays available to `INKEY$`). With no argument, or 0, it waits for a key.
 - `_DELAY seconds`: Pauses for a number of seconds, which may be fractional (`_DELAY .05`), without waking on key presses.
@@ -254,6 +256,10 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_PUTIMAGE [(dx1,dy1)[-(dx2,dy2)]][, [source][, [dest]][, (sx1,sy1)[-(sx2,sy2)]]]`: Copies the source rectangle of one image onto another (defaults: the whole `_SOURCE` image onto `_DEST`). A single destination point keeps the source size, no destination stretches over the whole image, and a reversed rectangle mirrors the picture. 32-bit images blend by their alpha. The older form `_PUTIMAGE (x,y), handle, (sx1,sy1)-(sx2,sy2)` is still accepted.
 - `_FREEIMAGE handle`: Releases an image; drawing returns to the screen if it was `_DEST`.
 - `_TITLE text$`: Sets the window title.
+- Line continuation: as in QB64, a line ending in a space and `_` (outside strings and comments) continues on the next line. Program lines may be up to 1023 characters.
+- `_ROUND(x)`: The nearest whole number, with halves rounding to even (`_ROUND(2.5)` is 2), for values of any size.
+- 32-bit colors in LONG variables: as in QB64, a whole number from 2^31 to 2^32 - 1 stored in a LONG keeps its bit pattern, so colors from `POINT`, `_RGB32` and the like fit (`&HFFFFFFFF` becomes -1). A SINGLE or DOUBLE value outside LONG range is still an Overflow.
+- `OPTION _EXPLICIT`: Every variable must be declared before the program runs, as in QB64: with `DIM`, `STATIC`, `COMMON` or `CONST` in its scope, `DIM SHARED` / `COMMON SHARED` or a module-level `CONST` for every scope, `SHARED` inside a procedure, or as a parameter or the `FUNCTION`'s own name. Otherwise the program stops before running with "Variable not defined: name" (error 92).
 - `$RESIZE:ON`: Lets the user resize the window. The metacommand applies to the whole program wherever it appears. `$RESIZE:STRETCH` and `$RESIZE:SMOOTH` also allow resizing; SMOOTH scales the screen with linear filtering instead of keeping hard pixels. `$RESIZE:OFF` (the default) keeps the window fixed. The screen is always scaled to fit the window with its proportions kept, so a program that wants the extra room creates a new screen of the new size:
   `IF _RESIZE THEN SCREEN _NEWIMAGE(_RESIZEWIDTH, _RESIZEHEIGHT, 32): GOSUB Redraw`
 - `_RESIZE`: -1 once after each user resize of the window, then 0. Size changes the program makes itself (`SCREEN _NEWIMAGE`) do not count. `_RESIZEWIDTH` and `_RESIZEHEIGHT` give the window's current size in pixels.
