@@ -106,6 +106,7 @@ int graphics_loadfont(const char *filename, int size, int style);
 int graphics_setfont(int handle);
 int graphics_current_font(void);
 int graphics_freefont(int handle);
+void graphics_release_program_resources(void);
 int get_graphics_key(void);
 int get_graphics_char(void);
 void graphics_readline(char *buffer, int size);

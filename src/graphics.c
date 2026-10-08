@@ -45,7 +45,9 @@ static double gfx_cursor_y = 0;
 #define MAX_IMAGE_SLOTS 64
 
 
-static TTF_Font *font = NULL;
+static TTF_Font *font = NULL;           // Font in use: base_font or a _LOADFONT slot
+static TTF_Font *base_font = NULL;      // Built-in font; the only one reload_font closes
+static int active_font_slot = -1;       // -1 = built-in font, else the _FONT slot in use
 static char font_path[512] = "";
 static const int FONT_SIZE = 16;         // Initial DOS-style pixel font size
 static int current_row_height = 16;      // Use pixel-based rows for doubled text modes
@@ -197,9 +199,13 @@ void set_graphics_cursor(double x, double y) {
 static void reload_font(int target_height) {
     if (font_path[0] == '\0') return;
     
-    if (font) {
-        TTF_CloseFont(font);
-        font = NULL;
+    // A screen or text size change returns to the built-in font; loaded
+    // fonts stay open in their slots.
+    active_font_slot = -1;
+    font = NULL;
+    if (base_font) {
+        TTF_CloseFont(base_font);
+        base_font = NULL;
     }
 
     // Clear glyph cache
@@ -210,7 +216,8 @@ static void reload_font(int target_height) {
         }
     }
 
-    font = TTF_OpenFont(font_path, (float)target_height);
+    base_font = TTF_OpenFont(font_path, (float)target_height);
+    font = base_font;
     if (!font) {
         fprintf(stderr, "Failed to reload font at size %d: %s\n", target_height, SDL_GetError());
         return;
@@ -1018,7 +1025,6 @@ typedef struct {
 } FontSlot;
 
 static FontSlot font_slots[MAX_FONT_SLOTS];
-static int active_font_slot = -1;  /* -1 = default built-in font */
 
 /* Return the glyph cache for the currently active font */
 static SDL_Texture **get_active_glyph_cache(void) {
@@ -1147,20 +1153,18 @@ int graphics_current_font(void) {
     return active_font_slot >= 0 ? FONT_HANDLE_BASE + active_font_slot : DEFAULT_FONT_HANDLE;
 }
 
-static TTF_Font *default_font = NULL;
-
 int graphics_setfont(int handle) {
     if (handle < FONT_HANDLE_BASE || handle >= FONT_HANDLE_BASE + MAX_FONT_SLOTS) {
         if (is_default_font_handle(handle)) {
             active_font_slot = -1;
-            if (default_font) font = default_font;
+            if (base_font) font = base_font;
             /* Restore default font metrics */
             current_col_width = canvas_width / text_columns;
             current_row_height = canvas_height / text_rows;
-            if (default_font) {
+            if (base_font) {
                 int glyph_w = 0, glyph_h = 0;
-                if (TTF_GetStringSize(default_font, "W", 0, &glyph_w, &glyph_h)) {
-                    int line_skip = TTF_GetFontLineSkip(default_font);
+                if (TTF_GetStringSize(base_font, "W", 0, &glyph_w, &glyph_h)) {
+                    int line_skip = TTF_GetFontLineSkip(base_font);
                     if (line_skip > current_row_height) current_row_height = line_skip;
                     if (glyph_h + 2 > current_row_height) current_row_height = glyph_h + 2;
                 }
@@ -1174,8 +1178,6 @@ int graphics_setfont(int handle) {
     if (!font_slots[slot_idx].in_use) return 0;
 
     FontSlot *slot = &font_slots[slot_idx];
-    /* Save the default font pointer before first switch */
-    if (!default_font && font) default_font = font;
     active_font_slot = slot_idx;
     font = slot->font;
 
@@ -1207,6 +1209,18 @@ int graphics_freefont(int handle) {
     slot->font = NULL;
     slot->in_use = 0;
     return 1;
+}
+
+/* NEW and RUN: frees the images and fonts the last program left loaded, so
+ * repeated runs in the REPL do not use up the slots. */
+void graphics_release_program_resources(void) {
+    if (active_font_slot >= 0) graphics_setfont(DEFAULT_FONT_HANDLE);
+    for (int s = 0; s < MAX_FONT_SLOTS; s++) {
+        if (font_slots[s].in_use) graphics_freefont(FONT_HANDLE_BASE + s);
+    }
+    for (int i = 0; i < MAX_IMAGE_SLOTS; i++) {
+        if (image_slots[i].in_use) graphics_freeimage(-i - 2);
+    }
 }
 
 void set_text_cursor(int row, int col) {
@@ -1305,6 +1319,7 @@ int init_graphics() {
         fprintf(stderr, "Failed to load any font: %s\n", SDL_GetError());
         return 0; // Indicate graphics initialization failure
     }
+    base_font = font;
 
     // Now reload the font at the size matching the current mode
     reload_font(current_row_height);
@@ -2564,12 +2579,8 @@ void wait_for_keypress() {
 }
 
 void close_graphics() {
-    /* Restore font to default before cleanup to avoid double-close */
-    if (active_font_slot >= 0 && default_font) {
-        font = default_font;
-    }
     active_font_slot = -1;
-    default_font = NULL;
+    font = NULL;
 
     /* Free user-loaded font slots */
     for (int s = 0; s < MAX_FONT_SLOTS; s++) {
@@ -2590,7 +2601,8 @@ void close_graphics() {
         image_slots[i].state.canvas = NULL;
         image_slots[i].in_use = 0;
     }
-    if (font) TTF_CloseFont(font);
+    if (base_font) TTF_CloseFont(base_font);
+    base_font = NULL;
     for (int i = 0; i < MAX_SCREEN_PAGES; i++) {
         if (pages[i]) SDL_DestroyTexture(pages[i]);
         pages[i] = NULL;

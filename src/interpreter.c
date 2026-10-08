@@ -3692,7 +3692,42 @@ typedef struct {
     int is_string;
     double num_val;
     BasicString str_val; // Only used when is_string is true; owns heap data.
+    Statement *header;   // The SELECT CASE statement that opened the frame
+    int header_pos;
+    int gosub_level;
 } SelectCaseFrame;
+
+/* Pops the SELECT CASE frames above keep, freeing their string selectors. */
+static void release_select_frames(SelectCaseFrame *stack, int *depth, int keep) {
+    while (*depth > keep) {
+        SelectCaseFrame *frame = &stack[--*depth];
+        if (frame->is_string) basic_string_release(&frame->str_val);
+    }
+}
+
+/* Opens a frame for the SELECT CASE at exec_stmt/pos. Reaching a SELECT that
+ * is still open at the same GOSUB level means the program left it without
+ * END SELECT (EXIT DO, GOTO), so that block and any opened inside it are
+ * dropped first. Returns NULL when the nesting is too deep. */
+static SelectCaseFrame *push_select_frame(SelectCaseFrame *stack, int *depth,
+                                          Statement *exec_stmt, int pos) {
+    for (int i = 0; i < *depth; i++) {
+        if (stack[i].header == exec_stmt && stack[i].header_pos == pos &&
+            stack[i].gosub_level == gosub_ptr) {
+            release_select_frames(stack, depth, i);
+            break;
+        }
+    }
+    if (*depth >= MAX_SELECT_CASE_DEPTH) return NULL;
+    SelectCaseFrame *frame = &stack[(*depth)++];
+    frame->branch_taken = 0;
+    frame->is_string = 0;
+    frame->str_val = (BasicString){0};
+    frame->header = exec_stmt;
+    frame->header_pos = pos;
+    frame->gosub_level = gosub_ptr;
+    return frame;
+}
 
 static int is_select_case_header(const Statement *stmt) {
     return stmt && stmt->token_count >= 3 &&
@@ -4113,7 +4148,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             ts->pos++;
             ts->pos++;
             BasicString base = {0};
-            if (!parse_string_expression_tok_heap(ts, &base)) return 0;
+            if (!parse_string_expression_tok_heap(ts, &base)) { basic_string_release(&base); return 0; }
             if (ts->tokens[ts->pos].type == TOKEN_COMMA) ts->pos++;
             int n1 = evaluate_int_tok(ts);
             int n2 = -1;
@@ -4157,20 +4192,21 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             char c = ' ';
             BasicString arg_buf = {0};
             if (is_string_token(&ts->tokens[ts->pos])) {
-                if (!parse_string_expression_tok_heap(ts, &arg_buf)) return 0;
+                if (!parse_string_expression_tok_heap(ts, &arg_buf)) { basic_string_release(&arg_buf); return 0; }
                 if (arg_buf.length > 0) c = arg_buf.data[0];
             } else {
                 c = (char)evaluate_expression_tok(ts);
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (n < 0) n = 0;
-            if (!basic_string_append_repeat(&term, c, (size_t)n)) return 0;
+            int repeated = basic_string_append_repeat(&term, c, (size_t)n);
             basic_string_release(&arg_buf);
+            if (!repeated) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             ts->pos++;
             if (ts->tokens[ts->pos].type == TOKEN_LPAREN) ts->pos++;
             BasicString input = {0};
-            if (!parse_string_expression_tok_heap(ts, &input)) return 0;
+            if (!parse_string_expression_tok_heap(ts, &input)) { basic_string_release(&input); return 0; }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             BasicString output = {0};
             int ok = t.type == TOKEN_DEFLATE
@@ -4228,7 +4264,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
                 fnum = evaluate_int_tok(ts);
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
-            if (!read_input_chars(count, fnum, &term)) return 0;
+            if (!read_input_chars(count, fnum, &term)) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_INKEY) {
             ts->pos++;
             if (graphics_is_active()) {
@@ -4244,7 +4280,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             ts->pos++;
             ts->pos++;
             BasicString base = {0};
-            if (!parse_string_expression_tok_heap(ts, &base)) return 0;
+            if (!parse_string_expression_tok_heap(ts, &base)) { basic_string_release(&base); return 0; }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (ft == TOKEN_UCASE) {
                 for (int i = 0; i < (int)base.length; i++) base.data[i] = toupper((unsigned char)base.data[i]);
@@ -4299,7 +4335,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             BasicString arg_val = {0};
             int is_str = is_string_token(&ts->tokens[ts->pos]);
             if (is_str) {
-                if (!parse_string_expression_tok_heap(ts, &arg_val)) return 0;
+                if (!parse_string_expression_tok_heap(ts, &arg_val)) { basic_string_release(&arg_val); return 0; }
                 char *ev = getenv((const char *)arg_val.data);
                 if (ev) basic_string_append(&term, ev, strlen(ev));
             } else {
@@ -4432,7 +4468,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             TokenType ft = t.type;
             get_next_token(input);
             BasicString base = {0};
-            if (!parse_string_expression_heap(input, &base)) return 0;
+            if (!parse_string_expression_heap(input, &base)) { basic_string_release(&base); return 0; }
             get_next_token(input);
             int n1 = evaluate_int_text(input);
             int n2 = -1;
@@ -4492,8 +4528,9 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
                 get_next_token(input);
             }
             if (n < 0) n = 0;
-            if (!basic_string_append_repeat(&term, c, (size_t)n)) return 0;
+            int repeated = basic_string_append_repeat(&term, c, (size_t)n);
             basic_string_release(&arg_buf);
+            if (!repeated) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
             get_next_token(input);
             BasicString source = {0};
@@ -4560,7 +4597,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             }
             *input = saved;
             if (get_next_token(input).type != TOKEN_RPAREN) *input = saved;
-            if (!read_input_chars(count, fnum, &term)) return 0;
+            if (!read_input_chars(count, fnum, &term)) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_INKEY) {
             if (graphics_is_active()) {
                 update_graphics();
@@ -4574,7 +4611,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             TokenType ft = t.type;
             get_next_token(input);
             BasicString base = {0};
-            if (!parse_string_expression_heap(input, &base)) return 0;
+            if (!parse_string_expression_heap(input, &base)) { basic_string_release(&base); return 0; }
             get_next_token(input);
             if (ft == TOKEN_UCASE) {
                 for (int i = 0; i < (int)base.length; i++) base.data[i] = toupper((unsigned char)base.data[i]);
@@ -6794,15 +6831,14 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     break;
                 }
                 ts.pos++; // consume CASE
-                if (select_case_depth >= MAX_SELECT_CASE_DEPTH) {
+                SelectCaseFrame *frame = push_select_frame(select_case_stack, &select_case_depth,
+                                                           exec_stmt, ts.pos);
+                if (!frame) {
                     report_runtime_error(ERR_OUT_OF_MEMORY);
                     break;
                 }
-                SelectCaseFrame *frame = &select_case_stack[select_case_depth++];
-                frame->branch_taken = 0;
                 frame->is_string = is_string_token(&ts.tokens[ts.pos]);
                 if (frame->is_string) {
-                    frame->str_val = (BasicString){0};
                     if (!parse_string_expression_tok_heap(&ts, &frame->str_val)) {
                         report_runtime_error(ERR_SYNTAX_ERROR);
                         break;
@@ -6888,6 +6924,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     }
                 }
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
+                    release_select_frames(select_case_stack, &select_case_depth, 0);
                     current_executing_line = saved_line;
                     return;
                 }
@@ -7165,6 +7202,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
             curr_proc_stmt = curr_proc_stmt->next;
         }
     }
+    // An error or END can leave SELECT CASE blocks open.
+    release_select_frames(select_case_stack, &select_case_depth, 0);
     current_executing_line = saved_line;
     current_source_line_number = saved_source_line_number;
     current_has_explicit_line_number = saved_has_explicit_line_number;
@@ -8934,9 +8973,13 @@ static int execute_editor_command(const char *line) {
         snprintf(resolved, sizeof(resolved), "%s", path);
         const char *base = strrchr(path, '/');
         if (!strchr(base ? base : path, '.')) snprintf(resolved, sizeof(resolved), "%s.bas", path);
+        if (!path[0]) {
+            report_runtime_error(ERR_BAD_FILE_NAME);
+            return 1;
+        }
         FILE *file = fopen(resolved, "w");
-        if (!path[0] || !file) {
-            report_runtime_error(path[0] ? ERR_PATH_FILE_ACCESS_ERROR : ERR_BAD_FILE_NAME);
+        if (!file) {
+            report_runtime_error(ERR_PATH_FILE_ACCESS_ERROR);
             return 1;
         }
         char text[BASIC_LINE_MAX + 16];
@@ -10033,6 +10076,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         } else if (t.type == TOKEN_NEW && is_direct) {
             clear_program();
             clear_variables(0); // Full reset for NEW
+            graphics_release_program_resources();
             clear_data_pointer();
             print_col = 0;
             print_row = 0;
@@ -10211,8 +10255,15 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
         } else if (t.type == TOKEN_ENVIRON) {
             char cmd[256] = "";
             parse_string_expression(&ptr, cmd, sizeof(cmd));
-            if (cmd[0]) {
-                putenv(strdup(cmd));
+            // ENVIRON "NAME=text"; an empty text removes NAME. setenv keeps
+            // its own copy, so nothing leaks as values are replaced.
+            char *eq = strchr(cmd, '=');
+            if (eq && eq != cmd) {
+                *eq = '\0';
+                if (eq[1]) setenv(cmd, eq + 1, 1);
+                else unsetenv(cmd);
+            } else if (cmd[0]) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
             }
         } else if (t.type == TOKEN_POKE) {
             int addr = evaluate_int_text(&ptr);
@@ -12076,6 +12127,7 @@ void run_program() {
 /* RUN [line]: clears variables and runs from the start or from that line. */
 static void run_program_from(Statement *start) {
     clear_variables(1); // Keep registry for RUN to maintain pre-tokenized indices
+    graphics_release_program_resources();
     stop_running = 0;
     runtime_error_occurred = 0;
     if (!scan_user_types() || runtime_error_occurred) {
@@ -12136,7 +12188,7 @@ static void run_program_from(Statement *start) {
     }
 
     block_if_depth = 0;
-    select_case_depth = 0;
+    release_select_frames(select_case_stack, &select_case_depth, 0);
     common_variable_count = 0;
     execute_statements(curr, resume_ptr, resume_ts_pos);
     if (pending_chain_path[0] && !runtime_error_occurred) {
@@ -12364,15 +12416,14 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     break;
                 }
                 ts.pos++; // consume CASE
-                if (select_case_depth >= MAX_SELECT_CASE_DEPTH) {
+                SelectCaseFrame *frame = push_select_frame(select_case_stack, &select_case_depth,
+                                                           exec_stmt, ts.pos);
+                if (!frame) {
                     report_runtime_error(ERR_OUT_OF_MEMORY);
                     break;
                 }
-                SelectCaseFrame *frame = &select_case_stack[select_case_depth++];
-                frame->branch_taken = 0;
                 frame->is_string = is_string_token(&ts.tokens[ts.pos]);
                 if (frame->is_string) {
-                    frame->str_val = (BasicString){0};
                     if (!parse_string_expression_tok_heap(&ts, &frame->str_val)) {
                         report_runtime_error(ERR_SYNTAX_ERROR);
                         break;

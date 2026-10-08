@@ -4,6 +4,8 @@ All notable changes to this project are recorded in this file.
 
 ## Unreleased
 
+- **Memory and Resource Leaks**: A string `SELECT CASE` value is freed when a `SUB` or `FUNCTION` exits from inside the block, when an error stops it, and at `RUN` (each such call leaked a copy). Leaving a `SELECT CASE` with `EXIT DO` or `GOTO` no longer leaves the block open, so a loop that does so 32 times is no longer "Out of memory". A failed `INPUT$` frees what it had read, and `LEFT$`, `UCASE$`, `STRING$`, `_DEFLATE$`, `ENVIRON$` and the like free their argument when it fails. `ENVIRON` no longer leaks a copy of each value it sets; `ENVIRON "NAME="` removes the variable, and text without `=` is "Illegal function call" (behavior change; it was ignored). `SAVE ""` reports "Bad file name" without creating `.bas` or leaving the file open. `RUN`, `CHAIN` and `NEW` free the images and fonts the last program left loaded, so repeated runs no longer use up the 64 image and 32 font slots.
+- **Fonts after SCREEN (behavior change)**: `SCREEN` and changes to the text size switch back to the built-in font, as in QB64; loaded fonts stay open for `_FONT`. Changing the screen while a `_LOADFONT` font was in use closed that font, leaked the new built-in one and could crash on a later `_FONT 16` or `_FREEFONT`.
 - **$NOPREFIX**: Programs starting with `$NOPREFIX` may write QB64 names without their `_` (`Option Explicit`, `FullScreen SquarePixels`, `RGB32`, `Display`), as in QB64.
 - **_FULLSCREEN**: Added `_FULLSCREEN [{_STRETCH|_SQUAREPIXELS|_OFF}][, _SMOOTH]` and the `_FULLSCREEN` function.
 - **DIM AS type list**: QB64's `DIM [SHARED] AS type name, name...` declares every name with that type (it was a syntax error).

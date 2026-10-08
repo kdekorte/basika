@@ -573,6 +573,10 @@ void tokenize_line(Statement *stmt) {
     int capacity = 16;
     stmt->tokens = malloc(capacity * sizeof(Token));
     stmt->token_count = 0;
+    if (!stmt->tokens) {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
     while (1) {
         const char *token_start = ptr;
         Token t = get_next_token(&ptr);
@@ -580,8 +584,14 @@ void tokenize_line(Statement *stmt) {
         t.start_ptr = token_start;
         /* Keep one slot for an internal EOF sentinel used by token-stream lookahead. */
         if (stmt->token_count + 1 >= capacity) {
+            Token *grown = realloc(stmt->tokens, capacity * 2 * sizeof(Token));
+            if (!grown) {
+                // Keep the tokens so far; the spare slot still holds the EOF sentinel.
+                fprintf(stderr, "Out of memory\n");
+                break;
+            }
+            stmt->tokens = grown;
             capacity *= 2;
-            stmt->tokens = realloc(stmt->tokens, capacity * sizeof(Token));
         }
         stmt->tokens[stmt->token_count++] = t;
         stmt->tokens[stmt->token_count - 1].var_idx = -1; // Default to -1 (not found)
