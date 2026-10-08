@@ -1,11 +1,9 @@
 REM BOING BALL - AN AMIGA-STYLE RED AND WHITE CHECKER SPHERE
 REM Press Space to pause/resume; press another key to quit.
 REM Run with: basika -w demo/boing_ball.bas
+REM Everything is drawn in 1024x768 screen pixels.
 SCREEN _NEWIMAGE(1024, 768, 32): CLS
 _AUTODISPLAY OFF
-REM The scene is laid out in 640x480 coordinates; WINDOW SCREEN maps them onto
-REM the 1024x768 screen, so lines, circles and fills are drawn at full size.
-WINDOW SCREEN (0, 0)-(639, 479)
 
 CONST GREY = _RGB32(170, 170, 170)
 CONST CYAN = _RGB32(85, 255, 255)
@@ -13,26 +11,34 @@ CONST RED = _RGB32(255, 85, 85)
 CONST DARK_RED = _RGB32(170, 0, 0)
 CONST WHITE = _RGB32(255, 255, 255)
 CONST DARK_GREY = _RGB32(85, 85, 85)
-REM One screen pixel, in scene units.
-CONST PX = 639 / 1023
-LINE (0, 0)-(639, 479), GREY, BF
+REM Height in pixels of each band of the ball's checker texture.
+CONST ROW_STEP = 2
+REM The ball's spin repeats every 64 steps. Each frame of it is drawn the first
+REM time it is shown, into a CELL x CELL square of an 8x8 sprite sheet, and
+REM copied to the screen with _PUTIMAGE after that.
+CONST SPIN_FRAMES = 64
+CONST CELL = 196
+LINE (0, 0)-(1023, 767), GREY, BF
 
 DIM SHARED SIN_ANGLE(96), COS_ANGLE(96)
+DIM SHARED BallSheet AS LONG, BallDrawn(SPIN_FRAMES - 1) AS INTEGER
+BallSheet = _NEWIMAGE(8 * CELL, 8 * CELL, 32)
 PI = 3.14159
-BALL_RADIUS = SphereHalfWidth(60, 0)
-FLOOR_Y = 330
-BALL_CONTACT_Y = FLOOR_Y + 34
-BALL_X = 140
-BALL_Y = 115
+BALL_RADIUS = SphereHalfWidth(96, 0)
+FLOOR_Y = 528
+BALL_CONTACT_Y = FLOOR_Y + 54
+BALL_X = 224
+BALL_Y = 184
 OLD_X = BALL_X
 OLD_Y = BALL_Y
-VELOCITY_X = 4
+VELOCITY_X = 5
 VELOCITY_Y = 0
-FRAME = 0
+SPIN_POS = 0
 PAUSED = 0
 
 CALL InitializeTextureAngles(PI)
 CALL DrawBackdrop((FLOOR_Y))
+LAST_TICK# = TIMER
 
 WHILE 1
 	KEY$ = INKEY$
@@ -44,26 +50,35 @@ WHILE 1
 		END IF
 	END IF
 
+	REM The motion moves in steps of 1/60 second, as many as have passed since
+	REM the last frame (up to 3), so the ball keeps its speed while new frames
+	REM of the spin are being drawn.
+	NOW_TICK# = TIMER
+	STEPS = (NOW_TICK# - LAST_TICK#) * 60
+	IF STEPS < 0 THEN STEPS = 1 ' TIMER went past midnight
+	IF STEPS > 3 THEN STEPS = 3
+	LAST_TICK# = NOW_TICK#
+
 	IF PAUSED = 0 THEN
 		CALL RestoreBallArea((OLD_X), (OLD_Y), (BALL_RADIUS), (FLOOR_Y), (BALL_CONTACT_Y))
 
-		BALL_X = BALL_X + VELOCITY_X
-		BALL_Y = BALL_Y + VELOCITY_Y
-		VELOCITY_Y = VELOCITY_Y + .62
+		BALL_X = BALL_X + VELOCITY_X * STEPS
+		BALL_Y = BALL_Y + VELOCITY_Y * STEPS
+		VELOCITY_Y = VELOCITY_Y + .7 * STEPS
 
-		IF BALL_X < 138 THEN BALL_X = 138: VELOCITY_X = -VELOCITY_X: PLAY "MBT240V4O2L16MS C G O1 C"
-		IF BALL_X > 502 THEN BALL_X = 502: VELOCITY_X = -VELOCITY_X: PLAY "MBT240V4O2L16MS G C O1 G"
-		IF BALL_Y > BALL_CONTACT_Y - BALL_RADIUS THEN BALL_Y = BALL_CONTACT_Y - BALL_RADIUS: VELOCITY_Y = -11.2: PLAY "MBT240V4O2L16MS G C O1 G"
+		IF BALL_X < 221 THEN BALL_X = 221: VELOCITY_X = -VELOCITY_X: PLAY "MBT240V4O2L16MS C G O1 C"
+		IF BALL_X > 803 THEN BALL_X = 803: VELOCITY_X = -VELOCITY_X: PLAY "MBT240V4O2L16MS G C O1 G"
+		IF BALL_Y > BALL_CONTACT_Y - BALL_RADIUS THEN BALL_Y = BALL_CONTACT_Y - BALL_RADIUS: VELOCITY_Y = -18.14: PLAY "MBT240V4O2L16MS G C O1 G"
 
-		CALL DrawBall((BALL_X), (BALL_Y), (BALL_RADIUS), (FRAME), (PI), (BALL_CONTACT_Y))
+		CALL DrawBall((BALL_X), (BALL_Y), (BALL_RADIUS), INT(SPIN_POS), (PI), (BALL_CONTACT_Y))
 		OLD_X = BALL_X
 		OLD_Y = BALL_Y
-		FRAME = FRAME + 1
+		SPIN_POS = SPIN_POS + STEPS
 
 		CALL DrawFps
 		_DISPLAY
 	END IF
-	_LIMIT 55
+	_LIMIT 60
 WEND
 END
 
@@ -78,13 +93,10 @@ SUB DrawFps
 		Shown = LTRIM$(STR$(INT(Frames / Elapsed# + .5))) + " FPS"
 		StartTime = TIMER: Frames = 0
 	END IF
-	REM Plain WINDOW returns to pixel coordinates for the text.
-	WINDOW
 	TextWidth = _PRINTWIDTH(Shown)
 	LINE (_WIDTH - TextWidth - 14, _HEIGHT - 26)-(_WIDTH - 1, _HEIGHT - 1), GREY, BF
 	COLOR DARK_GREY, GREY
 	_PRINTSTRING (_WIDTH - TextWidth - 8, _HEIGHT - 22), Shown
-	WINDOW SCREEN (0, 0)-(639, 479)
 END SUB
 
 SUB InitializeTextureAngles(PiValue)
@@ -96,70 +108,81 @@ SUB InitializeTextureAngles(PiValue)
 END SUB
 
 SUB DrawBackdrop(FloorY)
-	REM Bright cyan strokes, two screen pixels wide.
-	LINE (76, 20)-(564, FloorY), CYAN, B
-	LINE (76 + PX, 20 + PX)-(564 - PX, FloorY - PX), CYAN, B
-	FOR GridX = 101 TO 539 STEP 25
-		LINE (GridX, 20)-(GridX, FloorY), CYAN
-		LINE (GridX + PX, 20)-(GridX + PX, FloorY), CYAN
+	REM Bright cyan strokes, two pixels wide: a back wall with a 40-pixel grid
+	REM from x 122 to 902, and a floor fanning out to the bottom corners.
+	LINE (122, 32)-(902, FloorY), CYAN, B
+	LINE (123, 33)-(901, FloorY - 1), CYAN, B
+	FOR GridX = 162 TO 862 STEP 40
+		LINE (GridX, 32)-(GridX + 1, FloorY), CYAN, BF
 	NEXT GridX
-	FOR GridY = 45 TO 305 STEP 25
-		LINE (76, GridY)-(564, GridY), CYAN
-		LINE (76, GridY + PX)-(564, GridY + PX), CYAN
+	FOR GridY = 72 TO 488 STEP 40
+		LINE (122, GridY)-(902, GridY + 1), CYAN, BF
 	NEXT GridY
-	LINE (76, FloorY)-(22, 465), CYAN
-	LINE (76 + PX, FloorY)-(22 + PX, 465), CYAN
-	LINE (564, FloorY)-(618, 465), CYAN
-	LINE (564 - PX, FloorY)-(618 - PX, 465), CYAN
-	FOR GridX = 76 TO 564 STEP 25
-		BottomX = 22 + (GridX - 76) * 600 / 488
-		LINE (GridX, FloorY)-(BottomX, 465), CYAN
-		LINE (GridX + PX, FloorY)-(BottomX + PX, 465), CYAN
+	FOR GridX = 122 TO 902 STEP 40
+		BottomX = 35 + (GridX - 122) * 954 / 780
+		LINE (GridX, FloorY)-(BottomX, 744), CYAN
+		LINE (GridX + 1, FloorY)-(BottomX + 1, 744), CYAN
 	NEXT GridX
+	LINE (902, FloorY)-(989, 744), CYAN
+	LINE (901, FloorY)-(988, 744), CYAN
 	FOR Row = 1 TO 8
-		GridY = FloorY + Row * Row * 135 / 64
-		LeftX = 76 - (GridY - FloorY) * 54 / 135
-		RightX = 564 + (GridY - FloorY) * 54 / 135
-		LINE (LeftX, GridY)-(RightX, GridY), CYAN
-		LINE (LeftX, GridY + PX)-(RightX, GridY + PX), CYAN
+		GridY = FloorY + Row * Row * 216 / 64
+		LeftX = 122 - (GridY - FloorY) * 87 / 216
+		RightX = 902 + (GridY - FloorY) * 87 / 216
+		LINE (LeftX, GridY)-(RightX, GridY + 1), CYAN, BF
 	NEXT Row
 END SUB
 
 SUB RestoreBallArea(OldX, OldY, Radius, FloorY, ContactY)
 	HeightAboveFloor = ContactY - (OldY + Radius)
 	IF HeightAboveFloor < 0 THEN HeightAboveFloor = 0
-	ShadowRadius = 32 + HeightAboveFloor * .1
-	ShadowOffsetX = 18 + HeightAboveFloor * .1
-	ShadowRight = OldX + ShadowOffsetX + ShadowRadius + 4
-	IF ShadowRight < OldX + Radius + 4 THEN ShadowRight = OldX + Radius + 4
-	RestoreBottom = ContactY + ShadowRadius + 4
-	IF RestoreBottom < OldY + Radius + 40 THEN RestoreBottom = OldY + Radius + 40
-	LINE (OldX - Radius - 4, OldY - Radius - 4)-(ShadowRight, RestoreBottom), GREY, BF
+	ShadowRadius = 51 + HeightAboveFloor * .1
+	ShadowOffsetX = 29 + HeightAboveFloor * .1
+	ShadowRight = OldX + ShadowOffsetX + ShadowRadius + 6
+	IF ShadowRight < OldX + Radius + 6 THEN ShadowRight = OldX + Radius + 6
+	RestoreBottom = ContactY + ShadowRadius + 6
+	IF RestoreBottom < OldY + Radius + 64 THEN RestoreBottom = OldY + Radius + 64
+	LINE (OldX - Radius - 6, OldY - Radius - 6)-(ShadowRight, RestoreBottom), GREY, BF
 	CALL DrawBackdrop((FloorY))
 END SUB
 
 SUB DrawBall(BallX, BallY, Radius, Frame, PiValue, ContactY)
 	HeightAboveFloor = ContactY - (BallY + Radius)
 	IF HeightAboveFloor < 0 THEN HeightAboveFloor = 0
-	ShadowRadius = 32 + HeightAboveFloor * .1
-	ShadowOffsetX = 18 + HeightAboveFloor * .1
-	ShadowAlpha = 160 - HeightAboveFloor * .35
+	ShadowRadius = 51 + HeightAboveFloor * .1
+	ShadowOffsetX = 29 + HeightAboveFloor * .1
+	ShadowAlpha = 160 - HeightAboveFloor * .22
 	IF ShadowAlpha < 80 THEN ShadowAlpha = 80
 	REM The shadow fades as the ball rises: a translucent _RGBA32 fill blends with the floor.
 	CALL FillEllipse((BallX + ShadowOffsetX), (ContactY), (ShadowRadius), (ShadowRadius * .45), _RGBA32(0, 0, 0, ShadowAlpha))
-	CALL FillEllipse((BallX), (BallY), (Radius), (Radius), WHITE)
-	CALL DrawSphereTexture((BallX), (BallY), (Radius), (Frame), (PiValue))
-	CIRCLE (BallX, BallY), Radius, DARK_GREY
-	CALL FillEllipse((BallX - 24), (BallY - 28), 4, 4, WHITE)
+	Spin = Frame MOD SPIN_FRAMES
+	CellX = (Spin MOD 8) * CELL
+	CellY = (Spin \ 8) * CELL
+	IF NOT BallDrawn(Spin) THEN
+		CALL DrawBallCell((CellX + CELL \ 2), (CellY + CELL \ 2), (Radius), (Spin), (PiValue))
+		BallDrawn(Spin) = -1
+	END IF
+	REM The cell's corners are transparent, so only the ball covers the backdrop.
+	_PUTIMAGE (INT(BallX + .5) - CELL \ 2, INT(BallY + .5) - CELL \ 2), BallSheet, 0, (CellX, CellY)-(CellX + CELL - 1, CellY + CELL - 1)
+END SUB
+
+REM Draws one frame of the spinning ball into the sprite sheet, centered at (CenterX, CenterY).
+SUB DrawBallCell(CenterX, CenterY, Radius, Spin, PiValue)
+	_DEST BallSheet
+	CALL FillEllipse((CenterX), (CenterY), (Radius), (Radius), WHITE)
+	CALL DrawSphereTexture((CenterX), (CenterY), (Radius), (Spin), (PiValue))
+	CIRCLE (CenterX, CenterY), Radius, DARK_GREY
+	CALL FillEllipse((CenterX - 38), (CenterY - 45), 6, 6, WHITE)
+	_DEST 0
 END SUB
 
 SUB FillEllipse(CenterX, CenterY, RadiusX, RadiusY, FillColor AS _UNSIGNED LONG)
-	REM One horizontal span per screen row, so translucent colors blend evenly.
-	FOR ScreenY = INT((CenterY - RadiusY) / PX + .5) TO INT((CenterY + RadiusY) / PX + .5)
-		Row = ScreenY * PX - CenterY
+	REM One horizontal span per pixel row, so translucent colors blend evenly.
+	FOR ScreenY = INT(CenterY - RadiusY + .5) TO INT(CenterY + RadiusY + .5)
+		Row = ScreenY - CenterY
 		IF ABS(Row) <= RadiusY THEN
 			HalfWidth = RadiusX * SQR(1 - (Row / RadiusY) * (Row / RadiusY))
-			LINE (CenterX - HalfWidth, ScreenY * PX)-(CenterX + HalfWidth, ScreenY * PX), FillColor
+			LINE (CenterX - HalfWidth, ScreenY)-(CenterX + HalfWidth, ScreenY), FillColor
 		END IF
 	NEXT ScreenY
 END SUB
@@ -176,7 +199,7 @@ SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
 	CosRoll = COS(Roll)
 	SinRoll = SIN(Roll)
 
-	FOR DeltaY = -59 TO 59 STEP 2
+	FOR DeltaY = -Radius + 1 TO Radius - 1 STEP ROW_STEP
 		HalfWidth = SQR(Radius * Radius - DeltaY * DeltaY)
 		PreviousColor = WHITE
 
@@ -218,15 +241,15 @@ SUB DrawSphereTexture(CenterX, CenterY, Radius, Frame, PiValue)
 			Light = Depth - DeltaX * .28 - DeltaY * .32
 			TileColor = RED
 			IF Parity = 1 THEN TileColor = WHITE
-			IF Light < 38 AND Parity = 0 THEN TileColor = DARK_RED
-			IF Light < 38 AND Parity = 1 THEN TileColor = GREY
-			IF Light < 18 AND Parity = 0 THEN TileColor = DARK_RED
-			IF Light < 18 AND Parity = 1 THEN TileColor = DARK_GREY
+			IF Light < 61 AND Parity = 0 THEN TileColor = DARK_RED
+			IF Light < 61 AND Parity = 1 THEN TileColor = GREY
+			IF Light < 29 AND Parity = 0 THEN TileColor = DARK_RED
+			IF Light < 29 AND Parity = 1 THEN TileColor = DARK_GREY
 
 			IF Segment = 0 THEN RunStart = X1: PreviousColor = TileColor
-			IF Segment > 0 AND TileColor <> PreviousColor THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X1, CenterY + DeltaY + 2), PreviousColor, BF: RunStart = X1
+			IF Segment > 0 AND TileColor <> PreviousColor THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X1, CenterY + DeltaY + ROW_STEP - 1), PreviousColor, BF: RunStart = X1
 			IF Segment > 0 THEN PreviousColor = TileColor
-			IF Segment = 95 THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X2, CenterY + DeltaY + 2), PreviousColor, BF
+			IF Segment = 95 THEN LINE (CenterX + RunStart, CenterY + DeltaY)-(CenterX + X2, CenterY + DeltaY + ROW_STEP - 1), PreviousColor, BF
 		NEXT Segment
 	NEXT DeltaY
 END SUB

@@ -64,6 +64,7 @@ TESTS=(
   "tests/audio/asc_chr_beep"
   "tests/strings/print_using"
   "tests/strings/print_using_ext"
+  "tests/strings/print_using_qbasic"
   "tests/strings/tab_len"
   "tests/strings/string_funcs"
   "tests/strings/instr_val_str"

@@ -4833,33 +4833,292 @@ static void format_str_function(Num value, char *buf, size_t size) {
     snprintf(buf, size, "%s%s", digits[0] == '-' ? "" : " ", digits);
 }
 
-static void apply_basika_using(const char *fmt, double val, char *out, int out_size) {
-    if (strchr(fmt, '%')) {
-        snprintf(out, out_size, fmt, val);
-        return;
+/* ---- PRINT USING ----
+ * The format is literal text with fields in it. Each value fills the next
+ * field, the format starts over when the values outnumber its fields, and
+ * the text after the last value's field is printed up to the next field.
+ *   Strings:  !  first character    &  whole string    \  \  width of the backslashes
+ *   Numbers:  #  digit   .  point   ,  (before the point) thousands commas
+ *             +  sign first or last   -  last: minus sign   ^^^^ or ^^^^^  exponent
+ *             **  fill with *   $$  dollar sign   **$  both
+ *   _  prints the next character literally. A number too wide for its field
+ *   prints in full after a %.
+ * Basika extension: a format with no fields at all (an error in QBasic) may
+ * be a C printf format with one conversion, such as "%6.2f" or "%s". */
+enum { USING_NUMBER, USING_FIRST_CHAR, USING_WHOLE_STRING, USING_STRING_WIDTH };
+
+typedef struct {
+    int kind;
+    int width;                      /* USING_STRING_WIDTH */
+    int lead_plus, trail_plus, trail_minus;
+    int asterisk, dollar, comma;
+    int int_positions;              /* characters before the point, for **, $$, # and , */
+    int has_point, decimals, carets;
+} UsingField;
+
+/* Length of the field starting at f (described in *field), or 0 if f is literal text. */
+static int using_field_at(const char *f, UsingField *field) {
+    memset(field, 0, sizeof(*field));
+    if (*f == '!') { field->kind = USING_FIRST_CHAR; return 1; }
+    if (*f == '&') { field->kind = USING_WHOLE_STRING; return 1; }
+    if (*f == '\\') {
+        const char *q = f + 1;
+        while (*q == ' ') q++;
+        if (*q != '\\') return 0;
+        field->kind = USING_STRING_WIDTH;
+        field->width = (int)(q - f) + 1;
+        return field->width;
     }
-    int hashes_before = 0, hashes_after = 0, has_dot = 0;
-    for (int i = 0; fmt[i]; i++) {
-        if (fmt[i] == '#') { if (has_dot) hashes_after++; else hashes_before++; }
-        else if (fmt[i] == '.') has_dot = 1;
+    field->kind = USING_NUMBER;
+    const char *q = f;
+    if (*q == '+') { field->lead_plus = 1; q++; }
+    if (strncmp(q, "**$", 3) == 0) { field->asterisk = field->dollar = 1; field->int_positions = 3; q += 3; }
+    else if (strncmp(q, "**", 2) == 0) { field->asterisk = 1; field->int_positions = 2; q += 2; }
+    else if (strncmp(q, "$$", 2) == 0) { field->dollar = 1; field->int_positions = 2; q += 2; }
+    int digits = 0;
+    while (1) {
+        if (*q == '#') {
+            if (field->has_point) field->decimals++; else field->int_positions++;
+            digits++;
+        } else if (*q == '.' && !field->has_point && (q[1] == '#' || digits || field->int_positions)) {
+            field->has_point = 1;
+        } else if (*q == ',' && !field->has_point && (digits || field->asterisk || field->dollar) &&
+                   (q[1] == '#' || q[1] == ',' || q[1] == '.')) {
+            field->comma = 1;
+            field->int_positions++;
+        } else {
+            break;
+        }
+        q++;
     }
-    if (has_dot) snprintf(out, out_size, "%*.*f", hashes_before + hashes_after + 1, hashes_after, val);
-    else if (hashes_before > 0) snprintf(out, out_size, "%*.0f", hashes_before, val); // rounds, like %.Nf above
-    else snprintf(out, out_size, "%g", val);
+    if (!digits && !field->asterisk && !field->dollar) return 0;
+    int carets = 0;
+    while (q[carets] == '^') carets++;
+    if (carets >= 4) {
+        field->carets = carets > 5 ? 5 : carets;
+        q += field->carets;
+    }
+    if (!field->lead_plus && *q == '+') { field->trail_plus = 1; q++; }
+    else if (!field->lead_plus && *q == '-') { field->trail_minus = 1; q++; }
+    return (int)(q - f);
 }
 
-static void apply_basika_using_str(const char *fmt, const char *val, char *out, int out_size) {
-    if (strchr(fmt, '%')) {
-        snprintf(out, out_size, fmt, val);
+static int using_has_field(const char *fmt) {
+    UsingField field;
+    for (const char *p = fmt; *p; p++) {
+        if (*p == '_') {
+            if (p[1]) p++;
+        } else if (using_field_at(p, &field)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void using_append(char *out, size_t size, const char *text, size_t length) {
+    size_t used = strlen(out);
+    if (used + length >= size) length = size > used + 1 ? size - used - 1 : 0;
+    memcpy(out + used, text, length);
+    out[used + length] = '\0';
+}
+
+static void using_append_char(char *out, size_t size, char c, int count) {
+    for (int i = 0; i < count; i++) using_append(out, size, &c, 1);
+}
+
+/* Appends the literal text from *pos up to the next field. Returns that field's
+ * length with *field filled in (leaving *pos at it), or 0 at the end. */
+static int using_literals(const char *fmt, size_t *pos, UsingField *field, char *out, size_t size) {
+    while (fmt[*pos]) {
+        const char *p = fmt + *pos;
+        int length = using_field_at(p, field);
+        if (length) return length;
+        if (*p == '_' && p[1]) p++, (*pos)++;
+        using_append(out, size, p, 1);
+        (*pos)++;
+    }
+    return 0;
+}
+
+static void using_format_string(const UsingField *field, const char *value, char *out, size_t size) {
+    size_t length = strlen(value);
+    if (field->kind == USING_FIRST_CHAR) {
+        using_append_char(out, size, length ? value[0] : ' ', 1);
+    } else if (field->kind == USING_WHOLE_STRING) {
+        using_append(out, size, value, length);
+    } else {
+        size_t shown = length < (size_t)field->width ? length : (size_t)field->width;
+        using_append(out, size, value, shown);
+        using_append_char(out, size, ' ', field->width - (int)shown);
+    }
+}
+
+static void using_insert_commas(char *digits, size_t size) {
+    size_t length = strlen(digits);
+    char grouped[96];
+    size_t n = 0;
+    for (size_t i = 0; i < length && n + 2 < sizeof(grouped); i++) {
+        if (i > 0 && (length - i) % 3 == 0) grouped[n++] = ',';
+        grouped[n++] = digits[i];
+    }
+    grouped[n] = '\0';
+    snprintf(digits, size, "%s", grouped);
+}
+
+static void using_format_number(const UsingField *field, double value, char *out, size_t size) {
+    int width = field->int_positions + field->lead_plus;
+    int sign_field = field->lead_plus || field->trail_plus || field->trail_minus;
+    char whole[96] = "", fraction[64] = "", exponent[16] = "";
+    int negative;
+
+    if (field->carets) {
+        /* Without a sign in the field, one position before the point holds it. */
+        int digits = field->int_positions - (sign_field ? 0 : 1);
+        if (digits < 0) digits = 0;
+        int power = 0;
+        double magnitude = fabs(value), mantissa = 0;
+        char text[96];
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (magnitude > 0) {
+                if (attempt == 0) power = (int)floor(log10(magnitude)) - (digits > 0 ? digits - 1 : -1);
+                mantissa = magnitude / pow(10, power);
+            }
+            snprintf(text, sizeof(text), "%.*f", field->decimals, mantissa);
+            char *point = strchr(text, '.');
+            int whole_length = point ? (int)(point - text) : (int)strlen(text);
+            if (magnitude == 0 || whole_length <= (digits > 0 ? digits : 0) ||
+                (digits == 0 && strncmp(text, "0", 1) == 0)) break;
+            power++; // rounding carried into another digit
+        }
+        negative = value < 0 && strtod(text, NULL) != 0;
+        char *point = strchr(text, '.');
+        if (point) {
+            snprintf(fraction, sizeof(fraction), "%s", point + 1);
+            *point = '\0';
+        }
+        snprintf(whole, sizeof(whole), "%s", digits == 0 && strcmp(text, "0") == 0 ? "" : text);
+        snprintf(exponent, sizeof(exponent), "E%c%0*d", power < 0 ? '-' : '+', field->carets - 2, abs(power));
+    } else {
+        char text[96];
+        snprintf(text, sizeof(text), "%.*f", field->decimals, fabs(value));
+        negative = value < 0 && strtod(text, NULL) != 0;
+        char *point = strchr(text, '.');
+        if (point) {
+            snprintf(fraction, sizeof(fraction), "%s", point + 1);
+            *point = '\0';
+        }
+        snprintf(whole, sizeof(whole), "%s", text);
+        if (field->comma) using_insert_commas(whole, sizeof(whole));
+    }
+
+    /* Everything before the point: sign, dollar sign and the whole digits. */
+    char before[128];
+    char lead_sign = field->lead_plus ? (negative ? '-' : '+') : (!sign_field && negative ? '-' : 0);
+    int show_zero_space = field->carets && !sign_field && !negative;
+    for (int pass = 0; pass < 2; pass++) {
+        snprintf(before, sizeof(before), "%s%s%s%s",
+                 show_zero_space ? " " : "", lead_sign ? (char[]){lead_sign, 0} : "",
+                 field->dollar ? "$" : "", whole);
+        // A lone 0 before the point is the first thing dropped to make room.
+        if ((int)strlen(before) <= width || strcmp(whole, "0") != 0) break;
+        whole[0] = '\0';
+    }
+    int length = (int)strlen(before);
+    if (length > width) using_append_char(out, size, '%', 1);
+    else using_append_char(out, size, field->asterisk ? '*' : ' ', width - length);
+    using_append(out, size, before, strlen(before));
+    if (field->has_point) {
+        using_append_char(out, size, '.', 1);
+        using_append(out, size, fraction, strlen(fraction));
+    }
+    using_append(out, size, exponent, strlen(exponent));
+    if (field->trail_plus) using_append_char(out, size, negative ? '-' : '+', 1);
+    if (field->trail_minus) using_append_char(out, size, negative ? '-' : ' ', 1);
+}
+
+/* The Basika printf extension: the single conversion in fmt ('s' for
+ * strings; d i o u x X e E f F g G for numbers), or 0 if fmt is not one. */
+static char using_printf_conversion(const char *fmt) {
+    char conversion = 0;
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') continue;
+        if (p[1] == '%') { p++; continue; }
+        if (conversion) return 0;
+        p++;
+        while (*p && strchr("-+ #0", *p)) p++;
+        for (int i = 0; i < 2 && isdigit((unsigned char)*p); i++) p++;
+        if (*p == '.') {
+            p++;
+            for (int i = 0; i < 2 && isdigit((unsigned char)*p); i++) p++;
+        }
+        if (!*p || !strchr("diouxXeEfFgGs", *p)) return 0;
+        conversion = *p;
+    }
+    return conversion;
+}
+
+static void using_printf(const char *fmt, char conversion, int is_string, const char *text, double value,
+                         char *out, size_t size) {
+    char buffer[512];
+    if (is_string != (conversion == 's')) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
         return;
     }
-    if (strcmp(fmt, "!") == 0) {
-        snprintf(out, out_size, "%.1s", val);
-    } else if (strcmp(fmt, "&") == 0) {
-        snprintf(out, out_size, "%s", val);
+    if (is_string) {
+        snprintf(buffer, sizeof(buffer), fmt, text);
+    } else if (strchr("diouxX", conversion)) {
+        /* Widen the conversion to long long. */
+        char wide[300];
+        size_t prefix = 0;
+        for (const char *p = fmt; *p; p++) {
+            if (*p == '%' && p[1] == '%') { p++; continue; }
+            if (*p == '%') {
+                const char *q = p + 1;
+                while (*q && !strchr("diouxXeEfFgGs", *q)) q++;
+                prefix = (size_t)(q - fmt);
+                break;
+            }
+        }
+        snprintf(wide, sizeof(wide), "%.*sll%s", (int)prefix, fmt, fmt + prefix);
+        snprintf(buffer, sizeof(buffer), wide, (long long)llround(value));
     } else {
-        snprintf(out, out_size, "%s", val);
+        snprintf(buffer, sizeof(buffer), fmt, value);
     }
+    using_append(out, size, buffer, strlen(buffer));
+}
+
+/* Formats one PRINT USING value onto out, after the literal text before its
+ * field; *pos tracks the place in fmt across the values of one PRINT. */
+static void using_format_value(const char *fmt, size_t *pos, int is_string, const char *text, double value,
+                               char *out, size_t size) {
+    if (!using_has_field(fmt)) {
+        char conversion = using_printf_conversion(fmt);
+        if (!conversion) {
+            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            return;
+        }
+        using_printf(fmt, conversion, is_string, text, value, out, size);
+        return;
+    }
+    UsingField field;
+    int length = using_literals(fmt, pos, &field, out, size);
+    if (!length) {
+        *pos = 0;
+        length = using_literals(fmt, pos, &field, out, size);
+    }
+    if (is_string != (field.kind != USING_NUMBER)) {
+        report_runtime_error(ERR_TYPE_MISMATCH);
+        return;
+    }
+    if (is_string) using_format_string(&field, text, out, size);
+    else using_format_number(&field, value, out, size);
+    *pos += (size_t)length;
+}
+
+/* The literal text after the last value's field, up to the next field. */
+static void using_trailing_text(const char *fmt, size_t *pos, char *out, size_t size) {
+    UsingField field;
+    if (using_has_field(fmt)) using_literals(fmt, pos, &field, out, size);
 }
 
 static Variable *get_or_create_frame_variable(CallFrame *frame, int variable_index) {
@@ -9165,6 +9424,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             int using_mode = 0;
             int last_was_numeric = 0;
             char using_fmt[256] = "";
+            size_t using_pos = 0;
             /* detect PRINT USING format: either 'PRINT USING "fmt", expr' or 'PRINT #n, USING "fmt", expr' */
             const char *using_check = ptr;
             Token using_tok = get_next_token(&using_check);
@@ -9189,16 +9449,26 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         ptr = item_saved;
                         if (fnum != -1 && file_handles[fnum]) fprintf(file_handles[fnum], "\n");
                         else basic_output("\n");
+                    } else if (using_mode) {
+                        // Ended with ; or , : still print the text after the last field.
+                        char tail[512] = "";
+                        using_trailing_text(using_fmt, &using_pos, tail, sizeof(tail));
+                        if (fnum != -1 && file_handles[fnum]) {
+                            fprintf(file_handles[fnum], "%s", tail);
+                            print_col += (int)strlen(tail);
+                        } else {
+                            basic_output(tail);
+                        }
                     }
                     break;
                 }
                 has_args = 1;
-                char val_buf[512] = "";
+                char val_buf[1024] = "";
                 if (is_string_token(&next) || is_string_member_reference_text(item_saved)) {
                     ptr = item_saved;
                     char value[BASIC_STRING_MAX] = "";
                     parse_string_expression(&ptr, value, sizeof(value));
-                    if (using_mode) apply_basika_using_str(using_fmt, value, val_buf, sizeof(val_buf));
+                    if (using_mode) using_format_value(using_fmt, &using_pos, 1, value, 0, val_buf, sizeof(val_buf));
                     else strcpy(val_buf, value);
                     last_was_numeric = 0;
                 } else {
@@ -9208,7 +9478,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     if (runtime_error_occurred) break; // the failed item is not printed
                     double val = num_to_double(number);
 
-                    if (using_mode) apply_basika_using(using_fmt, val, val_buf, sizeof(val_buf));
+                    if (using_mode) using_format_value(using_fmt, &using_pos, 0, "", val, val_buf, sizeof(val_buf));
                     else {
                         char digits[64];
                         format_number_plain(number, last_expression_is_double, digits, sizeof(digits));
@@ -9216,6 +9486,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     }
                     last_was_numeric = 1;
                 }
+                if (runtime_error_occurred) break; // a PRINT USING value that does not fit its field
                 if (fnum != -1 && file_handles[fnum]) {
                     fprintf(file_handles[fnum], "%s", val_buf);
                     for (int k = 0; val_buf[k]; k++) {
@@ -9254,11 +9525,14 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     }
                 } else {
                     ptr = sep_saved;
+                    char tail[512] = "";
+                    if (using_mode) using_trailing_text(using_fmt, &using_pos, tail, sizeof(tail));
                     if (fnum != -1 && file_handles[fnum]) {
-                        fprintf(file_handles[fnum], "\n");
+                        fprintf(file_handles[fnum], "%s\n", tail);
                         print_col = 0;
                         print_row++;
                     } else {
+                        basic_output(tail);
                         basic_output("\n");
                     }
                     break;

@@ -179,6 +179,8 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `LOCATE row, col`: Positions the cursor.
 - `LSET var$ = expression$`: Left-justifies a string into a field buffer or string variable.
 - `PRINT [#n,] [USING "fmt";] [expressions] [,|;]`: Output to screen or file.
+- `PRINT USING`, as in QBasic: the format is literal text with fields, each value fills the next field, the format starts over when there are more values than fields, and the text after the last field used is printed up to the next field. Strings: `!` first character, `&` whole string, `\  \` as many characters as the backslashes span. Numbers: `#` digit, `.` decimal point, `,` before the point adds thousands commas, `+` first or last prints the sign, `-` last prints a trailing minus, `^^^^` or `^^^^^` exponent, `**` fills with asterisks, `$$` adds a dollar sign, `**$` does both. `_` prints the next character as text. A number too wide for its field prints in full after a `%`. A string in a number field (or a number in a string field) is "Type mismatch"; a format with no fields is "Illegal function call".
+- Basika extension: a `PRINT USING` format with no fields may instead be a C `printf` format with one conversion, `%s` for a string or `d i o u x X e E f F g G` for a number (`PRINT USING "%6.2f"; x`).
 - `RSET var$ = expression$`: Right-justifies a string into a field buffer or string variable.
 - `SPC(n)`: Used in `PRINT` to output spaces.
 - `TAB(n)`: Used in `PRINT` to move to a specific column.
