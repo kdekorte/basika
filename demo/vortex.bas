@@ -17,6 +17,8 @@
 '  Keys    Left/Right (or A/D) move   Space fire (hold, or tap faster)
 '          Z superzapper
 '          P pause   F fullscreen on/off   Esc title screen / quit
+'  A joystick or gamepad works too, alongside the keys: the stick moves,
+'  button 1 fires (and starts a game), button 2 is the superzapper.
 '  Games play fullscreen (F switches that off); the title screen runs a
 '  demo game in a window.
 '
@@ -206,7 +208,7 @@ SUB ClearShots
 END SUB
 
 SUB ReadInput
-    DIM k AS LONG
+    DIM k AS LONG, jx AS INTEGER, jPress AS INTEGER
     DO
         k = _KEYHIT
         SELECT CASE k
@@ -227,12 +229,19 @@ SUB ReadInput
                 IF NOT Demo THEN InZap = -1
         END SELECT
     LOOP UNTIL k = 0
+    ' The joystick: STICK(0) is 0 with none attached, else 1-200 with 100 at
+    ' rest. STRIG(0) and STRIG(4) latch presses of buttons 1 and 2, so they
+    ' are read every frame to drop presses left over from the last game.
+    jx = STICK(0)
+    jPress = STRIG(0)
+    IF STRIG(4) AND NOT Demo THEN InZap = -1
+    IF jPress AND (Demo OR State = ST_OVER) THEN StartGame
     IF Demo THEN
         Autopilot
     ELSE
-        InLeft = _KEYDOWN(KEY_LEFT) OR _KEYDOWN(97) OR _KEYDOWN(65)
-        InRight = _KEYDOWN(KEY_RIGHT) OR _KEYDOWN(100) OR _KEYDOWN(68)
-        InFire = _KEYDOWN(32)
+        InLeft = _KEYDOWN(KEY_LEFT) OR _KEYDOWN(97) OR _KEYDOWN(65) OR (jx > 0 AND jx < 70)
+        InRight = _KEYDOWN(KEY_RIGHT) OR _KEYDOWN(100) OR _KEYDOWN(68) OR jx > 130
+        InFire = _KEYDOWN(32) OR STRIG(1)
     END IF
 END SUB
 
@@ -1062,6 +1071,7 @@ SUB Render
         VTextC "VORTEX", 200, 14, TubeColor
         COLOR WHITE
         IF (Frame \ 30) MOD 2 = 0 THEN CenterText "PRESS SPACE TO PLAY", 330
+        IF STICK(0) THEN CenterText "JOYSTICK: STICK MOVES   BUTTON 1 FIRE   BUTTON 2 SUPERZAPPER", 356
         CenterText "LEFT/RIGHT MOVE   SPACE FIRE (TAP TO FIRE FASTER)   Z SUPERZAPPER   P PAUSE", 380
         IF FullPref THEN
             CenterText "F FULLSCREEN: ON    ESC QUIT", 404
