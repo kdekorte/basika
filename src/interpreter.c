@@ -233,6 +233,9 @@ typedef struct {
     ProcedureDef *proc;
     Statement *return_stmt;
     int return_token_idx;
+    /* Depths of the main program's loop and block stacks when a SUB it runs
+     * inline was called; the SUB's own entries are dropped when it returns. */
+    int for_base, while_base, do_base, block_if_base, select_base;
     
     /* Locals are stored in 128-entry chunks allocated on first use, so large
      * local record arrays fit while pointers to existing locals stay valid. */
@@ -842,6 +845,13 @@ static Statement* skip_for_block(Statement *start_stmt, int start_ts_pos, int *o
     while (nest_depth > 0 && current_stmt) {
         while (current_ts_pos < current_stmt->token_count) {
             Token t = current_stmt->tokens[current_ts_pos++];
+            if (t.type == TOKEN_EXIT) {
+                // The FOR in "EXIT FOR" does not start a nested loop.
+                if (current_ts_pos < current_stmt->token_count && current_stmt->tokens[current_ts_pos].type == TOKEN_FOR) {
+                    current_ts_pos++;
+                }
+                continue;
+            }
             if (t.type == TOKEN_FOR) {
                 nest_depth++;
             } else if (t.type == TOKEN_NEXT) {
@@ -2404,13 +2414,23 @@ static int validate_user_type_graph(int type_index, unsigned char states[MAX_USE
     return 1;
 }
 
+/* The tokens of a TYPE block line before a trailing ' or REM comment. */
+static int type_line_token_count(const Statement *stmt) {
+    int count = stmt->token_count;
+    if (count > 0 && (stmt->tokens[count - 1].type == TOKEN_APOSTROPHE ||
+                      stmt->tokens[count - 1].type == TOKEN_REM)) {
+        count--;
+    }
+    return count;
+}
+
 static int scan_user_types(void) {
     user_type_count = 0;
     user_type_instance_count = 0;
     for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
         if (stmt->token_count == 0 || stmt->tokens[0].type != TOKEN_TYPE) continue;
         if (stmt->token_count < 2 || stmt->tokens[1].type != TOKEN_IDENTIFIER ||
-            stmt->token_count > 2 || user_type_count >= MAX_USER_TYPES) {
+            type_line_token_count(stmt) > 2 || user_type_count >= MAX_USER_TYPES) {
             report_type_declaration_error(stmt);
             return 0;
         }
@@ -2434,7 +2454,7 @@ static int scan_user_types(void) {
         }
         if (stmt->token_count >= 2 && stmt->tokens[0].type == TOKEN_END &&
             stmt->tokens[1].type == TOKEN_TYPE) {
-            if (current_type < 0 || stmt->token_count != 2) {
+            if (current_type < 0 || type_line_token_count(stmt) != 2) {
                 report_type_declaration_error(stmt);
                 return 0;
             }
@@ -2444,8 +2464,10 @@ static int scan_user_types(void) {
         }
         if (current_type < 0) continue;
 
+        int field_tokens = type_line_token_count(stmt);
+        if (field_tokens == 0) continue; // a comment line
         int position = 0;
-        if (stmt->token_count < 3 || stmt->tokens[position++].type != TOKEN_IDENTIFIER) {
+        if (field_tokens < 3 || stmt->tokens[position++].type != TOKEN_IDENTIFIER) {
             report_type_declaration_error(stmt);
             return 0;
         }
@@ -2501,7 +2523,7 @@ static int scan_user_types(void) {
             fixed_string_length = (size_t)stmt->tokens[position++].int_val;
             is_fixed_string = 1;
         }
-        if (stmt->tokens[position].type != TOKEN_EOF) {
+        if (position != field_tokens) {
             report_type_declaration_error(stmt);
             return 0;
         }
@@ -3514,6 +3536,7 @@ typedef struct {
     Num step_val;
     Statement *start_stmt;
     int start_ts_pos;
+    int block_depth, select_depth; // block IF / SELECT CASE depth at the FOR
 } ForLoop;
 
 static ForLoop for_stack[16];
@@ -3622,6 +3645,7 @@ static int while_ptr = 0;
 typedef struct {
     Statement *stmt;
     const char *ptr;
+    int block_depth, select_depth; // block IF / SELECT CASE depth at the DO
 } DoLoop;
 static DoLoop do_stack[16];
 static int do_ptr = 0;
@@ -6647,6 +6671,10 @@ static void execute_procedure_statements(ProcedureDef *proc) {
     int block_if_depth = 0;
     SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
     int select_case_depth = 0;
+    /* FOR, WHILE and DO loops opened in this call sit above these marks on the
+     * shared stacks and are dropped when the call returns, even from inside
+     * a loop (EXIT SUB/FUNCTION). */
+    int for_base = for_ptr, while_base = while_ptr, do_base = do_ptr;
     /* Token position to resume at when a jump lands mid-line (FOR/NEXT on one line). */
     int resume_proc_pos = 0;
 
@@ -6802,25 +6830,9 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     frame->else_seen = 1;
                     continue;
                 }
-                int depth = 1;
-                Statement *s = exec_stmt->next;
-                while (s && s != proc->end_stmt && depth > 0) {
-                    if (s->token_count > 0) {
-                        TokenType first_t = s->tokens[0].type;
-                        if (first_t == TOKEN_IF && s->tokens[s->token_count - 1].type == TOKEN_THEN) {
-                            depth++;
-                        } else if (first_t == TOKEN_END && s->token_count > 1 && s->tokens[1].type == TOKEN_IF) {
-                            depth--;
-                            if (depth == 0) {
-                                curr_proc_stmt = s->next;
-                                jumped = 1;
-                                break;
-                            }
-                        }
-                    }
-                    s = s->next;
-                }
-                if (jumped) break;
+                // Reaching ELSE in a single-line IF means its THEN branch ran:
+                // skip the ELSE branch, as the main program does.
+                ts.pos = exec_stmt->token_count;
                 continue;
             }
 
@@ -6909,9 +6921,42 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     ts.pos++;
                     continue;
                 }
+                if (t->type == TOKEN_EXIT && ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_FOR) {
+                    ts.pos++;
+                    if (for_ptr <= for_base) {
+                        report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+                        break;
+                    }
+                    ForLoop *loop = &for_stack[--for_ptr];
+                    if (block_if_depth > loop->block_depth) block_if_depth = loop->block_depth;
+                    release_select_frames(select_case_stack, &select_case_depth, loop->select_depth);
+                    int end_ts_pos = loop->start_ts_pos;
+                    Statement *target_stmt = skip_for_block(loop->start_stmt, end_ts_pos, &end_ts_pos);
+                    ForLoop *repeat = NULL;
+                    int finished = target_stmt ? finish_skipped_next(target_stmt, &end_ts_pos, &repeat) : 0;
+                    if (finished < 0) break;
+                    if (finished > 0) {
+                        curr_proc_stmt = repeat->start_stmt;
+                        resume_proc_pos = repeat->start_ts_pos;
+                    } else if (!target_stmt) {
+                        report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+                        break;
+                    } else if (end_ts_pos < target_stmt->token_count) {
+                        curr_proc_stmt = target_stmt;
+                        resume_proc_pos = end_ts_pos;
+                    } else {
+                        curr_proc_stmt = target_stmt->next;
+                    }
+                    jumped = 1;
+                    break;
+                }
                 if (t->type == TOKEN_EXIT && ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_DO) {
                     ts.pos++;
-                    if (do_ptr > 0) do_ptr--;
+                    if (do_ptr > 0) {
+                        do_ptr--;
+                        if (block_if_depth > do_stack[do_ptr].block_depth) block_if_depth = do_stack[do_ptr].block_depth;
+                        release_select_frames(select_case_stack, &select_case_depth, do_stack[do_ptr].select_depth);
+                    }
                     int end_ts_pos = ts.pos;
                     Statement *target_stmt = skip_do_block(exec_stmt, end_ts_pos, &end_ts_pos);
                     if (target_stmt) {
@@ -6925,6 +6970,9 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 }
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
                     release_select_frames(select_case_stack, &select_case_depth, 0);
+                    if (for_ptr > for_base) for_ptr = for_base;
+                    if (while_ptr > while_base) while_ptr = while_base;
+                    if (do_ptr > do_base) do_ptr = do_base;
                     current_executing_line = saved_line;
                     return;
                 }
@@ -6946,6 +6994,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         if (do_ptr < 16) {
                             do_stack[do_ptr].stmt = exec_stmt;
                             do_stack[do_ptr].ptr = command_start_ptr;
+                            do_stack[do_ptr].block_depth = block_if_depth;
+                            do_stack[do_ptr].select_depth = select_case_depth;
                             do_ptr++;
                         } else {
                             report_runtime_error(ERR_OUT_OF_MEMORY);
@@ -7083,15 +7133,20 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         break;
                     }
                 } else {
-                    if (for_ptr == 0 || for_stack[for_ptr-1].var_idx != idx) {
-                        if (for_ptr < 16) {
-                            for_stack[for_ptr] = loop;
-                            for_stack[for_ptr].start_stmt = exec_stmt;
-                            for_stack[for_ptr].start_ts_pos = ts.pos;
-                            for_ptr++;
-                        } else {
-                            report_runtime_error(ERR_OUT_OF_MEMORY);
-                        }
+                    // A FOR on a variable already looping in this call restarts
+                    // that loop, dropping the loops inside it.
+                    for (int f = for_ptr - 1; f >= for_base; f--) {
+                        if (for_stack[f].var_idx == idx) { for_ptr = f; break; }
+                    }
+                    if (for_ptr < 16) {
+                        for_stack[for_ptr] = loop;
+                        for_stack[for_ptr].start_stmt = exec_stmt;
+                        for_stack[for_ptr].start_ts_pos = ts.pos;
+                        for_stack[for_ptr].block_depth = block_if_depth;
+                        for_stack[for_ptr].select_depth = select_case_depth;
+                        for_ptr++;
+                    } else {
+                        report_runtime_error(ERR_OUT_OF_MEMORY);
                     }
                 }
                 continue;
@@ -7202,8 +7257,11 @@ static void execute_procedure_statements(ProcedureDef *proc) {
             curr_proc_stmt = curr_proc_stmt->next;
         }
     }
-    // An error or END can leave SELECT CASE blocks open.
+    // An error or END can leave SELECT CASE blocks and loops open.
     release_select_frames(select_case_stack, &select_case_depth, 0);
+    if (for_ptr > for_base) for_ptr = for_base;
+    if (while_ptr > while_base) while_ptr = while_base;
+    if (do_ptr > do_base) do_ptr = do_base;
     current_executing_line = saved_line;
     current_source_line_number = saved_source_line_number;
     current_has_explicit_line_number = saved_has_explicit_line_number;
@@ -9740,7 +9798,9 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 const char *item_saved = ptr;
                 Token next = get_next_token(&ptr);
 
-                if (next.type == TOKEN_EOF || next.type == TOKEN_COLON) {
+                if (next.type == TOKEN_EOF || next.type == TOKEN_COLON || next.type == TOKEN_ELSE) {
+                    // ELSE ends a single-line IF's THEN branch; leave it for the IF.
+                    if (next.type == TOKEN_ELSE) ptr = item_saved;
                     if (!has_args) {
                         ptr = item_saved;
                         if (fnum != -1 && file_handles[fnum]) fprintf(file_handles[fnum], "\n");
@@ -11863,6 +11923,32 @@ static int block_if_depth = 0;
 static SelectCaseFrame select_case_stack[MAX_SELECT_CASE_DEPTH];
 static int select_case_depth = 0;
 
+/* The main program runs the SUBs it calls inline. Entering one records the
+ * stack depths in its frame; leaving it, even from inside a loop, block IF
+ * or SELECT CASE (EXIT SUB), drops what the SUB left open. */
+static Statement *enter_inline_sub(ProcedureDef *proc, TokenStream *ts, Statement *exec_stmt) {
+    int depth = call_stack_depth;
+    int bases[5] = {for_ptr, while_ptr, do_ptr, block_if_depth, select_case_depth};
+    Statement *start = execute_sub_call(proc, ts, exec_stmt);
+    if (call_stack_depth > depth) {
+        CallFrame *frame = &call_stack[call_stack_depth - 1];
+        frame->for_base = bases[0];
+        frame->while_base = bases[1];
+        frame->do_base = bases[2];
+        frame->block_if_base = bases[3];
+        frame->select_base = bases[4];
+    }
+    return start;
+}
+
+static void leave_inline_sub(const CallFrame *frame) {
+    if (for_ptr > frame->for_base) for_ptr = frame->for_base;
+    if (while_ptr > frame->while_base) while_ptr = frame->while_base;
+    if (do_ptr > frame->do_base) do_ptr = frame->do_base;
+    if (block_if_depth > frame->block_if_base) block_if_depth = frame->block_if_base;
+    release_select_frames(select_case_stack, &select_case_depth, frame->select_base);
+}
+
 /* Where CONT resumes after STOP or Ctrl+C, valid until the program is edited. */
 static int cont_valid = 0;
 static Statement *cont_stmt = NULL;
@@ -12510,13 +12596,12 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                         break;
                     }
 
-                    if (target_stmt) {
+                    if (target_stmt && end_ts_pos < target_stmt->token_count) {
                         curr = target_stmt;
-                        if (end_ts_pos < curr->token_count) {
-                            resume_ptr = curr->tokens[end_ts_pos].start_ptr;
-                        } else {
-                            resume_ptr = NULL; // NEXT was last token on line, advance to next line
-                        }
+                        resume_ptr = curr->tokens[end_ts_pos].start_ptr;
+                    } else if (target_stmt) {
+                        curr = target_stmt->next; // a NEXT list ended the line
+                        resume_ptr = NULL;
                     } else {
                         report_runtime_error(ERR_NEXT_WITHOUT_FOR);
                     }
@@ -12528,6 +12613,8 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     for_stack[for_ptr] = loop;
                     for_stack[for_ptr].start_stmt = exec_stmt;
                     for_stack[for_ptr].start_ts_pos = ts.pos;
+                    for_stack[for_ptr].block_depth = block_if_depth;
+                    for_stack[for_ptr].select_depth = select_case_depth;
                     for_ptr++;
                 } else {
                     report_runtime_error(ERR_OUT_OF_MEMORY);
@@ -12603,6 +12690,8 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                         if (do_ptr < 16) {
                             do_stack[do_ptr].stmt = exec_stmt;
                             do_stack[do_ptr].ptr = command_start_ptr;
+                            do_stack[do_ptr].block_depth = block_if_depth;
+                            do_stack[do_ptr].select_depth = select_case_depth;
                             do_ptr++;
                         } else {
                             report_runtime_error(ERR_OUT_OF_MEMORY);
@@ -12860,7 +12949,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     Token sub_tok = ts.tokens[ts.pos++];
                     ProcedureDef *proc = find_procedure(sub_tok.text);
                     if (proc && !proc->is_function) {
-                        curr = execute_sub_call(proc, &ts, exec_stmt);
+                        curr = enter_inline_sub(proc, &ts, exec_stmt);
                         jumped = 1;
                         break;
                     } else {
@@ -12891,8 +12980,43 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
             case TOKEN_EXIT: {
                 if (ts.pos < exec_stmt->token_count) {
                     Token exit_type = ts.tokens[ts.pos++];
+                    if (exit_type.type == TOKEN_FOR) {
+                        // Continue after the NEXT that closes the innermost loop.
+                        int base = call_stack_depth > 0 ? call_stack[call_stack_depth - 1].for_base : 0;
+                        if (for_ptr <= base) {
+                            report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+                            break;
+                        }
+                        ForLoop *loop = &for_stack[--for_ptr];
+                        if (block_if_depth > loop->block_depth) block_if_depth = loop->block_depth;
+                        release_select_frames(select_case_stack, &select_case_depth, loop->select_depth);
+                        int end_ts_pos = loop->start_ts_pos;
+                        Statement *target_stmt = skip_for_block(loop->start_stmt, end_ts_pos, &end_ts_pos);
+                        ForLoop *repeat = NULL;
+                        int finished = target_stmt ? finish_skipped_next(target_stmt, &end_ts_pos, &repeat) : 0;
+                        if (finished < 0) break;
+                        if (finished > 0) {
+                            curr = repeat->start_stmt;
+                            resume_ptr = NULL;
+                            resume_ts_pos = repeat->start_ts_pos;
+                        } else if (target_stmt && end_ts_pos < target_stmt->token_count) {
+                            curr = target_stmt;
+                            resume_ptr = curr->tokens[end_ts_pos].start_ptr;
+                        } else if (target_stmt) {
+                            curr = target_stmt->next; // a NEXT list ended the line
+                            resume_ptr = NULL;
+                        } else {
+                            report_runtime_error(ERR_NEXT_WITHOUT_FOR);
+                        }
+                        jumped = 1;
+                        break;
+                    }
                     if (exit_type.type == TOKEN_DO) {
-                        if (do_ptr > 0) do_ptr--;
+                        if (do_ptr > 0) {
+                            do_ptr--;
+                            if (block_if_depth > do_stack[do_ptr].block_depth) block_if_depth = do_stack[do_ptr].block_depth;
+                            release_select_frames(select_case_stack, &select_case_depth, do_stack[do_ptr].select_depth);
+                        }
                         int end_ts_pos = ts.pos;
                         Statement *target_stmt = skip_do_block(exec_stmt, end_ts_pos, &end_ts_pos);
                         if (target_stmt) {
@@ -12911,6 +13035,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     if (exit_type.type == TOKEN_SUB || exit_type.type == TOKEN_FUNCTION) {
                         if (call_stack_depth > 0) {
                             CallFrame *frame = &call_stack[call_stack_depth - 1];
+                            leave_inline_sub(frame);
                             call_stack_depth = frame->return_depth;
                             if (frame->return_stmt && frame->return_token_idx < frame->return_stmt->token_count) {
                                 curr = frame->return_stmt;
@@ -12953,6 +13078,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_SUB || ts.tokens[ts.pos].type == TOKEN_FUNCTION)) {
                     if (call_stack_depth > 0) {
                         CallFrame *frame = &call_stack[call_stack_depth - 1];
+                        leave_inline_sub(frame);
                         call_stack_depth = frame->return_depth;
                         if (frame->return_stmt && frame->return_token_idx < frame->return_stmt->token_count) {
                             curr = frame->return_stmt;
@@ -13024,7 +13150,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 ProcedureDef *proc = find_procedure_tok(current_token);
                 if (proc && !proc->is_function) {
                     ts.pos = (int)(current_token - ts.tokens) + 1;
-                    curr = execute_sub_call(proc, &ts, exec_stmt);
+                    curr = enter_inline_sub(proc, &ts, exec_stmt);
                     jumped = 1;
                     break;
                 }
