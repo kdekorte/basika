@@ -1,8 +1,8 @@
 class Basika < Formula
   desc "Small IBM BASICA-compatible interpreter clone written in C"
   homepage "https://github.com/kdekorte/basika"
-  url "https://github.com/kdekorte/basika/releases/download/v0.99.6/basika-0.99.6.zip"
-  sha256 "71f410644495fbe3b0c3f204dabdce6431836097a2bca5651163a8ac480319b7"
+  url "https://github.com/kdekorte/basika/releases/download/v0.99.7/basika-0.99.7.zip"
+  sha256 "e67c0f7a956aa55cb37797434889744ebbc7b039d449b043e192fe2023ceebcf"
   license "MIT"
 
   depends_on "pkg-config" => :build
