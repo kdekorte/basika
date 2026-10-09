@@ -2,3 +2,4 @@ basika
 src/*.o
 .DS_Store
 basika_paint_selftest.png
+vortex_selftest.png
