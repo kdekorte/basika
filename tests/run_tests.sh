@@ -144,6 +144,8 @@ TESTS=(
   "tests/graphics/point_test"
   "tests/graphics/autodisplay"
   "tests/graphics/display_mode"
+  "tests/graphics/point_cache"
+  "tests/graphics/paint_fill"
   "tests/graphics/qbasic_primitives"
   "tests/graphics/rgb_functions"
   "tests/graphics/palette_pages"
@@ -184,11 +186,14 @@ TESTS=(
   "tests/control_flow/stop_statement"
   "tests/math/integer_division"
   "tests/math/qb64_round_long_colors"
+  "tests/math/compiled_expressions"
+  "tests/math/compiled_expressions_deftype"
   "tests/file_io/random_records"
   "tests/file_io/line_input_write"
   "tests/system/keyboard_input"
   "tests/system/editor_commands"
   "tests/procedures/chain_common"
+  "tests/procedures/compiled_expressions"
   "tests/file_io/lock_unlock"
   "tests/system/wait_retrace"
   "tests/control_flow/if_sub_call"
@@ -216,6 +221,7 @@ TESTS=(
   "tests/user_types/user_types_malformed_field"
   "tests/user_types/user_types_type_mismatch"
   "tests/user_types/user_types_long"
+  "tests/user_types/compiled_expressions"
   "tests/system/timing"
   "tests/system/noprefix"
   "tests/system/explicit_array"
@@ -277,6 +283,13 @@ for t in "${TESTS[@]}"; do
     fi
     rm -f tests/drawing_alpha.png
     rm -f tests/drawing_alpha.result
+  elif [ "$t" = "tests/graphics/point_cache" ] || [ "$t" = "tests/graphics/paint_fill" ]; then
+    # PRINT goes to the virtual screen, so these write tests/<name>.result.
+    RESULT="tests/$(basename "$t").result"
+    rm -f "$RESULT"
+    ./basika --headless -x "$t.bas" > /dev/null 2>&1 || true
+    OUT=$(cat "$RESULT" 2>/dev/null || echo "$RESULT not written")
+    rm -f "$RESULT"
   elif [ "$t" = "tests/graphics/point_test" ]; then
     rm -f tests/point_test.png
     rm -f tests/point_test.result

@@ -123,10 +123,14 @@ make test
 ```
 
 The performance regression guard runs the 10-million-iteration
-`demo/basica.bas` benchmark and compares its median over five runs against a
-machine-local, benchmark-specific baseline kept outside the repository (under
-`${XDG_CACHE_HOME:-$HOME/.cache}/basika/performance`). The first run on a
-machine initializes that baseline and passes. During iterative debugging, run
+`demo/basica.bas` loop and the benchmarks in `tests/performance` (expressions,
+`POINT` and `PAINT`, headless) and compares each one's median over five runs
+against a machine-local, benchmark-specific baseline kept outside the
+repository (under `${XDG_CACHE_HOME:-$HOME/.cache}/basika/performance`). More
+than 10% slower fails. The first run on a machine initializes the baselines
+and passes. `make test-performance-window` runs the graphics benchmarks in a
+window, where GPU readbacks and window presents cost time; it opens windows and
+its times follow the display's refresh rate, so `make test` leaves it out. During iterative debugging, run
 `BASIKA_SKIP_PERFORMANCE=1 make test` to skip only the timing check. The
 repository pre-commit hook always performs a clean optimized build and runs the
 guard, regardless of that skip setting. Enable the hook once per clone with:

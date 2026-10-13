@@ -22,13 +22,17 @@ $(TARGET): $(OBJ)
 
 $(OBJ): src/common.h src/lexer.h
 
-.PHONY: test test-performance clean install uninstall package
+.PHONY: test test-performance test-performance-window clean install uninstall package
 
 test: $(TARGET)
 	./tests/run_tests.sh
 
 test-performance: $(TARGET)
 	bash tests/scripts/performance_guard.sh
+
+# Opens windows; times follow the display's refresh rate.
+test-performance-window: $(TARGET)
+	bash tests/scripts/performance_guard.sh --window
 
 clean:
 	rm -f $(OBJ) $(TARGET)
