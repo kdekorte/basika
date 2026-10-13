@@ -1,0 +1,225 @@
+{
+  "name": "basika-runner",
+  "displayName": "Basika Runner",
+  "description": "Run BASIC (.bas) programs with the basika interpreter",
+  "version": "0.1.0",
+  "publisher": "kdekorte",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kdekorte/basika.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "basic",
+    "basica",
+    "qbasic",
+    "qb64",
+    "basika"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "basika.run",
+        "title": "Run with Basika",
+        "category": "Basika",
+        "icon": "$(play)"
+      },
+      {
+        "command": "basika.runInWindow",
+        "title": "Run with Basika in a Graphics Window",
+        "category": "Basika",
+        "icon": "$(window)"
+      },
+      {
+        "command": "basika.runInTerminal",
+        "title": "Run with Basika in the Terminal (Text Only)",
+        "category": "Basika",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "basika.runHeadless",
+        "title": "Run with Basika Headless",
+        "category": "Basika"
+      },
+      {
+        "command": "basika.stop",
+        "title": "Stop Running Program",
+        "category": "Basika",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "basika.showExecutable",
+        "title": "Show Which basika Executable Is Used",
+        "category": "Basika"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "basika.run",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "navigation@0"
+        },
+        {
+          "command": "basika.runInWindow",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "navigation@1"
+        },
+        {
+          "command": "basika.runInTerminal",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "basika.run",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "basika@0"
+        },
+        {
+          "command": "basika.runInWindow",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "basika@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "basika.run",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "basika@0"
+        },
+        {
+          "command": "basika.runInWindow",
+          "when": "resourceExtname =~ /^\\.bas$/i",
+          "group": "basika@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "basika.run",
+          "when": "resourceExtname =~ /^\\.bas$/i"
+        },
+        {
+          "command": "basika.runInWindow",
+          "when": "resourceExtname =~ /^\\.bas$/i"
+        },
+        {
+          "command": "basika.runInTerminal",
+          "when": "resourceExtname =~ /^\\.bas$/i"
+        },
+        {
+          "command": "basika.runHeadless",
+          "when": "resourceExtname =~ /^\\.bas$/i"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "basika.run",
+        "key": "ctrl+f5",
+        "when": "editorTextFocus && resourceExtname =~ /^\\.bas$/i && !inDebugMode"
+      }
+    ],
+    "configuration": {
+      "title": "Basika",
+      "properties": {
+        "basika.executableSource": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "workspace",
+            "path"
+          ],
+          "enumDescriptions": [
+            "Use a basika executable in the project folder if there is one, otherwise the one on PATH.",
+            "Only use a basika executable in the project folder.",
+            "Only use the basika executable on PATH."
+          ],
+          "default": "auto",
+          "markdownDescription": "Where to find the `basika` interpreter. The project folder search starts in the program's folder and walks up to the workspace folder. Ignored when `#basika.executablePath#` is set."
+        },
+        "basika.executablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Explicit path to the `basika` executable. A relative path is taken from the workspace folder, and `${workspaceFolder}` is expanded. Leave empty to use `#basika.executableSource#`."
+        },
+        "basika.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "window",
+            "terminal"
+          ],
+          "enumDescriptions": [
+            "Open a graphics window (-w) when the program uses graphics statements such as SCREEN or _NEWIMAGE, otherwise run in the terminal.",
+            "Always open a graphics window (-w).",
+            "Always run in the terminal, without -w."
+          ],
+          "default": "auto",
+          "description": "How the Run with Basika command runs a program."
+        },
+        "basika.workingDirectory": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "file"
+          ],
+          "enumDescriptions": [
+            "The workspace folder that holds the program (the program's folder when it is outside any workspace).",
+            "The folder that holds the program."
+          ],
+          "default": "workspace",
+          "description": "Directory the program runs in."
+        },
+        "basika.quiet": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pass -q to suppress the startup header and REPL prompts."
+        },
+        "basika.noAudio": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass --no-audio to disable sound output and audio delays."
+        },
+        "basika.exitOnFinish": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass -x so a graphics window closes as soon as the program ends."
+        },
+        "basika.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional options passed to basika before the program path."
+        },
+        "basika.programArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Arguments passed to the BASIC program after its path (read with COMMAND$, ARGC and ARGV$)."
+        },
+        "basika.saveBeforeRun": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save the program before running it."
+        }
+      }
+    }
+  }
+}
