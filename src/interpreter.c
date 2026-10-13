@@ -6109,10 +6109,21 @@ static int is_string_token(const Token *t) {
 
 #define MAX_CACHED_EXPRESSION_INSTRUCTIONS 256
 
+/* Operand stack depth for cached expressions; deeper ones use the parser. A
+ * small stack keeps the frame under a page, avoiding a stack probe per call. */
+#define CACHED_EXPRESSION_STACK 64
+
 enum {
     CEXPR_NUMBER,
     CEXPR_VARIABLE,
+    CEXPR_SUBSCRIPT, /* the lone variable subscript of a 1-D array element */
+    CEXPR_ARRAY,     /* argc subscripts -> element */
+    CEXPR_FUNCTION,  /* SIN, INT, CINT, ... of one argument */
+    CEXPR_FUNCTION0, /* RND or TIMER without an argument */
+    CEXPR_QB64,      /* _RGB, _RED, _ROUND, ... of argc arguments */
+    CEXPR_POINT,     /* POINT(x, y) or POINT(n) */
     CEXPR_NEGATE,
+    CEXPR_POWER,
     CEXPR_ADD,
     CEXPR_SUBTRACT,
     CEXPR_MULTIPLY,
@@ -6124,7 +6135,13 @@ enum {
     CEXPR_LESS,
     CEXPR_LESS_EQUAL,
     CEXPR_GREATER,
-    CEXPR_GREATER_EQUAL
+    CEXPR_GREATER_EQUAL,
+    CEXPR_NOT,
+    CEXPR_AND,
+    CEXPR_OR,
+    CEXPR_XOR,
+    CEXPR_EQV,
+    CEXPR_IMP
 };
 
 typedef struct {
@@ -6132,65 +6149,164 @@ typedef struct {
     int pos;
     int instruction_count;
     int failed;
+    int depth;     /* operands on the stack after the instructions so far */
+    int max_depth;
     CompiledExpressionInstruction instructions[MAX_CACHED_EXPRESSION_INSTRUCTIONS];
 } CachedExpressionParser;
 
-static int emit_cached_expression(CachedExpressionParser *parser, unsigned char opcode, int token_index) {
+static int emit_cached_call(CachedExpressionParser *parser, unsigned char opcode, int token_index, int argc) {
     if (parser->instruction_count >= MAX_CACHED_EXPRESSION_INSTRUCTIONS) {
         parser->failed = 1;
         return 0;
     }
     parser->instructions[parser->instruction_count++] = (CompiledExpressionInstruction){
         .opcode = opcode,
-        .token_index = token_index
+        .token_index = token_index,
+        .argc = argc
     };
     if (opcode == CEXPR_NUMBER) {
         const Token *token = &parser->statement->tokens[token_index];
         parser->instructions[parser->instruction_count - 1].number = num_from_token(token);
         parser->instructions[parser->instruction_count - 1].is_double = token->is_double;
     }
+
+    switch (opcode) {
+        case CEXPR_NUMBER: case CEXPR_VARIABLE: case CEXPR_SUBSCRIPT: case CEXPR_FUNCTION0:
+            parser->depth++;
+            break;
+        case CEXPR_NEGATE: case CEXPR_NOT: case CEXPR_FUNCTION:
+            break;
+        case CEXPR_ARRAY: case CEXPR_QB64: case CEXPR_POINT:
+            parser->depth += 1 - argc;
+            break;
+        default:
+            parser->depth--;
+            break;
+    }
+    if (parser->depth > parser->max_depth) parser->max_depth = parser->depth;
     return 1;
 }
 
-static int parse_cached_relational(CachedExpressionParser *parser);
+static int emit_cached_expression(CachedExpressionParser *parser, unsigned char opcode, int token_index) {
+    return emit_cached_call(parser, opcode, token_index, 0);
+}
+
+static int cached_expression_failed(CachedExpressionParser *parser) {
+    parser->failed = 1;
+    return 0;
+}
+
+static int parse_cached_expression(CachedExpressionParser *parser);
+static int parse_cached_unary(CachedExpressionParser *parser);
+
+/* A parenthesized argument list, as the parser reads one; returns the
+ * number of arguments, or -1. */
+static int parse_cached_arguments(CachedExpressionParser *parser) {
+    Token *tokens = parser->statement->tokens;
+    if (tokens[parser->pos].type != TOKEN_LPAREN) return 0;
+    parser->pos++;
+    int argc = 0;
+    if (tokens[parser->pos].type != TOKEN_RPAREN) {
+        while (1) {
+            if (!parse_cached_expression(parser)) return -1;
+            argc++;
+            if (tokens[parser->pos].type != TOKEN_COMMA) break;
+            parser->pos++;
+        }
+    }
+    if (tokens[parser->pos].type != TOKEN_RPAREN) return -1;
+    parser->pos++;
+    return argc;
+}
+
+/* Functions of one numeric argument that numeric_function_num evaluates. */
+static int cached_numeric_function(TokenType type) {
+    return (type >= TOKEN_ABS && type <= TOKEN_SGN) ||
+           type == TOKEN_CINT || type == TOKEN_CLNG || type == TOKEN_CSNG || type == TOKEN_CDBL;
+}
 
 static int parse_cached_primary(CachedExpressionParser *parser) {
-    Token *token = &parser->statement->tokens[parser->pos];
+    Token *tokens = parser->statement->tokens;
+    Token *token = &tokens[parser->pos];
+    int token_index = parser->pos;
     if (token->type == TOKEN_NUMBER) {
-        int token_index = parser->pos++;
+        parser->pos++;
         return emit_cached_expression(parser, CEXPR_NUMBER, token_index);
     }
-    if (token->type == TOKEN_IDENTIFIER) {
-        // Names that primary_tok treats as functions are not variables.
-        if (is_string_var(token->text) ||
-            token->text[0] == '_' ||
-            strcasecmp(token->text, "ERR") == 0 ||
-            strcasecmp(token->text, "ERL") == 0 ||
-            strcasecmp(token->text, "ERDEV") == 0 ||
-            strcasecmp(token->text, "CSRLIN") == 0 ||
-            strcasecmp(token->text, "POS") == 0 ||
-            strcasecmp(token->text, "POINT") == 0 ||
-            ((token->text[0] == 'F' || token->text[0] == 'f') &&
-             (token->text[1] == 'N' || token->text[1] == 'n')) ||
-            parser->statement->tokens[parser->pos + 1].type == TOKEN_LPAREN) {
-            parser->failed = 1;
-            return 0;
+    if (cached_numeric_function(token->type) || token->type == TOKEN_TIMER) {
+        parser->pos++;
+        if (tokens[parser->pos].type != TOKEN_LPAREN) {
+            if (token->type != TOKEN_RND && token->type != TOKEN_TIMER) return cached_expression_failed(parser);
+            return emit_cached_expression(parser, CEXPR_FUNCTION0, token_index);
         }
-        int token_index = parser->pos++;
-        return emit_cached_expression(parser, CEXPR_VARIABLE, token_index);
+        if (token->type == TOKEN_TIMER || parse_cached_arguments(parser) != 1) return cached_expression_failed(parser);
+        return emit_cached_call(parser, CEXPR_FUNCTION, token_index, 1);
+    }
+    if (token->type == TOKEN_IDENTIFIER) {
+        // Names that primary_tok reads specially are left to it.
+        const char *name = token->text;
+        if (is_string_var(name) ||
+            strcasecmp(name, "ERR") == 0 ||
+            strcasecmp(name, "ERL") == 0 ||
+            strcasecmp(name, "ERDEV") == 0 ||
+            strcasecmp(name, "CSRLIN") == 0 ||
+            strcasecmp(name, "POS") == 0 ||
+            ((name[0] == 'F' || name[0] == 'f') && (name[1] == 'N' || name[1] == 'n'))) {
+            return cached_expression_failed(parser);
+        }
+        parser->pos++;
+
+        if (name[0] == '_') {
+            int function_id = qb64_function_id(name);
+            int argc = function_id ? parse_cached_arguments(parser) : -1;
+            if (argc < 0 || !emit_cached_call(parser, CEXPR_QB64, token_index, argc)) {
+                return cached_expression_failed(parser);
+            }
+            parser->instructions[parser->instruction_count - 1].function_id = function_id;
+            return 1;
+        }
+        if (strcasecmp(name, "POINT") == 0) {
+            int argc = tokens[parser->pos].type == TOKEN_LPAREN ? parse_cached_arguments(parser) : -1;
+            if (argc != 1 && argc != 2) return cached_expression_failed(parser);
+            return emit_cached_call(parser, CEXPR_POINT, token_index, argc);
+        }
+        if (tokens[parser->pos].type != TOKEN_LPAREN) {
+            return emit_cached_expression(parser, CEXPR_VARIABLE, token_index);
+        }
+
+        // An array element; a record element such as items(2).x is left to the parser.
+        int paren = parser->pos;
+        int first_instruction = parser->instruction_count;
+        int argc = parse_cached_arguments(parser);
+        if (argc < 1 || argc > 3 || tokens[parser->pos].type == TOKEN_DOT) return cached_expression_failed(parser);
+        if (tokens[paren + 1].type == TOKEN_IDENTIFIER && tokens[paren + 2].type == TOKEN_RPAREN &&
+            parser->instructions[first_instruction].opcode == CEXPR_VARIABLE) {
+            parser->instructions[first_instruction].opcode = CEXPR_SUBSCRIPT;
+        }
+        return emit_cached_call(parser, CEXPR_ARRAY, token_index, argc);
     }
     if (token->type == TOKEN_LPAREN) {
         parser->pos++;
-        if (!parse_cached_relational(parser) ||
-            parser->statement->tokens[parser->pos].type != TOKEN_RPAREN) {
-            parser->failed = 1;
-            return 0;
+        if (!parse_cached_expression(parser) || tokens[parser->pos].type != TOKEN_RPAREN) {
+            return cached_expression_failed(parser);
         }
         parser->pos++;
         return 1;
     }
-    parser->failed = 1;
-    return 0;
+    return cached_expression_failed(parser);
+}
+
+/* ^ binds tightest, left to right; the exponent may carry its own sign. */
+static int parse_cached_power(CachedExpressionParser *parser) {
+    if (!parse_cached_primary(parser)) return 0;
+    while (!parser->failed && parser->statement->tokens[parser->pos].type == TOKEN_POWER) {
+        parser->pos++;
+        TokenType next = parser->statement->tokens[parser->pos].type;
+        int parsed = (next == TOKEN_MINUS || next == TOKEN_PLUS)
+            ? parse_cached_unary(parser) : parse_cached_primary(parser);
+        if (!parsed || !emit_cached_expression(parser, CEXPR_POWER, -1)) return 0;
+    }
+    return !parser->failed;
 }
 
 static int parse_cached_unary(CachedExpressionParser *parser) {
@@ -6204,7 +6320,7 @@ static int parse_cached_unary(CachedExpressionParser *parser) {
         if (!parse_cached_unary(parser)) return 0;
         return emit_cached_expression(parser, CEXPR_NEGATE, -1);
     }
-    return parse_cached_primary(parser);
+    return parse_cached_power(parser);
 }
 
 /* * and / bind tighter than \, which binds tighter than MOD, as in QBasic. */
@@ -6279,6 +6395,32 @@ static int parse_cached_relational(CachedExpressionParser *parser) {
     return !parser->failed;
 }
 
+static int parse_cached_not(CachedExpressionParser *parser) {
+    if (parser->statement->tokens[parser->pos].type == TOKEN_NOT) {
+        parser->pos++;
+        if (!parse_cached_not(parser)) return 0;
+        return emit_cached_expression(parser, CEXPR_NOT, -1);
+    }
+    return parse_cached_relational(parser);
+}
+
+/* AND, OR, XOR, EQV and IMP, from tightest (level 0) to loosest (level 4). */
+static int parse_cached_logical(CachedExpressionParser *parser, int level) {
+    static const TokenType operators[] = {TOKEN_AND, TOKEN_OR, TOKEN_XOR, TOKEN_EQV, TOKEN_IMP};
+    static const unsigned char opcodes[] = {CEXPR_AND, CEXPR_OR, CEXPR_XOR, CEXPR_EQV, CEXPR_IMP};
+    if (!(level == 0 ? parse_cached_not(parser) : parse_cached_logical(parser, level - 1))) return 0;
+    while (!parser->failed && parser->statement->tokens[parser->pos].type == operators[level]) {
+        parser->pos++;
+        if (!(level == 0 ? parse_cached_not(parser) : parse_cached_logical(parser, level - 1)) ||
+            !emit_cached_expression(parser, opcodes[level], -1)) return 0;
+    }
+    return !parser->failed;
+}
+
+static int parse_cached_expression(CachedExpressionParser *parser) {
+    return parse_cached_logical(parser, 4);
+}
+
 static int cached_expression_start(const Statement *statement, int pos) {
     if (pos == 0) return 1;
     switch (statement->tokens[pos - 1].type) {
@@ -6318,8 +6460,8 @@ void compile_statement_expressions(Statement *statement) {
             .statement = statement,
             .pos = start
         };
-        if (!parse_cached_relational(&parser) || parser.failed ||
-            parser.instruction_count < 3) {
+        if (!parse_cached_expression(&parser) || parser.failed ||
+            parser.instruction_count < 2 || parser.max_depth > CACHED_EXPRESSION_STACK) {
             continue;
         }
 
@@ -6340,12 +6482,17 @@ void compile_statement_expressions(Statement *statement) {
             return;
         }
         memcpy(instructions, parser.instructions, (size_t)parser.instruction_count * sizeof(*instructions));
+        int has_calls = 0;
+        for (int i = 0; i < parser.instruction_count; i++) {
+            unsigned char opcode = parser.instructions[i].opcode;
+            if (opcode == CEXPR_FUNCTION || opcode == CEXPR_FUNCTION0 || opcode == CEXPR_QB64 || opcode == CEXPR_POINT) has_calls = 1;
+        }
         *expression = (CompiledExpression){
             .end_pos = parser.pos,
+            .has_calls = has_calls,
             .instruction_count = parser.instruction_count,
             .instructions = instructions
         };
-        memcpy(expression->default_type_map, default_type_map, sizeof(expression->default_type_map));
         statement->compiled_expressions[start] = expression;
     }
 }
@@ -7769,6 +7916,73 @@ static int function_argument_tok(TokenStream *ts, Num *argument) {
     return 1;
 }
 
+/* The numeric functions of builtin_function_tok that need no parser state;
+ * has_arg is 0 for RND or TIMER without an argument. */
+static double math_function_value(TokenType type, double arg, int has_arg) {
+    switch (type) {
+        case TOKEN_ABS: return fabs(arg);
+        case TOKEN_SQR:
+            // QBasic has no NaN: an invalid argument is an error.
+            if (arg < 0) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                return 0;
+            }
+            return sqrt(arg);
+        case TOKEN_SIN: return sin(arg);
+        case TOKEN_COS: return cos(arg);
+        case TOKEN_TAN: return tan(arg);
+        case TOKEN_ATN: return atan(arg);
+        case TOKEN_EXP: return num_checked_float(exp(arg));
+        case TOKEN_LOG:
+            if (arg <= 0) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                return 0;
+            }
+            return log(arg);
+        case TOKEN_INT: return floor(arg);
+        case TOKEN_FIX: return (arg >= 0) ? floor(arg) : ceil(arg);
+        case TOKEN_SGN: return (arg > 0) - (arg < 0);
+        case TOKEN_TIMER: return seconds_since_midnight();
+        case TOKEN_RND:
+            if (has_arg && arg < 0) {
+                rnd_seed = (unsigned int)(-(long)arg);
+                return basika_rnd_next();
+            }
+            if (has_arg && arg == 0) return last_rnd_value;
+            return basika_rnd_next();
+        default: return 0;
+    }
+}
+
+/* A function of one numeric argument (see cached_numeric_function). The
+ * conversions and ABS, SGN, INT and FIX keep integer kinds exact. */
+static Num numeric_function_num(TokenType type, Num argument) {
+    switch (type) {
+        case TOKEN_CINT: return num_convert_integer(argument, VT_INTEGER);
+        case TOKEN_CLNG: return num_convert_integer(argument, VT_LONG);
+        case TOKEN_CSNG: return num_f((double)(float)num_to_double(argument), NUM_SINGLE);
+        case TOKEN_CDBL:
+            last_expression_is_double = 1;
+            return num_f(num_to_double(argument), NUM_DOUBLE);
+        case TOKEN_ABS:
+            if (num_is_int(argument)) return argument.kind != NUM_UINT64 && argument.i < 0 ? num_negate(argument) : argument;
+            return num_f(fabs(argument.d), argument.kind);
+        case TOKEN_SGN: return num_i(num_compare(argument, num_i(0, NUM_INTEGER)), NUM_INTEGER);
+        case TOKEN_INT: return num_is_int(argument) ? argument : num_f(floor(argument.d), argument.kind);
+        case TOKEN_FIX: return num_is_int(argument) ? argument : num_f(trunc(argument.d), argument.kind);
+        default: return num_d(math_function_value(type, num_to_double(argument), 1));
+    }
+}
+
+static Num qb64_function_num(int function_id, const double *args, int argc) {
+    double value = qb64_function_value(function_id, args, argc);
+    // Colors are _UNSIGNED LONG values in QB64, so they can be stored in a LONG.
+    if (function_id >= QB64_FN_RGB32 && function_id <= QB64_FN_RGBA) {
+        return num_i((int64_t)value, NUM_INT64);
+    }
+    return num_d(value);
+}
+
 /* LBOUND(array[, dimension]) and UBOUND(array[, dimension]); an array that
  * is not dimensioned, or a dimension it does not have, is "Subscript out of
  * range". */
@@ -7836,12 +8050,7 @@ static Num primary_tok(TokenStream *ts) {
                     }
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                 }
-                double value = qb64_function_value(function_id, args, argc > 4 ? 5 : argc);
-                // Colors are _UNSIGNED LONG values in QB64, so they can be stored in a LONG.
-                if (function_id >= QB64_FN_RGB32 && function_id <= QB64_FN_RGBA) {
-                    return num_i((int64_t)value, NUM_INT64);
-                }
-                return num_d(value);
+                return qb64_function_num(function_id, args, argc > 4 ? 5 : argc);
             }
         }
 
@@ -7942,43 +8151,9 @@ static Num primary_tok(TokenStream *ts) {
 
     Num argument;
     switch (token->type) {
-        case TOKEN_CINT:
-            if (function_argument_tok(ts, &argument)) return num_convert_integer(argument, VT_INTEGER);
-            break;
-        case TOKEN_CLNG:
-            if (function_argument_tok(ts, &argument)) return num_convert_integer(argument, VT_LONG);
-            break;
-        case TOKEN_CSNG:
-            if (function_argument_tok(ts, &argument)) {
-                return num_f((double)(float)num_to_double(argument), NUM_SINGLE);
-            }
-            break;
-        case TOKEN_CDBL:
-            if (function_argument_tok(ts, &argument)) {
-                last_expression_is_double = 1;
-                return num_f(num_to_double(argument), NUM_DOUBLE);
-            }
-            break;
-        case TOKEN_ABS:
-            if (function_argument_tok(ts, &argument)) {
-                if (num_is_int(argument)) return argument.kind != NUM_UINT64 && argument.i < 0 ? num_negate(argument) : argument;
-                return num_f(fabs(argument.d), argument.kind);
-            }
-            break;
-        case TOKEN_SGN:
-            if (function_argument_tok(ts, &argument)) {
-                return num_i(num_compare(argument, num_i(0, NUM_INTEGER)), NUM_INTEGER);
-            }
-            break;
-        case TOKEN_INT:
-            if (function_argument_tok(ts, &argument)) {
-                return num_is_int(argument) ? argument : num_f(floor(argument.d), argument.kind);
-            }
-            break;
-        case TOKEN_FIX:
-            if (function_argument_tok(ts, &argument)) {
-                return num_is_int(argument) ? argument : num_f(trunc(argument.d), argument.kind);
-            }
+        case TOKEN_CINT: case TOKEN_CLNG: case TOKEN_CSNG: case TOKEN_CDBL:
+        case TOKEN_ABS: case TOKEN_SGN: case TOKEN_INT: case TOKEN_FIX:
+            if (function_argument_tok(ts, &argument)) return numeric_function_num(token->type, argument);
             break;
         default:
             break;
@@ -8198,28 +8373,6 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
         }
 
         switch (ft) {
-            case TOKEN_ABS: return fabs(arg);
-            case TOKEN_SQR:
-                // QBasic has no NaN: an invalid argument is an error.
-                if (arg < 0) {
-                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
-                    return 0;
-                }
-                return sqrt(arg);
-            case TOKEN_SIN: return sin(arg);
-            case TOKEN_COS: return cos(arg);
-            case TOKEN_TAN: return tan(arg);
-            case TOKEN_ATN: return atan(arg);
-            case TOKEN_EXP: return num_checked_float(exp(arg));
-            case TOKEN_LOG:
-                if (arg <= 0) {
-                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
-                    return 0;
-                }
-                return log(arg);
-            case TOKEN_INT: return floor(arg);
-            case TOKEN_FIX: return (arg >= 0) ? floor(arg) : ceil(arg);
-            case TOKEN_SGN: return (arg > 0) - (arg < 0);
             case TOKEN_EOF_FUNC: {
                 int fnum = round_to_int(arg);
                 if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
@@ -8255,7 +8408,6 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 }
                 return (double)ftell(file_handles[fnum]);
             }
-            case TOKEN_TIMER: return seconds_since_midnight();
             case TOKEN_KEY: return (double)get_graphics_key();
             case TOKEN_PEN:
                 if (arg < 0 || arg > 9) {
@@ -8287,14 +8439,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                 if (addr < 0 || addr >= 65536) return 0;
                 return basika_memory[addr];
             }
-            case TOKEN_RND:
-                if (has_arg && arg < 0) {
-                    rnd_seed = (unsigned int)(-(long)arg);
-                    return basika_rnd_next();
-                }
-                if (has_arg && arg == 0) return last_rnd_value;
-                return basika_rnd_next();
-            default: return 0;
+            default: return math_function_value(ft, arg, has_arg);
         }
     }
 
@@ -8503,10 +8648,6 @@ static Num bitwise_or_tok(TokenStream *ts) {
     return val;
 }
 
-/* Operand stack depth for cached expressions; deeper ones use the parser. A
- * small stack keeps the frame under a page, avoiding a stack probe per call. */
-#define CACHED_EXPRESSION_STACK 64
-
 static Num exclusive_or_tok(TokenStream *ts) {
     Num val = bitwise_or_tok(ts);
     while (ts->tokens[ts->pos].type == TOKEN_XOR) {
@@ -8526,66 +8667,225 @@ static Num equivalence_tok(TokenStream *ts) {
     return val;
 }
 
+/* The variable a name in a cached expression reads, or NULL with *const_idx
+ * set to its CONST index, or to -1 if the name is not a numeric variable
+ * after all, which leaves the expression to the full parser. */
+static inline __attribute__((always_inline)) Variable *resolve_cached_name(
+        CompiledExpression *expression, Token *token, int *const_idx) {
+    *const_idx = find_named_constant_tok(token);
+    if (*const_idx >= 0) return NULL;
+    // Expressions are compiled before DIM and SUB/FUNCTION declarations
+    // take effect, so names that turned out not to be numeric
+    // variables are left to the full parser.
+    if (proc_count > 0 && find_procedure_tok(token)) {
+        expression->rejected_proc_generation = proc_generation + 1;
+        return NULL;
+    }
+    if (user_type_count > 0 && strchr(token->text, '.')) return NULL;
+    int variable_index = resolve_token_variable(token);
+    Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
+    if (!variable || var_type(variable) == VT_STRING || variable->string_declared) return NULL;
+    return variable;
+}
+
+/* parse_array_index_tok reads a lone variable subscript, a(i), itself when
+ * there are no procedures. */
+static inline int cached_subscript_is_direct(void) {
+    return proc_count == 0 && user_function_count == 0;
+}
+
+/* The numeric variable of such a subscript, or NULL. */
+static Variable *cached_subscript_variable(Token *token) {
+    int variable_index = resolve_token_variable(token);
+    Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
+    if (!variable || var_type(variable) == VT_STRING || variable->string_declared) return NULL;
+    return variable;
+}
+
+/* Whether every name in an expression with calls resolves, checked before
+ * any of it runs so that falling back to the parser never repeats a call
+ * such as RND. */
+static __attribute__((noinline)) int cached_names_resolve(TokenStream *ts, CompiledExpression *expression) {
+    for (int i = 0; i < expression->instruction_count; i++) {
+        const CompiledExpressionInstruction *instruction = &expression->instructions[i];
+        unsigned char opcode = instruction->opcode;
+        if (opcode != CEXPR_VARIABLE && opcode != CEXPR_SUBSCRIPT && opcode != CEXPR_ARRAY) continue;
+        Token *token = &ts->tokens[instruction->token_index];
+        if (opcode == CEXPR_SUBSCRIPT && cached_subscript_is_direct()) {
+            if (!cached_subscript_variable(token)) return 0;
+            continue;
+        }
+        int const_idx;
+        if (resolve_cached_name(expression, token, &const_idx)) continue;
+        if (const_idx < 0 || opcode == CEXPR_ARRAY) return 0;
+    }
+    return 1;
+}
+
+/* Subscripts, array elements and calls are kept out of
+ * evaluate_cached_expression, so its loop over arithmetic stays in
+ * registers. Each takes its operands from values[] and returns the new stack
+ * size, or -1 to leave the expression to the parser. */
+static __attribute__((noinline)) int cached_subscript(TokenStream *ts, CompiledExpression *expression,
+                                                      const CompiledExpressionInstruction *instruction,
+                                                      Num *values, int stack_size) {
+    Token *token = &ts->tokens[instruction->token_index];
+    Variable *variable;
+    if (cached_subscript_is_direct()) {
+        variable = cached_subscript_variable(token);
+        if (!variable) return -1;
+        // Only a # suffix makes this subscript double.
+        size_t name_length = strlen(variable->name);
+        if (name_length > 0 && variable->name[name_length - 1] == '#') last_expression_is_double = 1;
+    } else {
+        int const_idx;
+        variable = resolve_cached_name(expression, token, &const_idx);
+        if (!variable) {
+            if (const_idx < 0) return -1;
+            if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
+            values[stack_size++] = named_constants[const_idx].value;
+            return stack_size;
+        }
+        if (var_is_wide(variable)) last_expression_is_double = 1;
+    }
+    values[stack_size++] = load_num(variable, -1);
+    return stack_size;
+}
+
+static __attribute__((noinline)) int cached_array_element(TokenStream *ts, CompiledExpression *expression,
+                                                          const CompiledExpressionInstruction *instruction,
+                                                          Num *values, int stack_size) {
+    Token *token = &ts->tokens[instruction->token_index];
+    int const_idx;
+    Variable *array = resolve_cached_name(expression, token, &const_idx);
+    if (!array) return -1;
+    int variable_index = resolve_token_variable(token);
+    int indices[3];
+    stack_size -= instruction->argc;
+    for (int k = 0; k < instruction->argc; k++) indices[k] = array_subscript(values[stack_size + k]);
+    if (var_is_wide(array)) last_expression_is_double = 1;
+    ensure_array_dimensioned(variable_index, instruction->argc);
+    int array_idx = calc_linear_index(array, indices, instruction->argc);
+    values[stack_size++] = load_num(array, array_idx >= 0 ? array_idx : -1);
+    return stack_size;
+}
+
+static __attribute__((noinline)) int cached_call(TokenStream *ts, const CompiledExpressionInstruction *instruction,
+                                                 Num *values, int stack_size) {
+    TokenType type = ts->tokens[instruction->token_index].type;
+    switch (instruction->opcode) {
+        case CEXPR_FUNCTION:
+            values[stack_size - 1] = numeric_function_num(type, values[stack_size - 1]);
+            break;
+        case CEXPR_FUNCTION0:
+            values[stack_size++] = num_d(math_function_value(type, 0, 0));
+            break;
+        case CEXPR_QB64: {
+            double args[4];
+            int argc = instruction->argc;
+            stack_size -= argc;
+            for (int k = 0; k < argc && k < 4; k++) args[k] = num_to_double(values[stack_size + k]);
+            values[stack_size++] = qb64_function_num(instruction->function_id, args, argc > 4 ? 5 : argc);
+            break;
+        }
+        case CEXPR_POINT: {
+            stack_size -= instruction->argc;
+            double x = num_to_double(values[stack_size]);
+            if (instruction->argc == 2) {
+                double y = num_to_double(values[stack_size + 1]);
+                if (!graphics_is_active()) init_graphics();
+                values[stack_size++] = num_i((int64_t)graphics_point(x, y), NUM_INT64); // a color: an _UNSIGNED LONG
+            } else {
+                values[stack_size++] = num_d(graphics_cursor_query(round_to_int(x)));
+            }
+            break;
+        }
+    }
+    return stack_size;
+}
+
 static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expression, Num *result) {
+    if (expression->has_calls && !cached_names_resolve(ts, expression)) return 0;
+
+    // The compiler checked the stack depth. Locals keep the loop from
+    // reloading the program after every store.
+    const CompiledExpressionInstruction *instructions = expression->instructions;
+    const int instruction_count = expression->instruction_count;
     Num values[CACHED_EXPRESSION_STACK];
     int stack_size = 0;
-
-    for (int i = 0; i < expression->instruction_count; i++) {
-        CompiledExpressionInstruction *instruction = &expression->instructions[i];
-        if (stack_size >= CACHED_EXPRESSION_STACK) return 0;
+    for (int i = 0; i < instruction_count; i++) {
+        const CompiledExpressionInstruction *instruction = &instructions[i];
+        // Numbers and variables, the commonest, are tested before the switch.
         if (instruction->opcode == CEXPR_NUMBER) {
             if (instruction->is_double) last_expression_is_double = 1;
             values[stack_size++] = instruction->number;
             continue;
         }
         if (instruction->opcode == CEXPR_VARIABLE) {
-            Token *token = &ts->tokens[instruction->token_index];
-            int const_idx = find_named_constant_tok(token);
-            if (const_idx >= 0) {
+            int const_idx;
+            Variable *variable = resolve_cached_name(expression, &ts->tokens[instruction->token_index], &const_idx);
+            if (!variable) {
+                if (const_idx < 0) return 0;
                 if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
                 values[stack_size++] = named_constants[const_idx].value;
                 continue;
             }
-            // Expressions are compiled before DIM and SUB/FUNCTION declarations
-            // take effect, so names that turned out not to be numeric
-            // variables are left to the full parser.
-            if (proc_count > 0 && find_procedure_tok(token)) return 0;
-            if (user_type_count > 0 && strchr(token->text, '.')) return 0;
-            int variable_index = resolve_token_variable(token);
-            Variable *variable = variable_index >= 0 ? get_variable_ptr(variable_index) : NULL;
-            if (!variable || var_type(variable) == VT_STRING || variable->string_declared) return 0;
             if (var_is_wide(variable)) last_expression_is_double = 1;
             values[stack_size++] = load_num(variable, -1);
             continue;
         }
-        if (instruction->opcode == CEXPR_NEGATE) {
-            if (stack_size < 1) return 0;
-            values[stack_size - 1] = num_negate(values[stack_size - 1]);
-            continue;
-        }
-        if (stack_size < 2) return 0;
-
-        Num right = values[--stack_size];
-        Num left = values[stack_size - 1];
-        Num *out = &values[stack_size - 1];
         switch (instruction->opcode) {
-            case CEXPR_ADD: *out = num_add(left, right); break;
-            case CEXPR_SUBTRACT: *out = num_subtract(left, right); break;
-            case CEXPR_MULTIPLY: *out = num_multiply(left, right); break;
-            case CEXPR_DIVIDE: *out = num_divide(left, right); break;
-            case CEXPR_MOD: *out = num_integer_divide(left, right, 1); break;
-            case CEXPR_IDIV: *out = num_integer_divide(left, right, 0); break;
-            case CEXPR_EQUAL: *out = num_truth(num_compare(left, right) == 0); break;
-            case CEXPR_NOT_EQUAL: *out = num_truth(num_compare(left, right) != 0); break;
-            case CEXPR_LESS: *out = num_truth(num_compare(left, right) < 0); break;
-            case CEXPR_LESS_EQUAL: *out = num_truth(num_compare(left, right) <= 0); break;
-            case CEXPR_GREATER: *out = num_truth(num_compare(left, right) > 0); break;
-            case CEXPR_GREATER_EQUAL: *out = num_truth(num_compare(left, right) >= 0); break;
-            default: return 0;
+            case CEXPR_SUBSCRIPT:
+                stack_size = cached_subscript(ts, expression, instruction, values, stack_size);
+                if (stack_size < 0) return 0;
+                continue;
+            case CEXPR_ARRAY:
+                stack_size = cached_array_element(ts, expression, instruction, values, stack_size);
+                if (stack_size < 0) return 0;
+                continue;
+            case CEXPR_FUNCTION:
+            case CEXPR_FUNCTION0:
+            case CEXPR_QB64:
+            case CEXPR_POINT:
+                stack_size = cached_call(ts, instruction, values, stack_size);
+                continue;
+            case CEXPR_NEGATE:
+                values[stack_size - 1] = num_negate(values[stack_size - 1]);
+                continue;
+            case CEXPR_NOT:
+                values[stack_size - 1] = num_logical('~', values[stack_size - 1], values[stack_size - 1]);
+                continue;
+// Binary operators replace the top two operands; each is its own case, so
+// an instruction takes one dispatch.
+#define CACHED_BINARY(opcode, operation) \
+            case opcode: { \
+                Num right = values[--stack_size]; \
+                Num left = values[stack_size - 1]; \
+                values[stack_size - 1] = operation; \
+                continue; \
+            }
+            CACHED_BINARY(CEXPR_POWER, num_power(left, right))
+            CACHED_BINARY(CEXPR_ADD, num_add(left, right))
+            CACHED_BINARY(CEXPR_SUBTRACT, num_subtract(left, right))
+            CACHED_BINARY(CEXPR_MULTIPLY, num_multiply(left, right))
+            CACHED_BINARY(CEXPR_DIVIDE, num_divide(left, right))
+            CACHED_BINARY(CEXPR_MOD, num_integer_divide(left, right, 1))
+            CACHED_BINARY(CEXPR_IDIV, num_integer_divide(left, right, 0))
+            CACHED_BINARY(CEXPR_EQUAL, num_truth(num_compare(left, right) == 0))
+            CACHED_BINARY(CEXPR_NOT_EQUAL, num_truth(num_compare(left, right) != 0))
+            CACHED_BINARY(CEXPR_LESS, num_truth(num_compare(left, right) < 0))
+            CACHED_BINARY(CEXPR_LESS_EQUAL, num_truth(num_compare(left, right) <= 0))
+            CACHED_BINARY(CEXPR_GREATER, num_truth(num_compare(left, right) > 0))
+            CACHED_BINARY(CEXPR_GREATER_EQUAL, num_truth(num_compare(left, right) >= 0))
+            CACHED_BINARY(CEXPR_AND, num_logical('&', left, right))
+            CACHED_BINARY(CEXPR_OR, num_logical('|', left, right))
+            CACHED_BINARY(CEXPR_XOR, num_logical('^', left, right))
+            CACHED_BINARY(CEXPR_EQV, num_logical('=', left, right))
+            CACHED_BINARY(CEXPR_IMP, num_logical('>', left, right))
+#undef CACHED_BINARY
         }
     }
 
-    if (stack_size != 1) return 0;
     *result = values[0];
     ts->pos = expression->end_pos;
     return 1;
@@ -8597,9 +8897,11 @@ static Num evaluate_num_tok(TokenStream *ts) {
         ts->pos >= 0 && ts->pos < statement->token_count &&
         statement->compiled_expressions) {
         CompiledExpression *expression = statement->compiled_expressions[ts->pos];
+        // DEFINT, DEFSTR, ... may since have changed what a name is; the
+        // evaluator checks every name as it reads it.
         if (expression &&
-            memcmp(expression->default_type_map, default_type_map, sizeof(expression->default_type_map)) == 0 &&
-            !fixed_string_declarations_present) {
+            !fixed_string_declarations_present &&
+            expression->rejected_proc_generation != proc_generation + 1) {
             Num result;
             if (evaluate_cached_expression(ts, expression, &result)) return result;
         }

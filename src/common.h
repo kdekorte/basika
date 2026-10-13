@@ -104,12 +104,15 @@ typedef struct {
     int token_index;
     Num number;      /* value of a CEXPR_NUMBER */
     int is_double;   /* the literal makes PRINT show 16 digits */
+    int argc;        /* operands a call or array element takes from the stack */
+    int function_id; /* QB64 function of a CEXPR_QB64 */
 } CompiledExpressionInstruction;
 
 typedef struct {
     int end_pos;
     int instruction_count;
-    char default_type_map[26];
+    unsigned int rejected_proc_generation; /* a name in it is a FUNCTION (+1, 0 = none) */
+    int has_calls;   /* calls a function, so all names are checked before it runs */
     CompiledExpressionInstruction *instructions;
 } CompiledExpression;
 
