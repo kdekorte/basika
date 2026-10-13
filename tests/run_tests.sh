@@ -49,6 +49,7 @@ TESTS=(
   "tests/file_io/delete_line"
   "tests/file_io/name_test"
   "tests/file_io/kill_wildcard"
+  "tests/file_io/freefile"
   "tests/file_io/files"
   "tests/file_io/dir_ops"
   "tests/file_io/dir_ops_ext"
@@ -361,7 +362,7 @@ echo "All tests PASS"
 
 echo "Cleaning up temp files"
 rm -rf test_dir_ext tests/filo_test.tmp tests/putget.tmp tests/putfrom.tmp tests/getinto.tmp tests/delete_test.tmp tests/kill_tmp1.tmp tests/kill_tmp2.tmp tests/input_multi.tmp
-rm -f tests/field_record.tmp
+rm -f tests/field_record.tmp tests/freefile1.tmp tests/freefile2.tmp
 rm -f tests/user_types_record.tmp
 
 exit 0

@@ -23,7 +23,7 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `CHR$`, `CINT`, `CIRCLE`, `CLNG`, `CLEAR`, `CLOSE`, `CLS`, `COLOR`, `COMMAND$`, `COMMON`, `CONST`, `CONT`, `COS`, `CSNG`, `CVD`, `CVI`, `CVL`,
 `CVS`, `DATA`, `DATE$`, `DECLARE`, `DEF`, `DEFDBL`, `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFSTR`,
 `DELETE`, `DIM`, `DO`, `DRAW`, `ELSE`, `ELSEIF`, `END`, `ENVIRON`, `ENVIRON$`, `EOF`, `ERASE`,
-`EQV`, `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
+`EQV`, `ERROR`, `EXIT`, `EXP`, `FIELD`, `FILES`, `FIX`, `FOR`, `FREEFILE`, `FUNCTION`, `GET`, `GET$`, `GOSUB`, `GOTO`,
 `HEX$`, `IF`, `IMP`, `INKEY$`, `INPUT`, `INPUT$`, `INSTR`, `INT`, `IS`, `KEY`, `KILL`, `LCASE$`,
 `LBOUND`, `LEFT$`, `LEN`, `LET`, `LINE`, `LIST`, `LOC`, `LOCATE`, `LOCK`, `LOF`, `LOG`, `LOOP`, `LSET`,
 `LTRIM$`, `MID$`, `MKD$`, `MKDIR`, `MKI$`, `MKL$`, `MKS$`, `MOD`, `NAME`, `NEW`, `NEXT`,
@@ -299,6 +299,7 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `ARGV$(index)`: Returns a command-line argument by index.
 - `CVI(s$)`, `CVL(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a 2-, 4-, 4- or 8-byte binary string to INTEGER, LONG, SINGLE or DOUBLE.
 - `EOF(n)`: Returns nonzero when file #n is at end of file.
+- `FREEFILE`: The lowest file number (1-15) not in use, for `OPEN ... AS #FREEFILE`-style code; "Too many files" when all are open.
 - `LOF(n)`: Length of file #n in bytes.
 - `LOC(n)`: For RANDOM files, the last record read or written; for BINARY files, the last byte; otherwise the current byte position in file #n.
 - `ASC(s$)`: ASCII value of first character.

@@ -10,6 +10,7 @@ All notable changes to this project are recorded in this file.
 - **Faster POINT**: After a run of `POINT` reads finds an image unchanged, `POINT` copies the whole image once and reads from the copy until something draws on that image; before, every `POINT` waited for the graphics card to return one pixel. Reading another image with `_SOURCE` no longer switches the drawing target either, which made each following `PSET` flush. When drawing comes between nearly every read, `POINT` keeps reading single pixels. The waving flag demo draws a frame in a window in about a second instead of over a minute.
 - **Vortex Joystick**: `demo/vortex.bas` can be played with a joystick or gamepad: the stick moves the claw, button 1 fires and starts a game, and button 2 is the superzapper. The keys keep working alongside it, and the title screen lists the joystick controls when one is attached.
 - **Sound Files (QB64 `_SND` commands)**: `_SNDOPEN` loads WAV, OGG, MP3, FLAC and other sound files into handles that `_SNDPLAY`, `_SNDLOOP`, `_SNDPAUSE`, `_SNDSTOP`, `_SNDVOL` and `_SNDCLOSE` control; `_SNDPLAYCOPY` plays overlapping copies for sound effects and `_SNDPLAYFILE` plays a file once. `_SNDPLAYING`, `_SNDPAUSED`, `_SNDLEN` and `_SNDGETPOS` report on them. Sounds mix with each other and with `PLAY` and `SOUND`.
+- **FREEFILE**: Added the `FREEFILE` function, the lowest file number not in use; with all 15 open it is "Too many files".
 
 ## 0.99.7 — 2026-10-09
 

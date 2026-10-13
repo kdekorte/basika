@@ -6250,6 +6250,7 @@ static int parse_cached_primary(CachedExpressionParser *parser) {
             strcasecmp(name, "ERL") == 0 ||
             strcasecmp(name, "ERDEV") == 0 ||
             strcasecmp(name, "CSRLIN") == 0 ||
+            strcasecmp(name, "FREEFILE") == 0 ||
             strcasecmp(name, "POS") == 0 ||
             ((name[0] == 'F' || name[0] == 'f') && (name[1] == 'N' || name[1] == 'n'))) {
             return cached_expression_failed(parser);
@@ -8117,6 +8118,14 @@ static Num primary_tok(TokenStream *ts) {
             return named_constants[const_idx].value;
         }
 
+        if (first == 'F' && strcasecmp(token->text, "FREEFILE") == 0) {
+            // FREEFILE: the lowest file number not in use.
+            for (int fnum = 1; fnum < 16; fnum++) {
+                if (!file_handles[fnum]) return num_i(fnum, NUM_INTEGER);
+            }
+            report_runtime_error(ERR_TOO_MANY_FILES);
+            return num_i(0, NUM_INTEGER);
+        }
         if (first == 'C' && strcasecmp(token->text, "CSRLIN") == 0) {
             int row, col;
             get_text_cursor(&row, &col);
@@ -12418,7 +12427,7 @@ static int explicit_is_declared(const char *name, int scope) {
 
 /* Names that are not variables: built-ins Basika reads as identifiers. */
 static int explicit_is_builtin_name(const char *name, TokenType statement) {
-    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT", "IS"};
+    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT", "IS", "FREEFILE"};
     for (size_t i = 0; i < sizeof(always) / sizeof(always[0]); i++) {
         if (strcasecmp(name, always[i]) == 0) return 1;
     }
