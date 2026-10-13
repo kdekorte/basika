@@ -12,6 +12,7 @@ All notable changes to this project are recorded in this file.
 - **Sound Files (QB64 `_SND` commands)**: `_SNDOPEN` loads WAV, OGG, MP3, FLAC and other sound files into handles that `_SNDPLAY`, `_SNDLOOP`, `_SNDPAUSE`, `_SNDSTOP`, `_SNDVOL` and `_SNDCLOSE` control; `_SNDPLAYCOPY` plays overlapping copies for sound effects and `_SNDPLAYFILE` plays a file once. `_SNDPLAYING`, `_SNDPAUSED`, `_SNDLEN` and `_SNDGETPOS` report on them. Sounds mix with each other and with `PLAY` and `SOUND`.
 - **FREEFILE**: Added the `FREEFILE` function, the lowest file number not in use; with all 15 open it is "Too many files".
 - **EOF**: `EOF(n)` is -1 at the end of a file, as in QBasic; it was 1, so `NOT EOF(n)` stayed true and `DO WHILE NOT EOF(n)` read past the end ("Input past end").
+- **Burrow Demo**: Added `demo/burrow/`, a digging game in the style of Namco's Dig Dug, with its sprites and sounds in `demo/burrow/assets` (made by `tools/make_assets.py`). Dig through four layers of earth and pump up the blobs and fire-breathing drakes until they pop, or drop rocks on them; creatures that cannot reach you float through the earth, and the last one runs for the corner. The digging tune plays only while you move. Keys or a joystick; F fullscreen, M music. `--selftest [frames]` plays the demo and saves `burrow_selftest.png`.
 
 ## 0.99.7 — 2026-10-09
 

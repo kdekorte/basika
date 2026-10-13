@@ -3,3 +3,5 @@ src/*.o
 .DS_Store
 basika_paint_selftest.png
 vortex_selftest.png
+burrow_selftest.png
+demo/burrow/burrow.hi
