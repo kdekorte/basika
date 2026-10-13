@@ -2207,6 +2207,8 @@ static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned 
         return;
     }
     size_t head = 0, tail = 0;
+    // The bounds of the pixels painted, so only they are uploaded again.
+    int painted_x0 = surf->w, painted_y0 = surf->h, painted_x1 = -1, painted_y1 = -1;
     visited[(size_t)sy * (size_t)surf->w + (size_t)sx] = 1;
     queue[tail++] = (Point){sx, sy};
 
@@ -2216,7 +2218,13 @@ static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned 
         SDL_Color fill = sc_paint;
         if (tile) fill = get_graphics_color(tile_color(tile, tile_length, (int)((p.x + region.x) / xs),
                                                        (int)((p.y + region.y) / ys)));
-        if (fill.a > 0) *pixel = blend_paint_pixel(*pixel, fill, details, palette);
+        if (fill.a > 0) {
+            *pixel = blend_paint_pixel(*pixel, fill, details, palette);
+            if (p.x < painted_x0) painted_x0 = p.x;
+            if (p.x > painted_x1) painted_x1 = p.x;
+            if (p.y < painted_y0) painted_y0 = p.y;
+            if (p.y > painted_y1) painted_y1 = p.y;
+        }
 
         Point neighbors[4] = {
             {p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1}
@@ -2235,11 +2243,19 @@ static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned 
         }
     }
 
-    SDL_UpdateTexture(canvas, &region, surf->pixels, surf->pitch);
+    if (painted_x1 >= 0) {
+        SDL_Rect painted = {region.x + painted_x0, region.y + painted_y0,
+                            painted_x1 - painted_x0 + 1, painted_y1 - painted_y0 + 1};
+        const Uint8 *first = (const Uint8 *)surf->pixels + (size_t)painted_y0 * surf->pitch +
+                             (size_t)painted_x0 * details->bytes_per_pixel;
+        SDL_UpdateTexture(canvas, &painted, first, surf->pitch);
+    }
     SDL_DestroySurface(surf);
     free(queue);
     free(visited);
-    graphics_present_if_autodisplay();
+    // Presented like other drawing, at most once a frame: presenting after
+    // every PAINT waited for the display each time.
+    update_graphics();
 }
 
 void draw_paint(double ux, double uy, unsigned int paint_color, unsigned int border_color) {
