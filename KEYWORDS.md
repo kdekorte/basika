@@ -34,8 +34,9 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 `SPC`, `SQR`, `STATIC`, `STEP`, `STICK`, `STOP`, `STR$`, `STRIG`, `STRING$`, `SUB`, `SWAP`, `SYSTEM`, `TAB`, `TAN`,
 `THEN`, `TIME$`, `TIMER`, `TO`, `TRIM$`, `TYPE`, `UBOUND`, `UCASE$`, `UNLOCK`, `UNTIL`, `USING`, `VAL`, `VARPTR`,
 `VIEW`, `WAIT`, `WEND`, `WHILE`, `WIDTH`, `WINDOW`, `WRITE`, `XOR`, `_AUTODISPLAY`, `_DELAY`, `_DEST`, `_DISPLAY`, `_FONT`,
-`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`, `_RESIZE`, `_SOURCE`, `_TITLE`,
-`_DEFLATE$`, `_INFLATE$`.
+`_FREEFONT`, `_FREEIMAGE`, `_LIMIT`, `_LOADFONT`, `_LOADIMAGE`, `_NEWIMAGE`, `_PRINTSTRING`, `_PRINTWIDTH`, `_PUTIMAGE`, `_RESIZE`, `_SNDCLOSE`, `_SNDGETPOS`, `_SNDLEN`, `_SNDLOOP`,
+`_SNDOPEN`, `_SNDPAUSE`, `_SNDPAUSED`, `_SNDPLAY`, `_SNDPLAYCOPY`, `_SNDPLAYFILE`, `_SNDPLAYING`, `_SNDSTOP`, `_SNDVOL`,
+`_SOURCE`, `_TITLE`, `_DEFLATE$`, `_INFLATE$`.
 
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
@@ -245,6 +246,15 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_DELAY seconds`: Pauses for a number of seconds, which may be fractional (`_DELAY .05`), without waking on key presses.
 - `_LIMIT fps`: Placed once in a loop, holds the loop to at most `fps` iterations per second, for steady animation frame rates.
 - `SOUND freq, duration`: Produces a tone for a duration in 18.2-Hz timer ticks. Frequency must be 37-32767 and duration 0-65535.
+- `_SNDOPEN(file$[, capabilities$])`: Loads a sound file (WAV, OGG, MP3, FLAC and the other formats SDL_mixer reads) and returns a handle, or 0 if it cannot be loaded. Paths are relative to the current directory. `capabilities$` (`"STREAM"` and so on) is accepted and ignored. Sounds load even without audio output (`--no-audio`, or no device); they then never play.
+- `_SNDPLAY h`, `_SNDLOOP h`: Play a sound once or repeating. A stopped sound starts from the beginning, a paused one resumes, and one already playing carries on (`_SNDLOOP` makes it repeat).
+- `_SNDPAUSE h`, `_SNDSTOP h`: Pause a sound, or stop it so the next `_SNDPLAY` starts it from the beginning.
+- `_SNDVOL h, volume`: Sets a sound's volume, from 0 (silent) to 1 (full).
+- `_SNDPLAYCOPY h[, volume]`: Plays a copy of a sound, so it can overlap itself (shots, footsteps); up to 32 copies play at once, and a new one beyond that cuts off the oldest.
+- `_SNDPLAYFILE file$[, , volume]`: Plays a sound file once without keeping a handle.
+- `_SNDCLOSE h`: Frees a sound; copies still playing finish first.
+- `_SNDPLAYING(h)`, `_SNDPAUSED(h)`: -1 if the sound is playing (or paused), else 0. `_SNDLEN(h)` and `_SNDGETPOS(h)` give its length and playback position in seconds.
+- A handle that is not open is "Illegal function call", and a `_SNDPLAYFILE` file that cannot be loaded is "File not found".
 - `VIEW [(x1,y1)-(x2,y2)[, [fillcolor][, border]]]`: Defines a physical viewport (in screen pixels). All subsequent graphics commands are clipped to this region. Coordinates are relative to the viewport origin unless `VIEW SCREEN` is used (absolute). Omit coordinates to reset.
 - `WINDOW [(x1,y1)-(x2,y2)]`: Maps a custom logical coordinate system onto the current viewport. After this call, all graphics commands accept logical coordinates. `(x1,y1)` is the bottom-left and `(x2,y2)` is the top-right by default (Y increases upward, like math). Use `WINDOW SCREEN` to keep Y increasing downward. Omit coordinates to reset to screen coordinates.
 - Images use QB64 handles: valid images are below -1, -1 means failure, and 0 is the screen.

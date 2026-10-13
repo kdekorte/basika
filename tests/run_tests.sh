@@ -55,6 +55,7 @@ TESTS=(
   "tests/file_io/shell_test"
   "tests/audio/sound_play"
   "tests/audio/no_audio"
+  "tests/audio/snd_handles"
   "tests/audio/mml_coverage"
   "tests/audio/sound_range"
   "tests/audio/sound_frequency_low"

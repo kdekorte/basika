@@ -31,7 +31,37 @@ static int shutdown_registered = 0;
 static int audio_enabled = 1;
 static int music_foreground = 1;
 
+/* QB64 sound handles (_SNDOPEN and the other _SND commands). Each handle
+ * holds the loaded audio and its own track, so it can be played, looped,
+ * paused and stopped; _SNDPLAYCOPY plays on a pool of extra tracks so copies
+ * overlap. Without audio output the sounds still load (for _SNDLEN and to
+ * report bad files) but have no track and never play. */
+#define MAX_SOUND_HANDLES 256
+#define MAX_SOUND_COPIES 32
+
+typedef struct {
+    MIX_Audio *audio;
+    MIX_Track *track; /* NULL without audio output */
+} SoundHandle;
+
+static SoundHandle sound_handles[MAX_SOUND_HANDLES + 1]; /* handle 0 is never used */
+static MIX_Track *copy_tracks[MAX_SOUND_COPIES];
+static int next_copy_track = 0;
+
+static void close_all_sounds(void) {
+    for (int i = 1; i <= MAX_SOUND_HANDLES; i++) {
+        if (sound_handles[i].track) MIX_DestroyTrack(sound_handles[i].track);
+        if (sound_handles[i].audio) MIX_DestroyAudio(sound_handles[i].audio);
+        sound_handles[i] = (SoundHandle){0};
+    }
+    for (int i = 0; i < MAX_SOUND_COPIES; i++) {
+        if (copy_tracks[i]) MIX_DestroyTrack(copy_tracks[i]);
+        copy_tracks[i] = NULL;
+    }
+}
+
 static void audio_shutdown(void) {
+    close_all_sounds();
     if (mixer) {
         MIX_DestroyMixer(mixer);
         mixer = NULL;
@@ -326,4 +356,157 @@ void audio_play(const char *mml) {
     SDL_free(buffer.samples);
 
     if (audio_enabled && music_foreground) delay_ms(total_ms);
+}
+
+/* Whether sounds can be heard: _SND commands that play do nothing otherwise. */
+static int sound_output(void) {
+    return audio_enabled && audio_init();
+}
+
+static SoundHandle *sound_handle(int handle) {
+    if (handle < 1 || handle > MAX_SOUND_HANDLES || !sound_handles[handle].audio) return NULL;
+    return &sound_handles[handle];
+}
+
+int audio_sound_open(const char *path) {
+    int handle = 1;
+    while (handle <= MAX_SOUND_HANDLES && sound_handles[handle].audio) handle++;
+    if (handle > MAX_SOUND_HANDLES || !path || !path[0]) return 0;
+    if (!mixer_initialized) {
+        if (!MIX_Init()) return 0;
+        mixer_initialized = 1;
+        if (!shutdown_registered) {
+            atexit(audio_shutdown);
+            shutdown_registered = 1;
+        }
+    }
+    MIX_Mixer *output = sound_output() ? mixer : NULL;
+    MIX_Audio *audio = MIX_LoadAudio(output, path, true);
+    if (!audio) return 0;
+    MIX_Track *track = NULL;
+    if (output) {
+        track = MIX_CreateTrack(output);
+        if (!track || !MIX_SetTrackAudio(track, audio)) {
+            if (track) MIX_DestroyTrack(track);
+            MIX_DestroyAudio(audio);
+            return 0;
+        }
+    }
+    sound_handles[handle] = (SoundHandle){audio, track};
+    return handle;
+}
+
+int audio_sound_valid(int handle) {
+    return sound_handle(handle) != NULL;
+}
+
+int audio_sound_close(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    // Copies still playing keep the audio until they finish.
+    if (sound->track) MIX_DestroyTrack(sound->track);
+    MIX_DestroyAudio(sound->audio);
+    *sound = (SoundHandle){0};
+    return 1;
+}
+
+/* _SNDPLAY plays a stopped sound from the start and resumes a paused one; a
+ * sound already playing carries on. _SNDLOOP does the same but repeats it. */
+int audio_sound_play(int handle, int loop) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    if (!sound->track) return 1;
+    if (MIX_TrackPaused(sound->track)) {
+        MIX_ResumeTrack(sound->track);
+        if (loop) MIX_SetTrackLoops(sound->track, -1);
+    } else if (MIX_TrackPlaying(sound->track)) {
+        if (loop) MIX_SetTrackLoops(sound->track, -1);
+    } else {
+        SDL_PropertiesID options = SDL_CreateProperties();
+        if (loop) SDL_SetNumberProperty(options, MIX_PROP_PLAY_LOOPS_NUMBER, -1);
+        MIX_PlayTrack(sound->track, options);
+        SDL_DestroyProperties(options);
+    }
+    return 1;
+}
+
+int audio_sound_stop(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    if (sound->track) MIX_StopTrack(sound->track, 0);
+    return 1;
+}
+
+int audio_sound_pause(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    if (sound->track && MIX_TrackPlaying(sound->track)) MIX_PauseTrack(sound->track);
+    return 1;
+}
+
+static float clamp_volume(double volume) {
+    if (!(volume > 0)) return 0;
+    return volume > 1 ? 1 : (float)volume;
+}
+
+/* volume runs from 0 (silent) to 1 (full), as in QB64. */
+int audio_sound_volume(int handle, double volume) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    if (sound->track) MIX_SetTrackGain(sound->track, clamp_volume(volume));
+    return 1;
+}
+
+/* Plays a copy of the sound on a free copy track, so the same sound can
+ * overlap itself (footsteps, shots); with every copy track busy the oldest
+ * copy is cut off. */
+int audio_sound_play_copy(int handle, double volume) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    if (!sound->track) return 1;
+    int slot = -1;
+    for (int i = 0; i < MAX_SOUND_COPIES && slot < 0; i++) {
+        int candidate = (next_copy_track + i) % MAX_SOUND_COPIES;
+        if (!copy_tracks[candidate] || !MIX_TrackPlaying(copy_tracks[candidate])) slot = candidate;
+    }
+    if (slot < 0) slot = next_copy_track;
+    next_copy_track = (slot + 1) % MAX_SOUND_COPIES;
+    if (!copy_tracks[slot]) {
+        copy_tracks[slot] = MIX_CreateTrack(mixer);
+        if (!copy_tracks[slot]) return 1;
+    }
+    MIX_StopTrack(copy_tracks[slot], 0);
+    if (MIX_SetTrackAudio(copy_tracks[slot], sound->audio)) {
+        MIX_SetTrackGain(copy_tracks[slot], clamp_volume(volume));
+        MIX_PlayTrack(copy_tracks[slot], 0);
+    }
+    return 1;
+}
+
+int audio_sound_playing(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    return sound && sound->track && MIX_TrackPlaying(sound->track);
+}
+
+int audio_sound_paused(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    return sound && sound->track && MIX_TrackPaused(sound->track);
+}
+
+/* Length in seconds; -1 if it cannot be known (some streamed formats). */
+double audio_sound_length(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound) return 0;
+    Sint64 frames = MIX_GetAudioDuration(sound->audio);
+    if (frames < 0) return -1;
+    return MIX_AudioFramesToMS(sound->audio, frames) / 1000.0;
+}
+
+/* Playback position in seconds. */
+double audio_sound_position(int handle) {
+    SoundHandle *sound = sound_handle(handle);
+    if (!sound || !sound->track) return 0;
+    Sint64 frames = MIX_GetTrackPlaybackPosition(sound->track);
+    if (frames <= 0) return 0;
+    return MIX_TrackFramesToMS(sound->track, frames) / 1000.0;
 }

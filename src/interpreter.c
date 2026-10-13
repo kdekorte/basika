@@ -7748,7 +7748,7 @@ enum {
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
     QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
     QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE,
-    QB64_FN_FULLSCREEN
+    QB64_FN_FULLSCREEN, QB64_FN_SNDPLAYING, QB64_FN_SNDPAUSED, QB64_FN_SNDLEN, QB64_FN_SNDGETPOS
 };
 
 static int qb64_function_id(const char *name) {
@@ -7767,6 +7767,8 @@ static int qb64_function_id(const char *name) {
         {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
         {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT}, {"_ROUND", QB64_FN_ROUND},
         {"_PRINTMODE", QB64_FN_PRINTMODE}, {"_FULLSCREEN", QB64_FN_FULLSCREEN},
+        {"_SNDPLAYING", QB64_FN_SNDPLAYING}, {"_SNDPAUSED", QB64_FN_SNDPAUSED},
+        {"_SNDLEN", QB64_FN_SNDLEN}, {"_SNDGETPOS", QB64_FN_SNDGETPOS},
     };
     if (name[0] != '_') return QB64_FN_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -7880,6 +7882,20 @@ static double qb64_function_value(int id, const double *args, int argc) {
         case QB64_FN_FULLSCREEN:
             // _FULLSCREEN: 0 off, 1 _STRETCH, 2 _SQUAREPIXELS.
             return graphics_fullscreen_mode();
+        // _SNDPLAYING(h) and _SNDPAUSED(h) are -1 or 0; _SNDLEN(h) and
+        // _SNDGETPOS(h) are seconds.
+        case QB64_FN_SNDPLAYING:
+        case QB64_FN_SNDPAUSED:
+        case QB64_FN_SNDLEN:
+        case QB64_FN_SNDGETPOS: {
+            if (argc != 1) break;
+            int handle = round_to_int(args[0]);
+            if (!audio_sound_valid(handle)) break;
+            if (id == QB64_FN_SNDPLAYING) return audio_sound_playing(handle) ? -1 : 0;
+            if (id == QB64_FN_SNDPAUSED) return audio_sound_paused(handle) ? -1 : 0;
+            if (id == QB64_FN_SNDLEN) return audio_sound_length(handle);
+            return audio_sound_position(handle);
+        }
         case QB64_FN_ROUND:
             // _ROUND(x): the nearest whole number, halves to even, like CINT
             // but for any size.
@@ -8030,6 +8046,29 @@ static Num primary_tok(TokenStream *ts) {
             if (strcasecmp(token->text, "ERL") == 0) return num_i(last_runtime_error_line, NUM_LONG);
             // No device drivers are simulated, so there is never a device error.
             if (strcasecmp(token->text, "ERDEV") == 0) return num_i(0, NUM_INTEGER);
+        }
+
+        if (first == '_' && strcasecmp(token->text, "_SNDOPEN") == 0) {
+            // _SNDOPEN(file$[, capabilities$]) -> handle, or 0 if the file
+            // cannot be loaded. The capabilities (STREAM, ...) are accepted
+            // and ignored: every sound is loaded whole.
+            if (ts->tokens[ts->pos].type != TOKEN_LPAREN) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return num_i(0, NUM_LONG);
+            }
+            ts->pos++;
+            BasicString path = {0};
+            parse_string_expression_tok_heap(ts, &path);
+            if (ts->tokens[ts->pos].type == TOKEN_COMMA) {
+                ts->pos++;
+                BasicString capabilities = {0};
+                parse_string_expression_tok_heap(ts, &capabilities);
+                basic_string_release(&capabilities);
+            }
+            if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+            int handle = audio_sound_open(path.data ? (const char *)path.data : "");
+            basic_string_release(&path);
+            return num_i(handle, NUM_LONG);
         }
 
         if (first == '_') {
@@ -9765,6 +9804,63 @@ static int apply_resize_metacommand(const char *text, int check_only) {
 }
 
 /* _RESIZE [{ON|OFF}][, {_STRETCH|_SMOOTH}] */
+/* The QB64 sound statements: _SNDPLAY, _SNDLOOP, _SNDSTOP, _SNDPAUSE and
+ * _SNDCLOSE handle; _SNDVOL handle, volume; _SNDPLAYCOPY handle[, volume];
+ * _SNDPLAYFILE file$[, , volume]. Volumes run from 0 to 1. Returns 0 if name
+ * is not one of them. */
+static int execute_sound_statement(const char *name, const char **ptr) {
+    if (strncasecmp(name, "_SND", 4) != 0) return 0;
+    const char *command = name + 4;
+    if (strcasecmp(command, "PLAYFILE") == 0) {
+        char path[1024] = "";
+        parse_string_expression(ptr, path, sizeof(path));
+        double volume = 1;
+        if (next_graphics_comma(ptr)) {
+            // The second argument (QB64's ignored sync flag) may be left out.
+            if (graphics_arg_present(ptr)) (void)evaluate_expression(ptr);
+            if (next_graphics_comma(ptr)) volume = evaluate_expression(ptr);
+        }
+        int handle = audio_sound_open(path);
+        if (!handle) {
+            report_runtime_error(ERR_FILE_NOT_FOUND);
+            return 1;
+        }
+        audio_sound_play_copy(handle, volume);
+        audio_sound_close(handle);
+        return 1;
+    }
+
+    static const char *const commands[] = {"PLAY", "LOOP", "STOP", "PAUSE", "CLOSE", "VOL", "PLAYCOPY"};
+    int which = -1;
+    for (int i = 0; i < (int)(sizeof(commands) / sizeof(commands[0])); i++) {
+        if (strcasecmp(command, commands[i]) == 0) which = i;
+    }
+    if (which < 0) return 0;
+    int handle = evaluate_int_text(ptr);
+    double volume = 1;
+    if (which == 5) {
+        if (!next_graphics_comma(ptr)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+            return 1;
+        }
+        volume = evaluate_expression(ptr);
+    } else if (which == 6 && next_graphics_comma(ptr)) {
+        volume = evaluate_expression(ptr);
+    }
+    int ok;
+    switch (which) {
+        case 0: ok = audio_sound_play(handle, 0); break;
+        case 1: ok = audio_sound_play(handle, 1); break;
+        case 2: ok = audio_sound_stop(handle); break;
+        case 3: ok = audio_sound_pause(handle); break;
+        case 4: ok = audio_sound_close(handle); break;
+        case 5: ok = audio_sound_volume(handle, volume); break;
+        default: ok = audio_sound_play_copy(handle, volume); break;
+    }
+    if (!ok) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+    return 1;
+}
+
 static void execute_resize_statement(const char **ptr) {
     const char *saved = *ptr;
     Token t = get_next_token(ptr);
@@ -10207,6 +10303,8 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && execute_sound_statement(t.text, &ptr)) {
+            // done
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_FULLSCREEN") == 0) {
             // _FULLSCREEN [{_STRETCH|_SQUAREPIXELS|_OFF}][, _SMOOTH]
             int mode = FULLSCREEN_STRETCH, smooth = 0;
