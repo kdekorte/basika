@@ -143,6 +143,7 @@ TESTS=(
   "tests/graphics/drawing_alpha"
   "tests/graphics/point_test"
   "tests/graphics/autodisplay"
+  "tests/graphics/display_mode"
   "tests/graphics/qbasic_primitives"
   "tests/graphics/rgb_functions"
   "tests/graphics/palette_pages"

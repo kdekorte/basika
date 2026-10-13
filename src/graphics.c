@@ -1492,6 +1492,15 @@ void graphics_set_autodisplay(int enabled) {
     if (autodisplay_enabled) graphics_present_now();
 }
 
+int graphics_get_autodisplay(void) { return autodisplay_enabled; }
+
+/* _DISPLAY: shows the frame and, as in QB64, stops automatic presents
+ * until _AUTODISPLAY, so the window only shows finished frames. */
+void graphics_display(void) {
+    autodisplay_enabled = 0;
+    graphics_present_now();
+}
+
 void set_text_color(unsigned int color_value) {
     if (!color_mode_32 && !palette_mode_256) {
         /* 16-color modes: attributes 16-31 are the blinking variants. */

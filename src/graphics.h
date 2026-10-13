@@ -114,6 +114,8 @@ void graphics_readline_initial(char *buffer, int size, const char *initial);
 void graphics_present_now();
 void graphics_present_if_autodisplay();
 void graphics_set_autodisplay(int enabled);
+int graphics_get_autodisplay(void);
+void graphics_display(void);
 void set_present_interval(int ms);
 
 #endif

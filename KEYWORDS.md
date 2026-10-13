@@ -44,8 +44,7 @@ QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 
 Metacommand: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`.
 
-`_AUTODISPLAY OFF` suppresses automatic window presents while drawing commands update the canvas.
-Use `_DISPLAY` to present a completed frame, then `_AUTODISPLAY ON` to resume automatic presents.
+Drawing is shown in the window automatically, at most once a frame. `_DISPLAY` presents the completed frame and, as in QB64, turns automatic presents off, so the window shows only finished frames until `_AUTODISPLAY` (or `_AUTODISPLAY ON`) turns them back on. `_AUTODISPLAY OFF` turns them off without presenting. The `_AUTODISPLAY` function returns -1 while presents are automatic and 0 otherwise.
 
 ### Colors and alpha transparency
 

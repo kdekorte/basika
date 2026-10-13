@@ -8217,6 +8217,8 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
     }
     if (token->type == TOKEN_FONT) return graphics_is_active() ? graphics_current_font() : 16;
     if (token->type == TOKEN_DEST) return graphics_get_dest();
+    // _AUTODISPLAY: -1 while drawing is shown automatically, 0 after _DISPLAY.
+    if (token->type == TOKEN_AUTODISPLAY) return graphics_get_autodisplay() ? -1 : 0;
     if (token->type == TOKEN_SOURCE) return graphics_get_source();
     if (token->type == TOKEN_NEWIMAGE) {
         /* _NEWIMAGE(width, height[, mode]) -> handle */
@@ -12084,16 +12086,23 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 report_runtime_error(ERR_SYNTAX_ERROR);
             }
         } else if (t.type == TOKEN_AUTODISPLAY) {
+            // _AUTODISPLAY (QB64) or _AUTODISPLAY ON resumes automatic presents.
+            const char *saved = ptr;
             Token state = get_next_token(&ptr);
             if (state.type == TOKEN_ON) {
                 graphics_set_autodisplay(1);
             } else if (state.type == TOKEN_OFF) {
                 graphics_set_autodisplay(0);
+            } else if (state.type == TOKEN_EOF || state.type == TOKEN_COLON ||
+                       state.type == TOKEN_APOSTROPHE || state.type == TOKEN_REM ||
+                       state.type == TOKEN_ELSE) {
+                ptr = saved;
+                graphics_set_autodisplay(1);
             } else {
                 report_runtime_error(ERR_SYNTAX_ERROR);
             }
         } else if (t.type == TOKEN_DISPLAY) {
-            graphics_present_now();
+            graphics_display();
         } else if (t.type == TOKEN_FREEIMAGE) {
             int handle = evaluate_int_text(&ptr);
             if (!graphics_freeimage(handle)) {
