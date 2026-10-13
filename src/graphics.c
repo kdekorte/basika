@@ -10,6 +10,86 @@
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
+
+/* POINT reads pixels from a copy of the canvas it reads, taken once a run of
+ * reads shows it is worth it (see get_pixel), so most reads need no GPU
+ * round trip. Any write to that texture drops the copy: the SDL calls that
+ * write pixels are wrapped below, so no drawing path can forget to. A new
+ * kind of write (SDL_RenderLine, SDL_RenderGeometry, ...) needs a wrapper. */
+static SDL_Texture *render_target = NULL;      /* the texture SDL draws into */
+static SDL_Texture *point_cache_texture = NULL; /* the texture POINT last read */
+static SDL_Surface *point_cache = NULL;         /* its pixels (ARGB8888), or NULL */
+static int point_cache_reads = 0;               /* reads of it since it last changed */
+/* Reads of an unchanged texture before it is copied. A copy that is dropped
+ * before it saves as many reads doubles this, so drawing between reads
+ * (POINT, PSET, POINT, ...) goes back to reading single pixels. */
+static int point_cache_after = 16;
+
+static void drop_point_cache(SDL_Texture *texture) {
+    if (texture != point_cache_texture) return;
+    if (point_cache) {
+        if (point_cache_reads < point_cache_after && point_cache_after < (1 << 20)) point_cache_after *= 2;
+        else if (point_cache_reads > 8 * point_cache_after && point_cache_after > 16) point_cache_after /= 2;
+        SDL_DestroySurface(point_cache);
+        point_cache = NULL;
+    }
+    point_cache_reads = 0;
+}
+
+static bool tracked_set_render_target(SDL_Renderer *r, SDL_Texture *texture) {
+    if (!SDL_SetRenderTarget(r, texture)) return false;
+    render_target = texture;
+    return true;
+}
+
+static bool tracked_render_clear(SDL_Renderer *r) {
+    drop_point_cache(render_target);
+    return SDL_RenderClear(r);
+}
+
+static bool tracked_render_fill_rect(SDL_Renderer *r, const SDL_FRect *rect) {
+    drop_point_cache(render_target);
+    return SDL_RenderFillRect(r, rect);
+}
+
+static bool tracked_render_fill_rects(SDL_Renderer *r, const SDL_FRect *rects, int count) {
+    drop_point_cache(render_target);
+    return SDL_RenderFillRects(r, rects, count);
+}
+
+static bool tracked_render_texture(SDL_Renderer *r, SDL_Texture *texture, const SDL_FRect *src, const SDL_FRect *dst) {
+    drop_point_cache(render_target);
+    return SDL_RenderTexture(r, texture, src, dst);
+}
+
+static bool tracked_render_texture_rotated(SDL_Renderer *r, SDL_Texture *texture, const SDL_FRect *src,
+                                           const SDL_FRect *dst, double angle, const SDL_FPoint *center,
+                                           SDL_FlipMode flip) {
+    drop_point_cache(render_target);
+    return SDL_RenderTextureRotated(r, texture, src, dst, angle, center, flip);
+}
+
+static bool tracked_update_texture(SDL_Texture *texture, const SDL_Rect *rect, const void *pixels, int pitch) {
+    drop_point_cache(texture);
+    return SDL_UpdateTexture(texture, rect, pixels, pitch);
+}
+
+static void tracked_destroy_texture(SDL_Texture *texture) {
+    drop_point_cache(texture);
+    if (texture == point_cache_texture) point_cache_texture = NULL; // a new texture may reuse the address
+    if (texture == render_target) render_target = NULL;
+    SDL_DestroyTexture(texture);
+}
+
+#define SDL_SetRenderTarget tracked_set_render_target
+#define SDL_RenderClear tracked_render_clear
+#define SDL_RenderFillRect tracked_render_fill_rect
+#define SDL_RenderFillRects tracked_render_fill_rects
+#define SDL_RenderTexture tracked_render_texture
+#define SDL_RenderTextureRotated tracked_render_texture_rotated
+#define SDL_UpdateTexture tracked_update_texture
+#define SDL_DestroyTexture tracked_destroy_texture
+
 static int autodisplay_enabled = 1;
 void update_graphics(); // Forward declaration
 static void render_canvas_to_window(void); // Forward declaration
@@ -775,8 +855,9 @@ int graphics_printmode_for(int handle, int mode) {
 
 int graphics_get_dest_handle(void) { return dest_handle; }
 
-/* Makes handle the current canvas, saving the previous one's state. */
-static int switch_canvas(int handle) {
+/* Loads handle's draw state as the current canvas, saving the previous
+ * one's, without changing SDL's render target. */
+static int switch_canvas_state(int handle) {
     if (handle == dest_handle) return 1;
     DrawState *target = state_for_handle(handle);
     DrawState *current = state_for_handle(dest_handle);
@@ -784,6 +865,13 @@ static int switch_canvas(int handle) {
     if (current) save_draw_state(current);
     load_draw_state(target);
     dest_handle = handle;
+    return 1;
+}
+
+/* Makes handle the current canvas, saving the previous one's state. */
+static int switch_canvas(int handle) {
+    if (handle == dest_handle) return 1;
+    if (!switch_canvas_state(handle)) return 0;
     if (renderer && canvas) SDL_SetRenderTarget(renderer, canvas);
     return 1;
 }
@@ -817,10 +905,15 @@ int graphics_get_source(void) { return source_handle; }
 /* POINT/GET read the _SOURCE image. */
 double graphics_point(double x, double y) {
     if (source_handle == dest_handle || !state_for_handle(source_handle)) return get_pixel(x, y);
+    // Only the source's draw state is needed. SDL keeps drawing into the
+    // destination unless get_pixel reads the GPU, as changing the render
+    // target flushes the drawing queued for it.
     int previous = dest_handle;
-    switch_canvas(source_handle);
+    SDL_Texture *target = render_target;
+    switch_canvas_state(source_handle);
     double value = get_pixel(x, y);
-    switch_canvas(previous);
+    switch_canvas_state(previous);
+    if (renderer && render_target != target) SDL_SetRenderTarget(renderer, target);
     return value;
 }
 
@@ -1750,6 +1843,47 @@ void set_pixel(double user_x, double user_y, unsigned int color) {
     end_draw();
 }
 
+static void free_point_cache(void) {
+    SDL_DestroySurface(point_cache);
+    point_cache = NULL;
+    point_cache_reads = 0;
+}
+
+/* Reads pixel (x, y) of the canvas texture: from POINT's copy of it once
+ * point_cache_after reads have found it unchanged, else from the GPU. */
+static int read_canvas_pixel(int x, int y, Uint8 *r, Uint8 *g, Uint8 *b, Uint8 *a) {
+    if (point_cache_texture != canvas) {
+        free_point_cache();
+        point_cache_texture = canvas;
+    }
+    if (!point_cache && ++point_cache_reads > point_cache_after) {
+        SDL_SetRenderTarget(renderer, canvas);
+        SDL_Surface *raw = SDL_RenderReadPixels(renderer, NULL);
+        if (raw) {
+            point_cache = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_ARGB8888);
+            SDL_DestroySurface(raw);
+        }
+        point_cache_reads = 0; // now counts the reads the copy saves
+    }
+    if (point_cache) {
+        point_cache_reads++;
+        if (x >= point_cache->w || y >= point_cache->h) return 0;
+        Uint32 pixel = ((const Uint32 *)((const Uint8 *)point_cache->pixels + (size_t)y * point_cache->pitch))[x];
+        *a = (Uint8)(pixel >> 24);
+        *r = (Uint8)(pixel >> 16);
+        *g = (Uint8)(pixel >> 8);
+        *b = (Uint8)pixel;
+        return 1;
+    }
+
+    SDL_SetRenderTarget(renderer, canvas);
+    SDL_Surface *surf = SDL_RenderReadPixels(renderer, &(SDL_Rect){x, y, 1, 1});
+    if (!surf) return 0;
+    SDL_ReadSurfacePixel(surf, 0, 0, r, g, b, a);
+    SDL_DestroySurface(surf);
+    return 1;
+}
+
 double get_pixel(double user_x, double user_y) {
     int x, y;
     transform_coords(user_x, user_y, &x, &y);
@@ -1762,13 +1896,8 @@ double get_pixel(double user_x, double user_y) {
     int sy = (int)cell.y;
     if (sx < 0 || sx >= canvas_width || sy < 0 || sy >= canvas_height) return 0;
 
-    SDL_SetRenderTarget(renderer, canvas);
-    SDL_Surface *surf = SDL_RenderReadPixels(renderer, &(SDL_Rect){sx, sy, 1, 1});
-    if (!surf) return 0;
-
     Uint8 r, g, b, a;
-    SDL_ReadSurfacePixel(surf, 0, 0, &r, &g, &b, &a);
-    SDL_DestroySurface(surf);
+    if (!read_canvas_pixel(sx, sy, &r, &g, &b, &a)) return 0;
 
     if (color_mode_32) {
         // Images keep real alpha (transparent pixels read as &H00RRGGBB); the screen is opaque.
@@ -2608,6 +2737,9 @@ void close_graphics() {
         pages[i] = NULL;
     }
     canvas = NULL;
+    free_point_cache();
+    point_cache_texture = NULL;
+    render_target = NULL;
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();
