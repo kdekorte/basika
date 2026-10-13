@@ -24,16 +24,43 @@
 
 DEFLNG A-Z
 
-CONST TILE = 32
+CONST TILE = 48 ' pixels; the sprites are drawn at this size
+CONST HALF = 24
+CONST BIG = 96 ' the pumped-up sprites
 CONST COLS = 20
 CONST ROWS = 13 ' row 0 is the surface
-CONST FIELD_Y = 40 ' screen y of the top of the field
-CONST SW = 640
-CONST SH = 504
+CONST FIELD_Y = 48 ' screen y of the top of the field
+CONST SW = 960 ' COLS * TILE
+CONST SH = 712 ' FIELD_Y + ROWS * TILE + 40
+CONST DIG_SPEED = 3 ' pixels a frame; it divides TILE so turns line up
 CONST MAX_FOES = 8
 CONST MAX_ROCKS = 6
 CONST MAX_POPS = 8
-CONST HARPOON_REACH = 96
+CONST HARPOON_REACH = 144 ' three tiles
+
+' Cells of assets/sprites.png (TILE pixels, 16 to a row); tools/make_assets.py
+' draws them in this order. The digger faces right; up is 6 cells on and
+' down 12, each with 4 walking frames and then 2 pumping frames.
+CONST S_DIGGER = 0
+CONST S_DYING = 18 ' 4 frames
+CONST S_LIFE = 22
+CONST S_BLOB = 23 ' 4 walking frames
+CONST S_BLINK = 27
+CONST S_EYES = 28 ' 2 frames
+CONST S_DRAKE = 30 ' 4 walking frames
+CONST S_WINDUP = 34 ' 2 frames
+CONST S_BREATHE = 36
+CONST S_FLAME = 37 ' 3 frames
+CONST S_FLAME_TIP = 40 ' 3 frames
+CONST S_ROCK = 43
+CONST S_CRACKED = 44
+CONST S_CRUMBLE = 45 ' 3 frames
+CONST S_POP = 48 ' 3 frames
+CONST S_MUSHROOM = 51
+CONST S_FLOWER = 52 ' 2 frames
+' Cells of assets/sprites_big.png (BIG pixels): pumped-up creatures, 3 sizes each.
+CONST B_BLOB = 0
+CONST B_DRAKE = 3
 
 CONST KIND_BLOB = 1
 CONST KIND_DRAKE = 2
@@ -97,7 +124,7 @@ DIM SHARED Score, HiScore, Lives, RoundNo, NextLife, GameState, StateClock
 DIM SHARED BonusClock, Frame AS LONG, Demo, Paused, SelfTest, QuitGame
 DIM SHARED FullPref, FullOn, MusicOn, Speed AS SINGLE, GhostSpeed AS SINGLE
 DIM SHARED InDir, InFire, InFirePressed, LastFire, InAnyKey
-DIM SHARED Sheet, DirtImg, LogoImg, BaseDir AS STRING
+DIM SHARED Sheet, BigSheet, DirtImg, LogoImg, BaseDir AS STRING
 DIM SHARED SndWalk, SndStart, SndClear, SndDie, SndOver, SndExtra, SndBonus
 DIM SHARED SndHarpoon, SndPump, SndPop, SndFire, SndFall, SndCrush
 
@@ -155,7 +182,8 @@ END FUNCTION
 
 SUB LoadAssets
     Sheet = _LOADIMAGE(BaseDir + "assets/sprites.png", 32)
-    IF Sheet = -1 THEN
+    BigSheet = _LOADIMAGE(BaseDir + "assets/sprites_big.png", 32)
+    IF Sheet = -1 OR BigSheet = -1 THEN
         PRINT "Cannot load "; BaseDir; "assets/sprites.png"
         PRINT "Run python3 demo/burrow/tools/make_assets.py to make it."
         _DISPLAY
@@ -194,7 +222,7 @@ END SUB
 
 SUB SaveHiScore
     DIM f AS INTEGER
-    IF SelfTest THEN EXIT SUB
+    IF SelfTest OR Demo THEN EXIT SUB
     f = FREEFILE
     OPEN BaseDir + "burrow.hi" FOR OUTPUT AS #f
     PRINT #f, HiScore
@@ -254,7 +282,7 @@ SUB AddScore (points)
         NextLife = NextLife + 20000
         IF Lives < 8 THEN Lives = Lives + 1: Sfx SndExtra
     END IF
-    IF Score > HiScore AND NOT Demo THEN HiScore = Score
+    IF Score > HiScore AND NOT Demo AND NOT SelfTest THEN HiScore = Score
 END SUB
 
 SUB SetState (s)
@@ -316,8 +344,10 @@ END FUNCTION
 SUB StartRound
     DIM i AS INTEGER, c AS INTEGER, r AS INTEGER, tries AS INTEGER, horizontal AS INTEGER
     DIM ok AS INTEGER, k AS INTEGER
+    ' Pixels a frame, for tiles of 32 pixels scaled to TILE.
     Speed = .9 + RoundNo * .08: IF Speed > 1.8 THEN Speed = 1.8
     GhostSpeed = .5 + RoundNo * .04: IF GhostSpeed > 1 THEN GhostSpeed = 1
+    Speed = Speed * TILE / 32: GhostSpeed = GhostSpeed * TILE / 32
     FOR c = 0 TO COLS - 1
         FOR r = 0 TO ROWS - 1
             Dug(c, r) = (r = 0): OpenR(c, r) = (r = 0 AND c < COLS - 1): OpenD(c, r) = 0
@@ -418,7 +448,7 @@ SUB DrawEarth
             CASE ELSE: c = _RGB32(122, 48, 46): fleck = _RGB32(86, 28, 32)
         END SELECT
         LINE (0, r * TILE)-(COLS * TILE - 1, r * TILE + TILE - 1), c, BF
-        FOR i = 1 TO 90
+        FOR i = 1 TO 160
             x = INT(RND * COLS * TILE): y = r * TILE + INT(RND * TILE)
             LINE (x, y)-(x + 1, y + 1), fleck, BF
         NEXT
@@ -509,7 +539,7 @@ SUB MoveDigger
     ELSEIF (want = 2 OR want = 4) AND PY MOD TILE <> 0 THEN
         IF PFace = 1 OR PFace = 3 THEN d = PFace ELSE d = 3
     END IF
-    nx = PX + DirX(d) * 2: ny = PY + DirY(d) * 2
+    nx = PX + DirX(d) * DIG_SPEED: ny = PY + DirY(d) * DIG_SPEED
     IF nx < 0 OR nx > (COLS - 1) * TILE OR ny < 0 OR ny > (ROWS - 1) * TILE THEN
         PFace = d
         EXIT SUB
@@ -540,21 +570,21 @@ SUB MoveHarpoon
     DIM tx AS INTEGER, ty AS INTEGER, c AS INTEGER, r AS INTEGER, i AS INTEGER
     IF Harp = 0 THEN
         IF InFirePressed THEN
-            Harp = 1: HarpLen = 8: HarpDir = PFace
+            Harp = 1: HarpLen = 12: HarpDir = PFace
             Sfx SndHarpoon
         END IF
         EXIT SUB
     END IF
     IF Harp = 1 THEN
-        HarpLen = HarpLen + 8
-        tx = PX + 16 + DirX(HarpDir) * (12 + HarpLen): ty = PY + 16 + DirY(HarpDir) * (12 + HarpLen)
+        HarpLen = HarpLen + 12
+        tx = PX + HALF + DirX(HarpDir) * (18 + HarpLen): ty = PY + HALF + DirY(HarpDir) * (18 + HarpLen)
         ' It goes through tunnels only.
         c = tx \ TILE: r = ty \ TILE
         IF tx < 0 OR ty < 0 OR c >= COLS OR r >= ROWS THEN Harp = 0: EXIT SUB
-        IF NOT Dug(c, r) AND NOT (c = (PX + 16) \ TILE AND r = (PY + 16) \ TILE) THEN Harp = 0: EXIT SUB
+        IF NOT Dug(c, r) AND NOT (c = (PX + HALF) \ TILE AND r = (PY + HALF) \ TILE) THEN Harp = 0: EXIT SUB
         FOR i = 1 TO FoeCount
             IF Pumpable(i) THEN
-                IF ABS(FoeX(i) + 16 - tx) < 16 AND ABS(FoeY(i) + 16 - ty) < 16 THEN
+                IF ABS(FoeX(i) + HALF - tx) < HALF AND ABS(FoeY(i) + HALF - ty) < HALF THEN
                     Harp = 2: PumpFoe = i: PumpClock = 0
                     FoeState(i) = F_PUMPED: FoeStage(i) = 1: FoeClock(i) = 0
                     Sfx SndPump
@@ -587,7 +617,7 @@ END FUNCTION
 
 SUB PopFoe (i)
     DIM points AS LONG, r AS INTEGER
-    r = (FoeY(i) + 16) \ TILE
+    r = (FoeY(i) + HALF) \ TILE
     points = 200 + 100 * ((r - 1) \ 3)
     IF r <= 0 THEN points = 200
     IF FoeKind(i) = KIND_DRAKE AND (HarpDir = 2 OR HarpDir = 4) THEN points = points * 2
@@ -603,19 +633,19 @@ SUB CheckDigger
     FOR i = 1 TO FoeCount
         SELECT CASE FoeState(i)
             CASE F_WALK, F_WINDUP, F_FIRE
-                IF ABS(FoeX(i) - PX) < 22 AND ABS(FoeY(i) - PY) < 22 THEN KillDigger: EXIT SUB
+                IF ABS(FoeX(i) - PX) < TILE * 2 \ 3 AND ABS(FoeY(i) - PY) < TILE * 2 \ 3 THEN KillDigger: EXIT SUB
         END SELECT
         IF FoeState(i) = F_FIRE THEN
             ' The flame reaches up to three tiles, through the earth too.
             reach = FlameReach(i)
-            IF ABS(FoeY(i) - PY) < 20 THEN
+            IF ABS(FoeY(i) - PY) < TILE * 5 \ 8 THEN
                 IF FoeFace(i) > 0 THEN fx = FoeX(i) + TILE ELSE fx = FoeX(i) - reach
-                IF PX + 26 > fx AND PX + 6 < fx + reach THEN KillDigger: EXIT SUB
+                IF PX + TILE - 9 > fx AND PX + 9 < fx + reach THEN KillDigger: EXIT SUB
             END IF
         END IF
     NEXT
     IF BonusClock > 0 THEN
-        IF ABS(PX - StartC * TILE) < 20 AND ABS(PY - StartR * TILE) < 20 THEN
+        IF ABS(PX - StartC * TILE) < TILE * 5 \ 8 AND ABS(PY - StartR * TILE) < TILE * 5 \ 8 THEN
             AddScore 400 + 200 * RoundNo
             ShowPoints StartC * TILE, StartR * TILE, 400 + 200 * RoundNo
             BonusClock = 0
@@ -635,7 +665,7 @@ END SUB
 
 SUB MoveFoes
     DIM i AS INTEGER, pc AS INTEGER, pr AS INTEGER, alive AS INTEGER
-    pc = (PX + 16) \ TILE: pr = (PY + 16) \ TILE
+    pc = (PX + HALF) \ TILE: pr = (PY + HALF) \ TILE
     IF TunnelsChanged OR pc <> DistFromC OR pr <> DistFromR THEN MapTunnels pc, pr
     alive = LiveFoes
     FOR i = 1 TO FoeCount
@@ -668,15 +698,15 @@ END SUB
 
 FUNCTION FlameReach (i)
     DIM n AS INTEGER
-    n = FoeClock(i) * 8
+    n = FoeClock(i) * 12
     IF n > 3 * TILE THEN n = 3 * TILE
     FlameReach = n
 END FUNCTION
 
 ' Puts a creature back on the nearest tile after pumping or floating.
 SUB SnapFoe (i)
-    FoeX(i) = INT((FoeX(i) + 16) / TILE) * TILE
-    FoeY(i) = INT((FoeY(i) + 16) / TILE) * TILE
+    FoeX(i) = INT((FoeX(i) + HALF) / TILE) * TILE
+    FoeY(i) = INT((FoeY(i) + HALF) / TILE) * TILE
     FoeDir(i) = 0
 END SUB
 
@@ -690,7 +720,7 @@ SUB WalkFoe (i)
         c = FoeX(i) \ TILE: r = FoeY(i) \ TILE
         ' Drakes stop to breathe fire along their row when the digger is near.
         IF FoeKind(i) = KIND_DRAKE AND FoeCool(i) = 0 THEN
-            IF r = (PY + 16) \ TILE AND ABS(c - (PX + 16) \ TILE) <= 5 AND RND < .4 THEN
+            IF r = (PY + HALF) \ TILE AND ABS(c - (PX + HALF) \ TILE) <= 5 AND RND < .4 THEN
                 IF PX > FoeX(i) THEN FoeFace(i) = 1 ELSE FoeFace(i) = -1
                 FoeState(i) = F_WINDUP: FoeClock(i) = 0
                 EXIT SUB
@@ -762,7 +792,7 @@ SUB GhostFoe (i)
     ' After a while it takes shape again in the tunnel it is over, when that
     ' is not right on top of the digger.
     IF NOT FoeFlee(i) AND FoeClock(i) > 90 THEN
-        c = INT((FoeX(i) + 16) / TILE): r = INT((FoeY(i) + 16) / TILE)
+        c = INT((FoeX(i) + HALF) / TILE): r = INT((FoeY(i) + HALF) / TILE)
         IF c >= 0 AND c < COLS AND r >= 1 AND r < ROWS THEN
             IF Dug(c, r) AND RockAt(c, r) = 0 AND ABS(c * TILE - PX) + ABS(r * TILE - PY) >= 2 * TILE THEN
                 FoeX(i) = c * TILE: FoeY(i) = r * TILE
@@ -782,7 +812,7 @@ SUB MoveRocks
             CASE R_REST
                 ' It falls once the tile below is dug and the digger is out from under it.
                 IF r < ROWS - 1 THEN
-                    IF Dug(c, r + 1) AND NOT ((PX + 16) \ TILE = c AND (PY + 16) \ TILE = r + 1) THEN
+                    IF Dug(c, r + 1) AND NOT ((PX + HALF) \ TILE = c AND (PY + HALF) \ TILE = r + 1) THEN
                         RockState(i) = R_WOBBLE: RockClock(i) = 0
                     END IF
                 END IF
@@ -797,20 +827,20 @@ SUB MoveRocks
                     Sfx SndFall
                 END IF
             CASE R_FALL
-                RockY(i) = RockY(i) + 4
+                RockY(i) = RockY(i) + 6 ' it divides TILE
                 ' It takes along whatever it lands on.
                 FOR j = 1 TO FoeCount
                     SELECT CASE FoeState(j)
                         CASE F_WALK, F_PUMPED, F_WINDUP, F_FIRE
-                            IF ABS(FoeX(j) - c * TILE) < 24 AND FoeY(j) > RockY(i) AND FoeY(j) - RockY(i) < 28 THEN
+                            IF ABS(FoeX(j) - c * TILE) < TILE * 3 \ 4 AND FoeY(j) > RockY(i) AND FoeY(j) - RockY(i) < TILE * 7 \ 8 THEN
                                 FoeState(j) = F_CRUSHED: FoeRock(j) = i
                                 RockKills(i) = RockKills(i) + 1
                                 IF PumpFoe = j THEN Harp = 0: PumpFoe = 0
                             END IF
                     END SELECT
-                    IF FoeState(j) = F_CRUSHED AND FoeRock(j) = i THEN FoeX(j) = c * TILE: FoeY(j) = RockY(i) + 12
+                    IF FoeState(j) = F_CRUSHED AND FoeRock(j) = i THEN FoeX(j) = c * TILE: FoeY(j) = RockY(i) + TILE \ 3
                 NEXT
-                IF GameState = G_PLAY AND ABS(PX - c * TILE) < 24 AND PY > RockY(i) AND PY - RockY(i) < 28 THEN KillDigger
+                IF GameState = G_PLAY AND ABS(PX - c * TILE) < TILE * 3 \ 4 AND PY > RockY(i) AND PY - RockY(i) < TILE * 7 \ 8 THEN KillDigger
                 IF RockY(i) MOD TILE = 0 THEN
                     r = RockY(i) \ TILE
                     IF r >= ROWS - 1 THEN
@@ -865,7 +895,7 @@ END SUB
 SUB UpdatePops
     DIM i AS INTEGER
     FOR i = 1 TO MAX_POPS
-        IF PopClock(i) > 0 THEN PopClock(i) = PopClock(i) - 1: PopY(i) = PopY(i) - .3
+        IF PopClock(i) > 0 THEN PopClock(i) = PopClock(i) - 1: PopY(i) = PopY(i) - .45
     NEXT
 END SUB
 
@@ -934,11 +964,11 @@ SUB Autopilot
         EXIT SUB
     END IF
     IF Harp = 1 THEN EXIT SUB
-    pc = (PX + 16) \ TILE: pr = (PY + 16) \ TILE
+    pc = (PX + HALF) \ TILE: pr = (PY + HALF) \ TILE
     ' Step off the row of a drake about to breathe fire.
     FOR i = 1 TO FoeCount
         IF FoeState(i) = F_WINDUP OR FoeState(i) = F_FIRE THEN
-            IF (FoeY(i) + 16) \ TILE = pr AND ABS(FoeX(i) - PX) < 5 * TILE THEN
+            IF (FoeY(i) + HALF) \ TILE = pr AND ABS(FoeX(i) - PX) < 5 * TILE THEN
                 IF pr > 1 AND RockAt(pc, pr - 1) = 0 THEN InDir = 1 ELSE InDir = 3
                 EXIT SUB
             END IF
@@ -952,7 +982,7 @@ SUB Autopilot
         END IF
     NEXT
     IF best = 0 THEN EXIT SUB
-    fc = (FoeX(best) + 16) \ TILE: fr = (FoeY(best) + 16) \ TILE
+    fc = (FoeX(best) + HALF) \ TILE: fr = (FoeY(best) + HALF) \ TILE
     dx = fc - pc: dy = fr - pr
     IF (dx = 0 OR dy = 0) AND ABS(dx) + ABS(dy) <= 4 AND ABS(dx) + ABS(dy) > 0 THEN
         IF dx > 0 THEN toward = 2 ELSE IF dx < 0 THEN toward = 4 ELSE IF dy > 0 THEN toward = 3 ELSE toward = 1
@@ -961,7 +991,7 @@ SUB Autopilot
         FOR k = 1 TO gap - 1
             IF NOT Dug(pc + SGN(dx) * k, pr + SGN(dy) * k) THEN inReach = 0
         NEXT
-        IF inReach AND PX MOD TILE = 0 AND PY MOD TILE = 0 THEN
+        IF inReach THEN
             IF PFace = toward THEN InFirePressed = -1 ELSE InDir = toward
             EXIT SUB
         END IF
@@ -987,15 +1017,26 @@ END SUB
 
 ' ---------------------------------------------------------------------- drawing
 
-' Sheet cell n (8 to a row) at (x, y), size pixels square, facing left if flip.
+' Sheet cell n at (x, y), size pixels square, facing left if flip.
 SUB Spr (n, x AS SINGLE, y AS SINGLE, size AS SINGLE, flip)
     DIM sx AS INTEGER, sy AS INTEGER, x1 AS INTEGER, y1 AS INTEGER, x2 AS INTEGER, y2 AS INTEGER
-    sx = (n MOD 8) * TILE: sy = (n \ 8) * TILE
+    sx = (n MOD 16) * TILE: sy = (n \ 16) * TILE
     x1 = INT(x): y1 = INT(y): x2 = INT(x + size - 1): y2 = INT(y + size - 1)
     IF flip THEN
         _PUTIMAGE (x2, y1)-(x1, y2), Sheet, 0, (sx, sy)-(sx + TILE - 1, sy + TILE - 1)
     ELSE
         _PUTIMAGE (x1, y1)-(x2, y2), Sheet, 0, (sx, sy)-(sx + TILE - 1, sy + TILE - 1)
+    END IF
+END SUB
+
+' A big cell centered on (cx, cy).
+SUB SprBig (n, cx AS SINGLE, cy AS SINGLE, flip)
+    DIM sx AS INTEGER, x1 AS INTEGER, y1 AS INTEGER
+    sx = n * BIG: x1 = INT(cx) - BIG \ 2: y1 = INT(cy) - BIG \ 2
+    IF flip THEN
+        _PUTIMAGE (x1 + BIG - 1, y1)-(x1, y1 + BIG - 1), BigSheet, 0, (sx, 0)-(sx + BIG - 1, BIG - 1)
+    ELSE
+        _PUTIMAGE (x1, y1)-(x1 + BIG - 1, y1 + BIG - 1), BigSheet, 0, (sx, 0)-(sx + BIG - 1, BIG - 1)
     END IF
 END SUB
 
@@ -1007,30 +1048,30 @@ SUB Render
     ' Flowers on the surface count the rounds.
     FOR i = 1 TO RoundNo
         IF i > 18 THEN EXIT FOR
-        Spr 23, COLS * TILE - i * 26 - 8, FIELD_Y, TILE, 0
+        Spr S_FLOWER + ((Frame \ 40 + i) MOD 2), COLS * TILE - i * 36 - 12, FIELD_Y, TILE, 0
     NEXT
     IF BonusClock > 0 AND (BonusClock > 120 OR Frame MOD 10 < 6) THEN
-        Spr 22, StartC * TILE, StartR * TILE + FIELD_Y, TILE, 0
+        Spr S_MUSHROOM, StartC * TILE, StartR * TILE + FIELD_Y, TILE, 0
     END IF
     FOR i = 1 TO RockCount
         x = RockC(i) * TILE: y = RockY(i) + FIELD_Y
         SELECT CASE RockState(i)
-            CASE R_REST: Spr 18, x, y, TILE, 0
-            CASE R_WOBBLE: Spr 18, x + ((Frame \ 3) MOD 2) * 2 - 1, y, TILE, 0
-            CASE R_FALL: Spr 18, x, y, TILE, 0
-            CASE R_BREAK: IF RockClock(i) < 15 THEN Spr 19, x, y, TILE, 0 ELSE Spr 20, x, y, TILE, 0
+            CASE R_REST, R_FALL: Spr S_ROCK, x, y, TILE, 0
+            CASE R_WOBBLE: Spr S_ROCK, x + ((Frame \ 3) MOD 2) * 4 - 2, y, TILE, 0
+            CASE R_BREAK
+                IF RockClock(i) < 10 THEN Spr S_CRACKED, x, y, TILE, 0 ELSE Spr S_CRUMBLE + (RockClock(i) - 10) \ 11, x, y, TILE, 0
         END SELECT
     NEXT
     ' The harpoon line.
     IF Harp > 0 AND GameState = G_PLAY THEN
         IF Harp = 2 THEN
-            tx = FoeX(PumpFoe) + 16: ty = FoeY(PumpFoe) + 16
+            tx = FoeX(PumpFoe) + HALF: ty = FoeY(PumpFoe) + HALF
         ELSE
-            tx = PX + 16 + DirX(HarpDir) * (12 + HarpLen): ty = PY + 16 + DirY(HarpDir) * (12 + HarpLen)
+            tx = PX + HALF + DirX(HarpDir) * (18 + HarpLen): ty = PY + HALF + DirY(HarpDir) * (18 + HarpLen)
         END IF
-        LINE (PX + 16, PY + 16 + FIELD_Y)-(tx, ty + FIELD_Y), _RGB32(230, 230, 240)
-        LINE (PX + 16 + DirY(HarpDir), PY + 16 + FIELD_Y + DirX(HarpDir))-(tx + DirY(HarpDir), ty + FIELD_Y + DirX(HarpDir)), _RGB32(150, 150, 170)
-        LINE (tx - 2, ty - 2 + FIELD_Y)-(tx + 2, ty + 2 + FIELD_Y), _RGB32(250, 250, 255), BF
+        LINE (PX + HALF, PY + HALF + FIELD_Y)-(tx, ty + FIELD_Y), _RGB32(230, 230, 240)
+        LINE (PX + HALF + DirY(HarpDir), PY + HALF + FIELD_Y + DirX(HarpDir))-(tx + DirY(HarpDir), ty + FIELD_Y + DirX(HarpDir)), _RGB32(150, 150, 170)
+        LINE (tx - 3, ty - 3 + FIELD_Y)-(tx + 3, ty + 3 + FIELD_Y), _RGB32(250, 250, 255), BF
     END IF
     ' Floating eyes go over the digger, everything else under it.
     FOR i = 1 TO FoeCount
@@ -1057,57 +1098,66 @@ SUB Render
 END SUB
 
 SUB DrawDigger
-    DIM n AS INTEGER, flip AS INTEGER, first AS INTEGER, size AS SINGLE, t AS INTEGER
-    SELECT CASE PFace
-        CASE 1: first = 3
-        CASE 3: first = 6
-        CASE ELSE: first = 0
-    END SELECT
-    flip = (PFace = 4)
-    n = first + (PAnim \ 6) MOD 2
-    IF Harp > 0 THEN n = first + 2
+    DIM n AS INTEGER, first AS INTEGER
     IF GameState = G_DYING THEN
-        ' Squashed flat, then gone.
-        t = StateClock
-        IF t > 100 THEN EXIT SUB
-        size = TILE - t * TILE / 110
-        _PUTIMAGE (PX, PY + FIELD_Y + TILE - size)-(PX + TILE - 1, PY + FIELD_Y + TILE - 1), Sheet, 0, ((first MOD 8) * TILE, (first \ 8) * TILE)-((first MOD 8) * TILE + TILE - 1, (first \ 8) * TILE + TILE - 1)
+        ' Dazed, then squashed flat, then gone.
+        IF StateClock < 120 THEN Spr S_DYING + StateClock \ 30, PX, PY + FIELD_Y, TILE, PFace = 4
         EXIT SUB
     END IF
     IF GameState = G_READY AND (StateClock \ 8) MOD 2 = 1 THEN EXIT SUB
-    Spr n, PX, PY + FIELD_Y, TILE, flip
+    SELECT CASE PFace
+        CASE 1: first = S_DIGGER + 6
+        CASE 3: first = S_DIGGER + 12
+        CASE ELSE: first = S_DIGGER
+    END SELECT
+    ' Four walking frames a tile; pumping works the plunger.
+    n = first + (PAnim \ 4) MOD 4
+    IF Harp = 1 THEN n = first + 4
+    IF Harp = 2 THEN n = first + 4 + (PumpClock \ 5) MOD 2
+    Spr n, PX, PY + FIELD_Y, TILE, PFace = 4
 END SUB
 
 SUB DrawFoe (i)
-    DIM n AS INTEGER, size AS SINGLE, x AS SINGLE, y AS SINGLE, flip AS INTEGER, reach AS INTEGER
-    DIM k AS INTEGER
+    DIM n AS INTEGER, x AS SINGLE, y AS SINGLE, flip AS INTEGER, reach AS INTEGER, k AS INTEGER
+    DIM steps AS INTEGER, pace AS INTEGER
     x = FoeX(i): y = FoeY(i) + FIELD_Y: flip = (FoeFace(i) < 0)
+    pace = (Frame \ 7 + i) MOD 4 ' creatures are out of step with each other
     SELECT CASE FoeState(i)
         CASE F_GONE: EXIT SUB
         CASE F_WALK, F_CRUSHED
-            IF FoeKind(i) = KIND_DRAKE THEN n = 13 ELSE n = 9
-            n = n + (Frame \ 10) MOD 2
-            Spr n, x, y, TILE, flip
+            IF FoeKind(i) = KIND_DRAKE THEN
+                Spr S_DRAKE + pace, x, y, TILE, flip
+            ELSEIF (Frame + i * 53) MOD 170 < 7 THEN
+                Spr S_BLINK, x, y, TILE, flip
+            ELSE
+                Spr S_BLOB + pace, x, y, TILE, flip
+            END IF
         CASE F_GHOST
-            Spr 11 + (Frame \ 15) MOD 2, x, y, TILE, flip
+            Spr S_EYES + (Frame \ 15) MOD 2, x, y, TILE, flip
         CASE F_PUMPED
-            IF FoeKind(i) = KIND_DRAKE THEN n = 13 ELSE n = 9
-            size = TILE + FoeStage(i) * 10
-            Spr n, x + 16 - size / 2, y + 16 - size / 2, size, flip
+            IF FoeKind(i) = KIND_DRAKE THEN n = B_DRAKE ELSE n = B_BLOB
+            IF FoeStage(i) = 1 THEN
+                ' Barely pumped, it still fits in its tile.
+                IF FoeKind(i) = KIND_DRAKE THEN Spr S_WINDUP + 1, x, y, TILE, flip ELSE Spr S_BLOB, x, y, TILE, flip
+            ELSE
+                SprBig n + FoeStage(i) - 2, x + HALF, y + HALF, flip
+            END IF
         CASE F_POP
-            size = TILE + FoeClock(i) * 2
-            Spr 21, x + 16 - size / 2, y + 16 - size / 2, size, 0
+            Spr S_POP + FoeClock(i) \ 9, x - HALF \ 2, y - HALF \ 2, TILE + HALF, 0
         CASE F_WINDUP
-            ' A drake flashes before it breathes.
-            IF (FoeClock(i) \ 5) MOD 2 = 0 THEN Spr 15, x, y, TILE, flip ELSE Spr 13, x, y, TILE, flip
+            ' A drake draws in breath before it breathes.
+            Spr S_WINDUP + (FoeClock(i) \ 8) MOD 2, x, y, TILE, flip
         CASE F_FIRE
-            Spr 15, x, y, TILE, flip
+            Spr S_BREATHE, x, y, TILE, flip
             reach = FlameReach(i)
-            FOR k = 0 TO (reach - 1) \ TILE
+            steps = (reach + TILE - 1) \ TILE
+            FOR k = 0 TO steps - 1
+                IF k = steps - 1 THEN n = S_FLAME_TIP ELSE n = S_FLAME
+                n = n + (Frame \ 3 + k) MOD 3
                 IF FoeFace(i) > 0 THEN
-                    Spr 16 + (Frame \ 4) MOD 2, x + TILE + k * TILE, y, TILE, 0
+                    Spr n, x + TILE + k * TILE, y, TILE, 0
                 ELSE
-                    Spr 16 + (Frame \ 4) MOD 2, x - TILE - k * TILE, y, TILE, -1
+                    Spr n, x - TILE - k * TILE, y, TILE, -1
                 END IF
             NEXT
     END SELECT
@@ -1116,53 +1166,56 @@ END SUB
 SUB DrawHud
     DIM i AS INTEGER
     COLOR _RGB32(255, 90, 80)
-    _PRINTSTRING (12, 4), "SCORE"
+    _PRINTSTRING (16, 4), "SCORE"
     _PRINTSTRING (SW \ 2 - 50, 4), "HIGH SCORE"
-    _PRINTSTRING (SW - 110, 4), "ROUND"
+    _PRINTSTRING (SW - 120, 4), "ROUND"
     COLOR _RGB32(255, 255, 255)
-    _PRINTSTRING (12, 20), RIGHT$("      " + LTRIM$(STR$(Score)), 7)
-    _PRINTSTRING (SW \ 2 - 40, 20), RIGHT$("      " + LTRIM$(STR$(HiScore)), 7)
-    _PRINTSTRING (SW - 100, 20), LTRIM$(STR$(RoundNo))
+    _PRINTSTRING (16, 24), RIGHT$("      " + LTRIM$(STR$(Score)), 7)
+    _PRINTSTRING (SW \ 2 - 40, 24), RIGHT$("      " + LTRIM$(STR$(HiScore)), 7)
+    _PRINTSTRING (SW - 110, 24), LTRIM$(STR$(RoundNo))
     ' Spare diggers along the bottom.
     FOR i = 1 TO Lives - 1
         IF i > 10 THEN EXIT FOR
-        Spr 0, 8 + (i - 1) * 26, FIELD_Y + ROWS * TILE + 2, 22, 0
+        Spr S_LIFE, 12 + (i - 1) * 38, FIELD_Y + ROWS * TILE + 4, 32, 0
     NEXT
     IF NOT MusicOn AND NOT Demo THEN
         COLOR _RGB32(150, 150, 160)
-        _PRINTSTRING (SW - 110, FIELD_Y + ROWS * TILE + 4), "music off"
+        _PRINTSTRING (SW - 120, FIELD_Y + ROWS * TILE + 10), "music off"
     END IF
 END SUB
 
 SUB Banner (title$, subtitle$)
-    DIM w AS INTEGER
-    LINE (SW \ 2 - 170, 200)-(SW \ 2 + 170, 270), _RGBA32(0, 0, 0, 190), BF
-    LINE (SW \ 2 - 170, 200)-(SW \ 2 + 170, 270), _RGB32(255, 214, 70), B
+    DIM w AS INTEGER, y AS INTEGER
+    y = SH \ 2 - 40
+    LINE (SW \ 2 - 200, y)-(SW \ 2 + 200, y + 76), _RGBA32(0, 0, 0, 190), BF
+    LINE (SW \ 2 - 200, y)-(SW \ 2 + 200, y + 76), _RGB32(255, 214, 70), B
     COLOR _RGB32(255, 214, 70)
     w = _PRINTWIDTH(title$)
-    _PRINTSTRING (SW \ 2 - w \ 2, 212), title$
+    _PRINTSTRING (SW \ 2 - w \ 2, y + 14), title$
     COLOR _RGB32(230, 230, 240)
     w = _PRINTWIDTH(subtitle$)
-    IF subtitle$ <> "" THEN _PRINTSTRING (SW \ 2 - w \ 2, 240), subtitle$
+    IF subtitle$ <> "" THEN _PRINTSTRING (SW \ 2 - w \ 2, y + 44), subtitle$
 END SUB
 
 SUB DrawTitle
-    DIM w AS INTEGER, lw AS INTEGER, y AS INTEGER
-    LINE (60, 70)-(SW - 60, 420), _RGBA32(0, 0, 0, 170), BF
-    lw = _WIDTH(LogoImg) * 6
-    _PUTIMAGE (SW \ 2 - lw \ 2 + 6, 92)-(SW \ 2 + lw \ 2 + 5, 92 + 6 * 20 - 1), LogoImg
-    _PUTIMAGE (SW \ 2 - lw \ 2, 86)-(SW \ 2 + lw \ 2 - 1, 86 + 6 * 20 - 1), LogoImg
-    y = 222
-    Spr 9, 150, y, TILE, 0: Spr 13, 150, y + 40, TILE, 0: Spr 18, 150, y + 80, TILE, 0
+    DIM w AS INTEGER, lw AS INTEGER, y AS INTEGER, x AS INTEGER
+    LINE (90, 96)-(SW - 90, SH - 80), _RGBA32(0, 0, 0, 170), BF
+    lw = _WIDTH(LogoImg) * 9
+    _PUTIMAGE (SW \ 2 - lw \ 2 + 8, 128)-(SW \ 2 + lw \ 2 + 7, 128 + 9 * 20 - 1), LogoImg
+    _PUTIMAGE (SW \ 2 - lw \ 2, 120)-(SW \ 2 + lw \ 2 - 1, 120 + 9 * 20 - 1), LogoImg
+    y = 320: x = SW \ 2 - 230
+    Spr S_BLOB + (Frame \ 7) MOD 4, x, y, TILE, 0
+    Spr S_DRAKE + (Frame \ 7) MOD 4, x, y + 60, TILE, 0
+    Spr S_ROCK, x, y + 120, TILE, 0
     COLOR _RGB32(230, 230, 240)
-    _PRINTSTRING (200, y + 6), "Blob: chases you through the tunnels"
-    _PRINTSTRING (200, y + 46), "Drake: breathes fire along its row"
-    _PRINTSTRING (200, y + 86), "Rock: dig out from under it to drop it"
+    _PRINTSTRING (x + 70, y + 14), "Blob: chases you through the tunnels"
+    _PRINTSTRING (x + 70, y + 74), "Drake: breathes fire along its row"
+    _PRINTSTRING (x + 70, y + 134), "Rock: dig out from under it to drop it"
     COLOR _RGB32(255, 214, 70)
     w = _PRINTWIDTH("Arrows dig   Space pumps   F fullscreen   M music")
-    _PRINTSTRING (SW \ 2 - w \ 2, y + 128), "Arrows dig   Space pumps   F fullscreen   M music"
+    _PRINTSTRING (SW \ 2 - w \ 2, y + 196), "Arrows dig   Space pumps   F fullscreen   M music"
     IF (Frame \ 30) MOD 2 = 0 THEN
         w = _PRINTWIDTH("Press any key or button to start")
-        _PRINTSTRING (SW \ 2 - w \ 2, y + 160), "Press any key or button to start"
+        _PRINTSTRING (SW \ 2 - w \ 2, y + 236), "Press any key or button to start"
     END IF
 END SUB
