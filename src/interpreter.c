@@ -8430,7 +8430,7 @@ static __attribute__((noinline)) double builtin_function_tok(TokenStream *ts, To
                     return 0;
                 }
                 int c = fgetc(file_handles[fnum]);
-                if (c == EOF) return 1;
+                if (c == EOF) return -1; // true, so NOT EOF(n) is false
                 ungetc(c, file_handles[fnum]);
                 return 0;
             }

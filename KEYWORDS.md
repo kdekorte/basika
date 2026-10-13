@@ -298,7 +298,7 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `ARGC`: Number of command-line arguments.
 - `ARGV$(index)`: Returns a command-line argument by index.
 - `CVI(s$)`, `CVL(s$)`, `CVS(s$)`, `CVD(s$)`: Convert a 2-, 4-, 4- or 8-byte binary string to INTEGER, LONG, SINGLE or DOUBLE.
-- `EOF(n)`: Returns nonzero when file #n is at end of file.
+- `EOF(n)`: -1 (true) when file #n is at its end, else 0, so `DO WHILE NOT EOF(n)` stops after the last item.
 - `FREEFILE`: The lowest file number (1-15) not in use, for `OPEN ... AS #FREEFILE`-style code; "Too many files" when all are open.
 - `LOF(n)`: Length of file #n in bytes.
 - `LOC(n)`: For RANDOM files, the last record read or written; for BINARY files, the last byte; otherwise the current byte position in file #n.

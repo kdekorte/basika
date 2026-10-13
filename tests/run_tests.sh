@@ -50,6 +50,7 @@ TESTS=(
   "tests/file_io/name_test"
   "tests/file_io/kill_wildcard"
   "tests/file_io/freefile"
+  "tests/file_io/eof_loop"
   "tests/file_io/files"
   "tests/file_io/dir_ops"
   "tests/file_io/dir_ops_ext"
