@@ -27,6 +27,14 @@ brew uninstall basika
 brew untap kdekorte/basika
 ```
 
+The same tap has a cask for Burrow, the digging game in `demo/burrow/`, as a standalone Mac app (Apple silicon, macOS 27 or later). It does not need basika installed:
+
+```sh
+brew install --cask kdekorte/basika/burrow
+```
+
+Burrow is not notarized, so the first time it opens macOS says it cannot verify it; click "Open Anyway" for Burrow in System Settings > Privacy & Security.
+
 ## Build from Source
 
 Requirements:
@@ -102,6 +110,13 @@ Try the sound and `PLAY` Music Macro Language demo:
 
 ```sh
 ./basika demo/sound_demo.bas
+```
+
+On a Mac, `tools/make_mac_app.py` packages a program into a standalone `.app` with its own copy of basika and the SDL libraries, so it can be started from the Finder or the Dock. `make burrow-app` builds `dist/Burrow.app` from the Burrow game, with the icon drawn by `demo/burrow/tools/make_icon.py`:
+
+```sh
+make burrow-app
+python3 tools/make_mac_app.py demo/jukebox/jukebox.bas --name Jukebox
 ```
 
 Image demos require `SDL3_image` and load the repository fixture from  

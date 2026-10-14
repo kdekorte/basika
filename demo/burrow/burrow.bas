@@ -124,7 +124,7 @@ DIM SHARED Score, HiScore, Lives, RoundNo, NextLife, GameState, StateClock
 DIM SHARED BonusClock, Frame AS LONG, Demo, Paused, SelfTest, QuitGame
 DIM SHARED FullPref, FullOn, MusicOn, Speed AS SINGLE, GhostSpeed AS SINGLE
 DIM SHARED InDir, InFire, InFirePressed, LastFire, InAnyKey
-DIM SHARED Sheet, BigSheet, DirtImg, LogoImg, BaseDir AS STRING
+DIM SHARED Sheet, BigSheet, DirtImg, LogoImg, BaseDir AS STRING, DataDir AS STRING
 DIM SHARED SndWalk, SndStart, SndClear, SndDie, SndOver, SndExtra, SndBonus
 DIM SHARED SndHarpoon, SndPump, SndPop, SndFire, SndFall, SndCrush
 
@@ -166,7 +166,9 @@ SYSTEM
 
 ' ------------------------------------------------------------ files and assets
 
-' Assets live next to this program, wherever it is run from.
+' Assets live next to this program, wherever it is run from. The high score
+' does too, unless BASIKA_DATA_DIR names a folder for it (the Mac app made by
+' tools/make_mac_app.py sets it, since the app itself is read-only).
 SUB FindBaseDir
     DIM i AS INTEGER, p$
     p$ = ARGV$(0)
@@ -174,6 +176,12 @@ SUB FindBaseDir
     FOR i = LEN(p$) TO 1 STEP -1
         IF MID$(p$, i, 1) = "/" OR MID$(p$, i, 1) = "\" THEN BaseDir = LEFT$(p$, i): EXIT FOR
     NEXT
+    DataDir = ENVIRON$("BASIKA_DATA_DIR")
+    IF DataDir = "" THEN
+        DataDir = BaseDir
+    ELSEIF RIGHT$(DataDir, 1) <> "/" THEN
+        DataDir = DataDir + "/"
+    END IF
 END SUB
 
 FUNCTION LoadSound (file$)
@@ -209,13 +217,13 @@ SUB LoadAssets
     _DEST 0
 END SUB
 
-' The high score is kept in burrow.hi next to the program.
+' The high score is kept in burrow.hi in DataDir.
 SUB LoadHiScore
     DIM f AS INTEGER
     f = FREEFILE
-    OPEN BaseDir + "burrow.hi" FOR APPEND AS #f
+    OPEN DataDir + "burrow.hi" FOR APPEND AS #f
     CLOSE #f
-    OPEN BaseDir + "burrow.hi" FOR INPUT AS #f
+    OPEN DataDir + "burrow.hi" FOR INPUT AS #f
     IF LOF(f) > 0 THEN INPUT #f, HiScore
     CLOSE #f
 END SUB
@@ -224,7 +232,7 @@ SUB SaveHiScore
     DIM f AS INTEGER
     IF SelfTest OR Demo THEN EXIT SUB
     f = FREEFILE
-    OPEN BaseDir + "burrow.hi" FOR OUTPUT AS #f
+    OPEN DataDir + "burrow.hi" FOR OUTPUT AS #f
     PRINT #f, HiScore
     CLOSE #f
 END SUB

@@ -8,7 +8,9 @@
 #   ./release.sh package      Build the distribution zip
 #   ./release.sh release      Create GitHub release and upload assets
 #   ./release.sh formula      Update the Homebrew formula with the correct version and SHA256
-#   ./release.sh all          Run all steps: tag, package, release, and formula update
+#   ./release.sh app          Build Burrow-VERSION.zip, the Burrow Mac app (macOS only)
+#   ./release.sh cask         Update the Burrow Homebrew cask with the correct version and SHA256
+#   ./release.sh all          Run all steps: tag, package, release, formula and cask update
 #
 # Requires: gh (GitHub CLI), authenticated via `gh auth login`
 #
@@ -20,6 +22,9 @@ TAG="v${VERSION}"
 FORMULA="Formula/basika.rb"
 PACKAGE_NAME="basika-${VERSION}"
 ARCHIVE_URL="https://github.com/kdekorte/basika/releases/download/${TAG}/${PACKAGE_NAME}.zip"
+CASK="Casks/burrow.rb"
+BURROW_ZIP="Burrow-${VERSION}.zip"
+BURROW_URL="https://github.com/kdekorte/basika/releases/download/${TAG}/${BURROW_ZIP}"
 
 info()    { printf "\033[1;34m==>\033[0m \033[1m%s\033[0m\n" "$1"; }
 success() { printf "\033[1;32m==>\033[0m \033[1m%s\033[0m\n" "$1"; }
@@ -30,6 +35,7 @@ show_status() {
     echo "  Version:      ${VERSION}"
     echo "  Tag:          ${TAG}"
     echo "  Formula:      ${FORMULA}"
+    echo "  Cask:         ${CASK}"
     echo "  Archive URL:  ${ARCHIVE_URL}"
     echo ""
 
@@ -71,6 +77,16 @@ do_package() {
     success "Created ${PACKAGE_NAME}.zip"
 }
 
+# The Burrow Mac app, zipped with ditto so its signature survives.
+do_app() {
+    info "Building the Burrow Mac app"
+    [ "$(uname)" = "Darwin" ] || error "The Burrow app can only be built on macOS."
+    make burrow-app
+    rm -f "${BURROW_ZIP}"
+    ditto -c -k --keepParent dist/Burrow.app "${BURROW_ZIP}"
+    success "Created ${BURROW_ZIP}"
+}
+
 do_release() {
     info "Creating GitHub release ${TAG}"
 
@@ -96,28 +112,33 @@ do_release() {
         error "Package '${PACKAGE_NAME}.zip' not found after build."
     fi
 
+    # Build the Burrow app for the cask
+    do_app
+
     # Create the release (or skip if it already exists)
     if gh release view "${TAG}" >/dev/null 2>&1; then
         info "GitHub release ${TAG} already exists, uploading assets (overwriting if present)"
         gh release upload "${TAG}" \
             "${PACKAGE_NAME}.zip" \
+            "${BURROW_ZIP}" \
             --clobber
     else
         info "Creating new GitHub release ${TAG}"
         gh release create "${TAG}" \
             "${PACKAGE_NAME}.zip" \
+            "${BURROW_ZIP}" \
             --title "Basika ${VERSION}" \
             --generate-notes
     fi
 
     success "GitHub release ${TAG} created with assets:"
     echo "  - ${PACKAGE_NAME}.zip  (source package)"
-    echo "  - basika              (macOS binary)"
+    echo "  - ${BURROW_ZIP}  (Burrow Mac app)"
 
     # Clean up build artifacts
     info "Cleaning up build artifacts"
     make clean
-    rm -f "${PACKAGE_NAME}.zip"
+    rm -f "${PACKAGE_NAME}.zip" "${BURROW_ZIP}"
 }
 
 do_formula() {
@@ -163,12 +184,43 @@ do_formula() {
     echo "  git push"
 }
 
+do_cask() {
+    info "Updating Homebrew cask for ${TAG}"
+
+    if ! git rev-parse "${TAG}" >/dev/null 2>&1; then
+        error "Tag ${TAG} does not exist. Run './release.sh tag' first."
+    fi
+
+    info "Downloading ${BURROW_ZIP} to compute SHA256..."
+    SHA256=$(curl -sfL "${BURROW_URL}" | shasum -a 256 | awk '{print $1}')
+
+    # An empty download hashes to e3b0c442...; treat it as missing.
+    if [ -z "${SHA256}" ] || [ "${#SHA256}" -ne 64 ] || [ "${SHA256}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+        error "Failed to download ${BURROW_URL}. Has the release been published? Run './release.sh release' first."
+    fi
+
+    info "SHA256: ${SHA256}"
+    sed -i '' "s|^  version \".*\"|  version \"${VERSION}\"|" "${CASK}"
+    sed -i '' "s|^  sha256 .*|  sha256 \"${SHA256}\"|" "${CASK}"
+
+    success "Cask updated:"
+    echo "  Version: ${VERSION}"
+    echo "  SHA256:  ${SHA256}"
+    echo ""
+    echo "Don't forget to commit the updated cask:"
+    echo "  git add ${CASK}"
+    echo "  git commit -m \"Update Burrow cask for ${VERSION}\""
+    echo "  git push"
+}
+
 do_all() {
     do_tag
     echo ""
     do_release
     echo ""
     do_formula
+    echo ""
+    do_cask
 }
 
 # --- Main ---
@@ -179,17 +231,21 @@ case "${1:-status}" in
     package)  do_package ;;
     release)  do_release ;;
     formula)  do_formula ;;
+    app)      do_app ;;
+    cask)     do_cask ;;
     all)      do_all ;;
     *)
-        echo "Usage: $0 {status|tag|package|release|formula|all}"
+        echo "Usage: $0 {status|tag|package|release|formula|app|cask|all}"
         echo ""
         echo "Commands:"
         echo "  status    Show current version and release status (default)"
         echo "  tag       Create and push a git tag for the current version"
         echo "  package   Build the basika-VERSION.zip distribution archive"
-        echo "  release   Create GitHub release and upload source + binary"
+        echo "  release   Create GitHub release and upload the source package and Burrow app"
         echo "  formula   Update the Homebrew formula URL and SHA256"
-        echo "  all       Run tag, release, and formula in sequence"
+        echo "  app       Build Burrow-VERSION.zip, the Burrow Mac app"
+        echo "  cask      Update the Burrow cask version and SHA256"
+        echo "  all       Run tag, release, formula and cask in sequence"
         exit 1
         ;;
 esac
