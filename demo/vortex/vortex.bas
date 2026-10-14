@@ -16,14 +16,16 @@
 '
 '  Keys    Left/Right (or A/D) move   Space fire (hold, or tap faster)
 '          Z superzapper
-'          P pause   F fullscreen on/off   Esc title screen / quit
+'          P pause   F fullscreen on/off   M music on/off
+'          Esc title screen / quit
 '  A joystick or gamepad works too, alongside the keys: the stick moves,
 '  button 1 fires (and starts a game), button 2 is the superzapper.
 '  Games play fullscreen (F switches that off); the title screen runs a
 '  demo game in a window.
 '
-'  Run with: basika -w demo/vortex.bas
-'  (basika --headless demo/vortex.bas --selftest [frames] plays the demo for
+'  The music is in assets/music.wav, made by tools/make_music.py.
+'  Run with: basika -w demo/vortex/vortex.bas
+'  (basika --headless demo/vortex/vortex.bas --selftest [frames] plays the demo for
 '   that many frames, 420 by default, saves vortex_selftest.png and exits.)
 ' ============================================================================
 
@@ -101,6 +103,7 @@ DIM SHARED ZapUses AS INTEGER, ZapFlash AS INTEGER, DiedInWarp AS INTEGER
 DIM SHARED Pending AS INTEGER, SpawnClock AS INTEGER
 DIM SHARED InLeft AS INTEGER, InRight AS INTEGER, InFire AS INTEGER, InZap AS INTEGER
 DIM SHARED FullPref AS INTEGER, FullOn AS INTEGER, QuitGame AS INTEGER, SelfTest AS INTEGER
+DIM SHARED MusicOn AS INTEGER, Music AS LONG, BaseDir AS STRING
 DIM SHARED Frame AS LONG
 
 DIM i AS INTEGER, frames AS LONG
@@ -110,7 +113,7 @@ _TITLE "Vortex"
 _PRINTMODE _KEEPBACKGROUND
 _AUTODISPLAY OFF
 
-FullPref = -1
+FullPref = -1: MusicOn = -1
 IF LEFT$(COMMAND$, 10) = "--selftest" THEN
     SelfTest = -1
     frames = VAL(MID$(COMMAND$, 11))
@@ -123,11 +126,15 @@ FOR i = 0 TO MAX_STARS
     ResetStar i
     StarZ(i) = RND * ZFAR
 NEXT
+FindBaseDir
+Music = _SNDOPEN(BaseDir + "assets/music.wav")
+IF Music THEN _SNDVOL Music, .5
 
 StartDemo
 DO
     ReadInput
     IF NOT Paused THEN Update
+    UpdateMusic
     Render
     _DISPLAY
     Frame = Frame + 1
@@ -149,7 +156,30 @@ END SUB
 
 SUB StartGame
     Demo = 0
+    IF Music THEN _SNDSTOP Music ' each game starts the tune from the top
     NewGame
+END SUB
+
+' The program's folder, so the music is found wherever it is run from.
+SUB FindBaseDir
+    DIM i AS INTEGER, p$
+    p$ = ARGV$(0)
+    BaseDir = ""
+    FOR i = LEN(p$) TO 1 STEP -1
+        IF MID$(p$, i, 1) = "/" OR MID$(p$, i, 1) = "\" THEN BaseDir = LEFT$(p$, i): EXIT FOR
+    NEXT
+END SUB
+
+' The music plays through a game, pausing with it, and stops at game over;
+' the demo is silent.
+SUB UpdateMusic
+    DIM want AS INTEGER
+    IF Music = 0 THEN EXIT SUB
+    want = MusicOn AND NOT Demo AND NOT SelfTest AND NOT Paused AND State <> ST_OVER
+    IF want AND NOT _SNDPLAYING(Music) THEN _SNDLOOP Music
+    IF NOT want AND _SNDPLAYING(Music) THEN
+        IF State = ST_OVER OR Demo THEN _SNDSTOP Music ELSE _SNDPAUSE Music
+    END IF
 END SUB
 
 SUB NewGame
@@ -227,6 +257,8 @@ SUB ReadInput
                 ApplyFullscreen
             CASE 90, 122 ' Z
                 IF NOT Demo THEN InZap = -1
+            CASE 77, 109 ' M
+                MusicOn = NOT MusicOn
         END SELECT
     LOOP UNTIL k = 0
     ' The joystick: STICK(0) is 0 with none attached, else 1-200 with 100 at
@@ -1056,6 +1088,7 @@ END SUB
 ' ---------------------------------------------------------------- screen
 
 SUB Render
+    DIM s$
     CLS
     IF State = ST_WARP OR State = ST_ZOOM THEN DrawStars
     DrawTube
@@ -1073,11 +1106,10 @@ SUB Render
         IF (Frame \ 30) MOD 2 = 0 THEN CenterText "PRESS SPACE TO PLAY", 330
         IF STICK(0) THEN CenterText "JOYSTICK: STICK MOVES   BUTTON 1 FIRE   BUTTON 2 SUPERZAPPER", 356
         CenterText "LEFT/RIGHT MOVE   SPACE FIRE (TAP TO FIRE FASTER)   Z SUPERZAPPER   P PAUSE", 380
-        IF FullPref THEN
-            CenterText "F FULLSCREEN: ON    ESC QUIT", 404
-        ELSE
-            CenterText "F FULLSCREEN: OFF    ESC QUIT", 404
-        END IF
+        s$ = "F FULLSCREEN: OFF"
+        IF FullPref THEN s$ = "F FULLSCREEN: ON"
+        IF MusicOn THEN s$ = s$ + "    M MUSIC: ON" ELSE s$ = s$ + "    M MUSIC: OFF"
+        CenterText s$ + "    ESC QUIT", 404
     ELSEIF State = ST_OVER THEN
         LINE (0, 310)-(SW - 1, 445), _RGBA32(0, 0, 0, 170), BF
         VTextC "GAME OVER", 330, 9, RED
@@ -1103,6 +1135,11 @@ SUB DrawHud
         COLOR _RGB32(120, 200, 255)
         s$ = "SUPERZAPPER"
         _PRINTSTRING (SW - 16 - _PRINTWIDTH(s$), 28), s$
+    END IF
+    IF NOT MusicOn AND NOT Demo THEN
+        COLOR _RGB32(150, 150, 160)
+        s$ = "MUSIC OFF"
+        _PRINTSTRING (SW - 16 - _PRINTWIDTH(s$), SH - 24), s$
     END IF
     ' One small claw for each life after this one.
     FOR i = 1 TO Lives - 1
