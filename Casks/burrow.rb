@@ -1,6 +1,6 @@
 cask "burrow" do
   version "0.99.8"
-  sha256 :no_check
+  sha256 "cd32f63d2dafab8f8314e3047469c829a800a5fc298a0d6e5daadb4f35edc8c2"
 
   url "https://github.com/kdekorte/basika/releases/download/v#{version}/Burrow-#{version}.zip"
   name "Burrow"
