@@ -11011,9 +11011,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     }
                     globfree(&results);
                 }
-                if (deleted_any) {
-                    basic_output("Deleted\n");
-                } else if (glob_result == GLOB_NOMATCH) {
+                if (!deleted_any && glob_result == GLOB_NOMATCH) {
                     char err[256];
                     snprintf(err, sizeof(err), "Delete failed: %s\n", path_buf);
                     basic_output(err);
