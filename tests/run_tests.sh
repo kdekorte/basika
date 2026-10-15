@@ -100,6 +100,7 @@ TESTS=(
   "tests/math/numeric_literals"
   "tests/arrays/dim_typed"
   "tests/control_flow/nested_for"
+  "tests/control_flow/nested_for_ten"
   "tests/control_flow/nested_while"
   "tests/control_flow/on_goto_nested"
   "tests/control_flow/on_goto_gosub"
