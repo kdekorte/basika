@@ -10185,7 +10185,6 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             
             int has_args = 0;
             int using_mode = 0;
-            int last_was_numeric = 0;
             char using_fmt[256] = "";
             size_t using_pos = 0;
             /* detect PRINT USING format: either 'PRINT USING "fmt", expr' or 'PRINT #n, USING "fmt", expr' */
@@ -10235,7 +10234,6 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     parse_string_expression(&ptr, value, sizeof(value));
                     if (using_mode) using_format_value(using_fmt, &using_pos, 1, value, 0, val_buf, sizeof(val_buf));
                     else strcpy(val_buf, value);
-                    last_was_numeric = 0;
                 } else {
                     ptr = item_saved;
                     last_expression_is_double = 0;
@@ -10249,7 +10247,6 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         format_number_plain(number, last_expression_is_double, digits, sizeof(digits));
                         snprintf(val_buf, sizeof(val_buf), "%s%s ", digits[0] == '-' ? "" : " ", digits);
                     }
-                    last_was_numeric = 1;
                 }
                 if (runtime_error_occurred) break; // a PRINT USING value that does not fit its field
                 if (fnum != -1 && file_handles[fnum]) {
@@ -10269,17 +10266,6 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     if (next.type == TOKEN_COMMA && !using_mode) {
                         int target = (print_col / 14 + 1) * 14;
                         while (print_col < target) {
-                            if (fnum != -1 && file_handles[fnum]) {
-                                fprintf(file_handles[fnum], " ");
-                                print_col++;
-                            } else {
-                                basic_output(" ");
-                            }
-                        }
-                    } else if (last_was_numeric && !using_mode) {
-                        const char *peek_ptr = ptr;
-                        Token peek = get_next_token(&peek_ptr);
-                        if (peek.type != TOKEN_EOF && peek.type != TOKEN_COLON && !is_string_token(&peek)) {
                             if (fnum != -1 && file_handles[fnum]) {
                                 fprintf(file_handles[fnum], " ");
                                 print_col++;
