@@ -53,6 +53,8 @@ make
 
 Basika is distributed under the [MIT License](LICENSE).
 
+The `Px437_*.ttf` screen fonts in `fonts/` are from [The Ultimate Oldschool PC Font Pack](https://int10h.org/oldschool-pc-fonts/) by VileR, licensed under [CC BY-SA 4.0](fonts/LICENSE-oldschool-pc-fonts.txt).
+
 ## Run
 
 Run a BASIC program:

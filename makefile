@@ -45,7 +45,7 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/share/basika/fonts
-	install -m 644 fonts/ModernDOS8x16.ttf $(DESTDIR)$(PREFIX)/share/basika/fonts/
+	install -m 644 fonts/*.ttf fonts/LICENSE-oldschool-pc-fonts.txt $(DESTDIR)$(PREFIX)/share/basika/fonts/
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(TARGET)

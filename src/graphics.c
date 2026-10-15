@@ -130,6 +130,19 @@ static TTF_Font *base_font = NULL;      // Built-in font; the only one reload_fo
 static int active_font_slot = -1;       // -1 = built-in font, else the _FONT slot in use
 static char font_path[512] = "";
 static const int FONT_SIZE = 16;         // Initial DOS-style pixel font size
+
+/* The built-in screen fonts, from the Ultimate Oldschool PC Font Pack
+ * (fonts/LICENSE-oldschool-pc-fonts.txt). Each is pixel-exact only at a
+ * whole multiple of its em size (not always its cell height), so
+ * reload_font picks the one that best fills a text cell. Largest first:
+ * a tie goes to the finer font. */
+static const struct { const char *file; int height, em; } builtin_fonts[] = {
+    {"Px437_IBM_VGA_8x16.ttf", 16, 16},
+    {"Px437_IBM_EGA_8x14.ttf", 14, 16},
+    {"Px437_IBM_EGA_8x8.ttf", 8, 8},
+};
+#define BUILTIN_FONT_COUNT ((int)(sizeof(builtin_fonts) / sizeof(builtin_fonts[0])))
+static char builtin_font_dir[512] = "";  // Where the built-in fonts are, or "" to keep font_path
 static int current_row_height = 16;      // Use pixel-based rows for doubled text modes
 static int current_col_width = 16;       // Defaults to 80 columns at doubled resolution
 static int last_key_code = 0;
@@ -296,7 +309,29 @@ static void reload_font(int target_height) {
         }
     }
 
-    base_font = TTF_OpenFont(font_path, (float)target_height);
+    int open_size = target_height;
+    if (builtin_font_dir[0] != '\0') {
+        /* Measure the cell in the mode's own pixels, which the canvas may
+         * double, and scale the chosen font by a whole number to fit it. */
+        int scale = (mode_res_h > 0 && canvas_height >= mode_res_h) ? canvas_height / mode_res_h : 1;
+        int cell_h = target_height / scale;
+        int cell_w = text_columns > 0 ? canvas_width / text_columns / scale : 8;
+        int best = BUILTIN_FONT_COUNT - 1, best_fill = 0, best_k = 0;
+        for (int i = 0; i < BUILTIN_FONT_COUNT; i++) {
+            int k = cell_h / builtin_fonts[i].height;
+            if (cell_w / 8 < k) k = cell_w / 8; // all are 8 pixels wide
+            if (k * builtin_fonts[i].height > best_fill) {
+                best = i;
+                best_fill = k * builtin_fonts[i].height;
+                best_k = k;
+            }
+        }
+        // A cell smaller than 8x8 gets the 8x8 font, scaled unevenly.
+        if (best_k > 0) open_size = builtin_fonts[best].em * best_k * scale;
+        snprintf(font_path, sizeof(font_path), "%s%s", builtin_font_dir, builtin_fonts[best].file);
+    }
+
+    base_font = TTF_OpenFont(font_path, (float)open_size);
     font = base_font;
     if (!font) {
         fprintf(stderr, "Failed to reload font at size %d: %s\n", target_height, SDL_GetError());
@@ -1358,6 +1393,8 @@ int init_graphics() {
     if (headless_mode) {
         flags |= SDL_WINDOW_HIDDEN;
     }
+    // Draw in the display's own pixels; otherwise a Retina display blurs every frame.
+    flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (resize_allowed) flags |= SDL_WINDOW_RESIZABLE;
     if (fullscreen_mode != FULLSCREEN_OFF) flags |= SDL_WINDOW_FULLSCREEN;
     window = SDL_CreateWindow("BASIKA Virtual Framebuffer", 1024, 768, flags);
@@ -1367,7 +1404,30 @@ int init_graphics() {
 
     set_screen_mode(2); // Default graphics mode when no SCREEN command is issued
     
-    // Search for Modern DOS fonts in common directories and use the first one found.
+    // Look for the built-in fonts beside the executable (or in the app bundle's
+    // Resources), in its install prefix, then in the current directory.
+    const char *base = SDL_GetBasePath();
+    char dirs[6][512] = {"", "", "./fonts/", "/usr/local/share/basika/fonts/",
+                         "/opt/homebrew/share/basika/fonts/", "/usr/share/basika/fonts/"};
+    if (base) {
+        snprintf(dirs[0], sizeof(dirs[0]), "%sfonts/", base);
+        snprintf(dirs[1], sizeof(dirs[1]), "%s../share/basika/fonts/", base);
+    }
+    for (int d = 0; d < 6 && !font; d++) {
+        if (dirs[d][0] == '\0') continue;
+        int found = 1;
+        for (int i = 0; i < BUILTIN_FONT_COUNT && found; i++) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s%s", dirs[d], builtin_fonts[i].file);
+            found = SDL_GetPathInfo(path, NULL);
+        }
+        if (!found) continue;
+        snprintf(font_path, sizeof(font_path), "%s%s", dirs[d], builtin_fonts[0].file);
+        font = TTF_OpenFont(font_path, FONT_SIZE);
+        if (font) strncpy(builtin_font_dir, dirs[d], sizeof(builtin_font_dir) - 1);
+    }
+
+    // Otherwise use a Modern DOS font from a common directory, if one is found.
     const char *font_candidates[] = {
         "./fonts/ModernDOS8x16.ttf",
         "/usr/local/share/basika/fonts/ModernDOS8x16.ttf",
@@ -1385,7 +1445,7 @@ int init_graphics() {
         "/usr/share/fonts/truetype/modern-dos/ModernDOS9x18.ttf",
         NULL
     };
-    for (int i = 0; font_candidates[i] != NULL; i++) {
+    for (int i = 0; !font && font_candidates[i] != NULL; i++) {
         font = TTF_OpenFont(font_candidates[i], FONT_SIZE);
         if (font) {
             strncpy(font_path, font_candidates[i], sizeof(font_path) - 1);
@@ -1438,8 +1498,11 @@ static double get_target_aspect_ratio(void) {
 
 static void render_canvas_to_window(void) {
     if (!renderer || !canvas || !window) return;
-    int win_w, win_h;
-    SDL_GetWindowSize(window, &win_w, &win_h);
+    // Lay the picture out in the window's pixels, which a Retina display
+    // has more of than the window has points.
+    int win_w, win_h, points_w, points_h;
+    SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
+    SDL_GetWindowSize(window, &points_w, &points_h);
     double target_aspect = get_target_aspect_ratio();
     int dest_w = win_w;
     int dest_h = (int)(dest_w / target_aspect + 0.5);
@@ -1447,17 +1510,28 @@ static void render_canvas_to_window(void) {
         dest_h = win_h;
         dest_w = (int)(dest_h * target_aspect + 0.5);
     }
-    if (fullscreen_mode == FULLSCREEN_SQUAREPIXELS) {
-        // The largest whole-number scale that fits, so every pixel is the same size.
-        int base_w = mode_res_w, base_h = (int)(mode_res_w / target_aspect + 0.5);
-        int factor = base_w > 0 && base_h > 0 ? (win_w / base_w < win_h / base_h ? win_w / base_w : win_h / base_h) : 0;
-        if (factor >= 1) {
-            dest_w = base_w * factor;
-            dest_h = base_h * factor;
+    int square = fullscreen_mode == FULLSCREEN_SQUAREPIXELS;
+    if (square || (fullscreen_mode == FULLSCREEN_OFF && resize_scaling == RESIZE_SCALE_NONE)) {
+        // Draw each screen pixel as the same whole number of window pixels
+        // across, and down, near the screen's shape, so text and lines keep
+        // even strokes. A window shows it only if it fills most of the window.
+        int fx = mode_res_w > 0 ? win_w / mode_res_w : 0, fy = 0;
+        for (; fx >= 1; fx--) {
+            fy = (int)(mode_res_w * fx / target_aspect / mode_res_h + 0.5);
+            if (fy < 1) fy = 1;
+            if (mode_res_h * fy <= win_h) break;
+        }
+        if (fx >= 1 && (square || mode_res_w * fx * 5 >= dest_w * 4)) {
+            dest_w = mode_res_w * fx;
+            dest_h = mode_res_h * fy;
         }
     }
     SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-    presented_area = dst;
+    // Mouse positions arrive in points.
+    double to_points_x = win_w > 0 ? (double)points_w / win_w : 1;
+    double to_points_y = win_h > 0 ? (double)points_h / win_h : 1;
+    presented_area = (SDL_FRect){(float)(dst.x * to_points_x), (float)(dst.y * to_points_y),
+                                 (float)(dst.w * to_points_x), (float)(dst.h * to_points_y)};
     SDL_SetRenderTarget(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
