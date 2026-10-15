@@ -2,6 +2,10 @@
 
 All notable changes to this project are recorded in this file.
 
+## Unreleased
+
+- **IBM PC Screen Fonts (behavior change)**: Text on the screen uses the IBM VGA 8x16, EGA 8x14 and EGA 8x8 fonts from VileR's Ultimate Oldschool PC Font Pack (CC BY-SA 4.0, `fonts/LICENSE-oldschool-pc-fonts.txt`), each drawn only at a whole multiple of its size, so every mode is pixel-exact. A text cell gets the largest font that fits it: 8x16 in `SCREEN 12` and `_NEWIMAGE` screens, 8x8 in the 200-line modes and `SCREEN 12` with `WIDTH 80, 60`, and 8x14 in `SCREEN 9` with `WIDTH 80, 25`. Before, the Modern DOS 8x16 font was squeezed into every row height: squat in the 200-line modes and blurred in `SCREEN 9`. basika also finds its fonts beside its executable or in `../share/basika/fonts`, so it no longer falls back to Monaco when run from another directory. Modern DOS stays in `fonts/` for `_LOADFONT`, and `make install` installs all the fonts.
+
 ## 0.99.8 — 2026-10-14
 
 - **Burrow Cask**: `Casks/burrow.rb` installs Burrow as a Mac app from this tap (`brew install --cask kdekorte/basika/burrow`). `./release.sh release` now also builds `Burrow-VERSION.zip` and uploads it with the source package, and `./release.sh cask` (part of `all`) sets the cask's version and SHA256; `./release.sh app` builds the zip alone.

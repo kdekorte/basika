@@ -130,6 +130,19 @@ static TTF_Font *base_font = NULL;      // Built-in font; the only one reload_fo
 static int active_font_slot = -1;       // -1 = built-in font, else the _FONT slot in use
 static char font_path[512] = "";
 static const int FONT_SIZE = 16;         // Initial DOS-style pixel font size
+
+/* The built-in screen fonts, from the Ultimate Oldschool PC Font Pack
+ * (fonts/LICENSE-oldschool-pc-fonts.txt). Each is pixel-exact only at a
+ * whole multiple of its em size (not always its cell height), so
+ * reload_font picks the one that best fills a text cell. Largest first:
+ * a tie goes to the finer font. */
+static const struct { const char *file; int height, em; } builtin_fonts[] = {
+    {"Px437_IBM_VGA_8x16.ttf", 16, 16},
+    {"Px437_IBM_EGA_8x14.ttf", 14, 16},
+    {"Px437_IBM_EGA_8x8.ttf", 8, 8},
+};
+#define BUILTIN_FONT_COUNT ((int)(sizeof(builtin_fonts) / sizeof(builtin_fonts[0])))
+static char builtin_font_dir[512] = "";  // Where the built-in fonts are, or "" to keep font_path
 static int current_row_height = 16;      // Use pixel-based rows for doubled text modes
 static int current_col_width = 16;       // Defaults to 80 columns at doubled resolution
 static int last_key_code = 0;
@@ -296,7 +309,29 @@ static void reload_font(int target_height) {
         }
     }
 
-    base_font = TTF_OpenFont(font_path, (float)target_height);
+    int open_size = target_height;
+    if (builtin_font_dir[0] != '\0') {
+        /* Measure the cell in the mode's own pixels, which the canvas may
+         * double, and scale the chosen font by a whole number to fit it. */
+        int scale = (mode_res_h > 0 && canvas_height >= mode_res_h) ? canvas_height / mode_res_h : 1;
+        int cell_h = target_height / scale;
+        int cell_w = text_columns > 0 ? canvas_width / text_columns / scale : 8;
+        int best = BUILTIN_FONT_COUNT - 1, best_fill = 0, best_k = 0;
+        for (int i = 0; i < BUILTIN_FONT_COUNT; i++) {
+            int k = cell_h / builtin_fonts[i].height;
+            if (cell_w / 8 < k) k = cell_w / 8; // all are 8 pixels wide
+            if (k * builtin_fonts[i].height > best_fill) {
+                best = i;
+                best_fill = k * builtin_fonts[i].height;
+                best_k = k;
+            }
+        }
+        // A cell smaller than 8x8 gets the 8x8 font, scaled unevenly.
+        if (best_k > 0) open_size = builtin_fonts[best].em * best_k * scale;
+        snprintf(font_path, sizeof(font_path), "%s%s", builtin_font_dir, builtin_fonts[best].file);
+    }
+
+    base_font = TTF_OpenFont(font_path, (float)open_size);
     font = base_font;
     if (!font) {
         fprintf(stderr, "Failed to reload font at size %d: %s\n", target_height, SDL_GetError());
@@ -1367,7 +1402,30 @@ int init_graphics() {
 
     set_screen_mode(2); // Default graphics mode when no SCREEN command is issued
     
-    // Search for Modern DOS fonts in common directories and use the first one found.
+    // Look for the built-in fonts beside the executable (or in the app bundle's
+    // Resources), in its install prefix, then in the current directory.
+    const char *base = SDL_GetBasePath();
+    char dirs[6][512] = {"", "", "./fonts/", "/usr/local/share/basika/fonts/",
+                         "/opt/homebrew/share/basika/fonts/", "/usr/share/basika/fonts/"};
+    if (base) {
+        snprintf(dirs[0], sizeof(dirs[0]), "%sfonts/", base);
+        snprintf(dirs[1], sizeof(dirs[1]), "%s../share/basika/fonts/", base);
+    }
+    for (int d = 0; d < 6 && !font; d++) {
+        if (dirs[d][0] == '\0') continue;
+        int found = 1;
+        for (int i = 0; i < BUILTIN_FONT_COUNT && found; i++) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s%s", dirs[d], builtin_fonts[i].file);
+            found = SDL_GetPathInfo(path, NULL);
+        }
+        if (!found) continue;
+        snprintf(font_path, sizeof(font_path), "%s%s", dirs[d], builtin_fonts[0].file);
+        font = TTF_OpenFont(font_path, FONT_SIZE);
+        if (font) strncpy(builtin_font_dir, dirs[d], sizeof(builtin_font_dir) - 1);
+    }
+
+    // Otherwise use a Modern DOS font from a common directory, if one is found.
     const char *font_candidates[] = {
         "./fonts/ModernDOS8x16.ttf",
         "/usr/local/share/basika/fonts/ModernDOS8x16.ttf",
@@ -1385,7 +1443,7 @@ int init_graphics() {
         "/usr/share/fonts/truetype/modern-dos/ModernDOS9x18.ttf",
         NULL
     };
-    for (int i = 0; font_candidates[i] != NULL; i++) {
+    for (int i = 0; !font && font_candidates[i] != NULL; i++) {
         font = TTF_OpenFont(font_candidates[i], FONT_SIZE);
         if (font) {
             strncpy(font_path, font_candidates[i], sizeof(font_path) - 1);
