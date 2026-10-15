@@ -4,6 +4,7 @@ All notable changes to this project are recorded in this file.
 
 ## Unreleased
 
+- **Life Demo**: Added `demo/life.bas`, John Conway's Game of Life on a 75 x 75 grid, after `RandomThings/html/life.html`: the grid starts with each cell alive by a coin toss and steps ten times a second, steel blue cells on white with grey grid lines, and cells past the edges count as dead. Space pauses, N steps once while paused, R makes a new random grid, C clears it, and the left and right mouse buttons draw and erase cells. `--selftest [generations]` runs a fixed grid and saves `life_selftest.png`.
 - **? for PRINT**: `?` is shorthand for `PRINT` wherever `PRINT` can go, as in BASICA and QBasic: `? "Hi"`, `?#1, x`, `? USING "##.#"; v` and in `IF ... THEN ? a ELSE ? b` (it was a syntax error). A `?` inside a string is unchanged.
 - **KILL (behavior change)**: `KILL` no longer prints "Deleted" after removing files, as in QBasic. `DELETE "file"`, a basika extension, still does.
 - **PRINT Number Spacing (behavior change)**: `PRINT` no longer adds a space after `;` when a number follows a number, so `PRINT 1; 2` shows ` 1  2 ` and `PRINT -1; -2` shows `-1 -2 `, as in QBasic and GW-BASIC (they showed ` 1   2 ` and `-1  -2 `). Each number is still its sign (a space when positive), its digits and one trailing space. This applies to `PRINT #` files too; `STR$`, `WRITE` and `PRINT USING` are unchanged.
