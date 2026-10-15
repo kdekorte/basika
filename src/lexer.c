@@ -510,6 +510,8 @@ Token get_next_token(const char **input) {
     if (**input == ')') { (*input)++; token.type = TOKEN_RPAREN; return token; }
     if (**input == '\\') { (*input)++; token.type = TOKEN_IDIV; return token; }
     if (**input == '#') { (*input)++; token.type = TOKEN_HASH; strcpy(token.text, "#"); return token; }
+    // ? is shorthand for PRINT, as in BASICA and QBasic.
+    if (**input == '?') { (*input)++; token.type = TOKEN_PRINT; strcpy(token.text, "PRINT"); return token; }
 
     char buffer[BASIC_TOKEN_TEXT_MAX];
     int i = 0;

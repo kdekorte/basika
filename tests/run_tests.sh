@@ -203,6 +203,8 @@ TESTS=(
   "tests/control_flow/if_sub_call"
   "tests/system/system_in_program"
   "tests/strings/string_compare_logic"
+  "tests/strings/print_number_spacing"
+  "tests/strings/print_shorthand"
   "tests/user_types/user_types_fixed_string_print"
   "tests/user_types/user_types_comments"
   "tests/user_types/user_types_large_array"
@@ -365,6 +367,6 @@ echo "All tests PASS"
 echo "Cleaning up temp files"
 rm -rf test_dir_ext tests/filo_test.tmp tests/putget.tmp tests/putfrom.tmp tests/getinto.tmp tests/delete_test.tmp tests/kill_tmp1.tmp tests/kill_tmp2.tmp tests/input_multi.tmp
 rm -f tests/field_record.tmp tests/freefile1.tmp tests/freefile2.tmp
-rm -f tests/user_types_record.tmp
+rm -f tests/user_types_record.tmp tests/print_number_spacing.tmp tests/print_shorthand.tmp
 
 exit 0

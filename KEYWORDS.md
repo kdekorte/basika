@@ -180,6 +180,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `LOCATE row, col`: Positions the cursor.
 - `LSET var$ = expression$`: Left-justifies a string into a field buffer or string variable.
 - `PRINT [#n,] [USING "fmt";] [expressions] [,|;]`: Output to screen or file.
+- `?` is shorthand for `PRINT` (`? "Hi"`, `?#1, x`).
 - `PRINT USING`, as in QBasic: the format is literal text with fields, each value fills the next field, the format starts over when there are more values than fields, and the text after the last field used is printed up to the next field. Strings: `!` first character, `&` whole string, `\  \` as many characters as the backslashes span. Numbers: `#` digit, `.` decimal point, `,` before the point adds thousands commas, `+` first or last prints the sign, `-` last prints a trailing minus, `^^^^` or `^^^^^` exponent, `**` fills with asterisks, `$$` adds a dollar sign, `**$` does both. `_` prints the next character as text. A number too wide for its field prints in full after a `%`. A string in a number field (or a number in a string field) is "Type mismatch"; a format with no fields is "Illegal function call".
 - Basika extension: a `PRINT USING` format with no fields may instead be a C `printf` format with one conversion, `%s` for a string or `d i o u x X e E f F g G` for a number (`PRINT USING "%6.2f"; x`).
 - `RSET var$ = expression$`: Right-justifies a string into a field buffer or string variable.
@@ -195,7 +196,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `FILES ["pattern"] [, "output_file"]`: Lists files (wildcards supported). Output shows modification date/time, size (or `<DIR>`), and filename — formatted similar to DOS/BASICA. If `"output_file"` is provided, filenames are written to that file (one per line).
 - `FIELD #n, len AS var$[, len AS var$...]`: Defines record fields for random-file buffers.
 - `GET #n[, [record][, variable]]`: Reads a record into a `TYPE` variable or, with no variable, into the `FIELD` buffer. An omitted record number reads the next record. BASIKA also accepts `GET #n, record, length, var$`, which reads `length` bytes at record stride `length`.
-- `KILL "pattern"`: Deletes files using wildcards.
+- `KILL "pattern"`: Deletes files using wildcards, printing nothing, as in QBasic.
 - `MKDIR "path"`: Creates a directory.
 - `NAME "old" AS "new"`: Renames a file.
 - `OPEN file$ [FOR mode] [ACCESS ...] AS [#]n [LEN = reclen]`: Opens a file for `INPUT`, `OUTPUT`, `APPEND`, `RANDOM` (the default; `RWB` is a synonym) or `BINARY`. RANDOM files hold records of `reclen` bytes (default 128): record n starts at byte (n - 1) × reclen, and a `TYPE` record larger than `reclen` is a "Bad record length". BINARY files are addressed by byte position (starting at 1). RANDOM and BINARY files are created if missing and never truncated. `ACCESS` and lock clauses are accepted and ignored. The GW-BASIC form `OPEN mode$, [#]n, file$[, reclen]` (mode `I`, `O`, `A`, `R` or `B`) is also accepted.
