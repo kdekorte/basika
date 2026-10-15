@@ -1393,6 +1393,8 @@ int init_graphics() {
     if (headless_mode) {
         flags |= SDL_WINDOW_HIDDEN;
     }
+    // Draw in the display's own pixels; otherwise a Retina display blurs every frame.
+    flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (resize_allowed) flags |= SDL_WINDOW_RESIZABLE;
     if (fullscreen_mode != FULLSCREEN_OFF) flags |= SDL_WINDOW_FULLSCREEN;
     window = SDL_CreateWindow("BASIKA Virtual Framebuffer", 1024, 768, flags);
@@ -1496,8 +1498,11 @@ static double get_target_aspect_ratio(void) {
 
 static void render_canvas_to_window(void) {
     if (!renderer || !canvas || !window) return;
-    int win_w, win_h;
-    SDL_GetWindowSize(window, &win_w, &win_h);
+    // Lay the picture out in the window's pixels, which a Retina display
+    // has more of than the window has points.
+    int win_w, win_h, points_w, points_h;
+    SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
+    SDL_GetWindowSize(window, &points_w, &points_h);
     double target_aspect = get_target_aspect_ratio();
     int dest_w = win_w;
     int dest_h = (int)(dest_w / target_aspect + 0.5);
@@ -1505,17 +1510,28 @@ static void render_canvas_to_window(void) {
         dest_h = win_h;
         dest_w = (int)(dest_h * target_aspect + 0.5);
     }
-    if (fullscreen_mode == FULLSCREEN_SQUAREPIXELS) {
-        // The largest whole-number scale that fits, so every pixel is the same size.
-        int base_w = mode_res_w, base_h = (int)(mode_res_w / target_aspect + 0.5);
-        int factor = base_w > 0 && base_h > 0 ? (win_w / base_w < win_h / base_h ? win_w / base_w : win_h / base_h) : 0;
-        if (factor >= 1) {
-            dest_w = base_w * factor;
-            dest_h = base_h * factor;
+    int square = fullscreen_mode == FULLSCREEN_SQUAREPIXELS;
+    if (square || (fullscreen_mode == FULLSCREEN_OFF && resize_scaling == RESIZE_SCALE_NONE)) {
+        // Draw each screen pixel as the same whole number of window pixels
+        // across, and down, near the screen's shape, so text and lines keep
+        // even strokes. A window shows it only if it fills most of the window.
+        int fx = mode_res_w > 0 ? win_w / mode_res_w : 0, fy = 0;
+        for (; fx >= 1; fx--) {
+            fy = (int)(mode_res_w * fx / target_aspect / mode_res_h + 0.5);
+            if (fy < 1) fy = 1;
+            if (mode_res_h * fy <= win_h) break;
+        }
+        if (fx >= 1 && (square || mode_res_w * fx * 5 >= dest_w * 4)) {
+            dest_w = mode_res_w * fx;
+            dest_h = mode_res_h * fy;
         }
     }
     SDL_FRect dst = { (float)((win_w - dest_w) / 2), (float)((win_h - dest_h) / 2), (float)dest_w, (float)dest_h };
-    presented_area = dst;
+    // Mouse positions arrive in points.
+    double to_points_x = win_w > 0 ? (double)points_w / win_w : 1;
+    double to_points_y = win_h > 0 ? (double)points_h / win_h : 1;
+    presented_area = (SDL_FRect){(float)(dst.x * to_points_x), (float)(dst.y * to_points_y),
+                                 (float)(dst.w * to_points_x), (float)(dst.h * to_points_y)};
     SDL_SetRenderTarget(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
