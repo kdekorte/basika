@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <limits.h>
 #include <glob.h>
+#include <dirent.h>
+#include <fnmatch.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/select.h>
@@ -104,6 +106,7 @@ static int print_row = 0;
 static int internal_argc = 0;
 static char **internal_argv = NULL;
 static char internal_command_line[1024] = "";
+static char qb64_start_dir[4096] = ""; // _STARTDIR$: where basika started
 static int fixed_string_declarations_present = 0;
 
 static unsigned char basika_memory[65536];
@@ -322,8 +325,10 @@ static int qb64_function_id(const char *name);
 
 /* A user FUNCTION or a QB64 built-in such as _RESIZEWIDTH: a value, never a
  * by-reference variable. */
+static int qb64_file_function_id(const char *name);
+
 static int is_function_name(const char *name) {
-    if (name[0] == '_' && qb64_function_id(name)) return 1;
+    if (name[0] == '_' && (qb64_function_id(name) || qb64_file_function_id(name))) return 1;
     ProcedureDef *proc = find_procedure(name);
     return proc && proc->is_function;
 }
@@ -768,6 +773,7 @@ static void reset_variable_hash_table(void) {
 void set_args(int argc, char **argv) {
     // Initialize hash table
     reset_variable_hash_table();
+    if (!qb64_start_dir[0] && !getcwd(qb64_start_dir, sizeof(qb64_start_dir))) qb64_start_dir[0] = '\0';
     internal_argc = argc;
     internal_argv = argv;
     internal_command_line[0] = '\0';
@@ -4144,6 +4150,294 @@ static void append_number_bytes(BasicString *out, TokenType type, Num value) {
     basic_string_append(out, bytes, count);
 }
 
+/* ---- QB64 files and folders: _FILEEXISTS, _DIREXISTS, _DIR$, _CWD$,
+ * _STARTDIR$, _FULLPATH$, _FILES$, _READFILE$ and _WRITEFILE ----
+ * As in QB64 Phoenix Edition: true is -1, and folders come back with a
+ * trailing "/" (from _DIR$, _CWD$, _STARTDIR$, _FULLPATH$ and _FILES$). The
+ * functions here do the work and return 0 or the error to report; the
+ * expression parsers read the arguments and call them. */
+enum {
+    QB64_FILE_NONE, QB64_FILE_FILEEXISTS, QB64_FILE_DIREXISTS, QB64_FILE_DIR,
+    QB64_FILE_CWD, QB64_FILE_STARTDIR, QB64_FILE_FULLPATH, QB64_FILE_FILES,
+    QB64_FILE_READFILE
+};
+
+static int qb64_file_function_id(const char *name) {
+    static const struct { const char *name; int id; } functions[] = {
+        {"_FILEEXISTS", QB64_FILE_FILEEXISTS}, {"_DIREXISTS", QB64_FILE_DIREXISTS},
+        {"_DIR$", QB64_FILE_DIR}, {"_CWD$", QB64_FILE_CWD},
+        {"_STARTDIR$", QB64_FILE_STARTDIR}, {"_FULLPATH$", QB64_FILE_FULLPATH},
+        {"_FILES$", QB64_FILE_FILES}, {"_READFILE$", QB64_FILE_READFILE},
+    };
+    if (name[0] != '_') return QB64_FILE_NONE;
+    for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
+        if (strcasecmp(name, functions[i].name) == 0) return functions[i].id;
+    }
+    return QB64_FILE_NONE;
+}
+
+/* _FILEEXISTS and _DIREXISTS take a path and give a number; the others give
+ * a string. */
+static int qb64_file_function_is_string(int id) {
+    return id != QB64_FILE_FILEEXISTS && id != QB64_FILE_DIREXISTS;
+}
+
+/* _CWD$, _STARTDIR$ take no argument; _FILES$ may or may not have one. */
+static int qb64_file_function_takes_argument(int id) {
+    return id != QB64_FILE_CWD && id != QB64_FILE_STARTDIR;
+}
+
+static void append_folder(BasicString *out, const char *path) {
+    size_t n = strlen(path);
+    basic_string_append(out, path, n);
+    if (n == 0 || path[n - 1] != '/') basic_string_append(out, "/", 1);
+}
+
+static int path_is_dir(const char *path) {
+    struct stat st;
+    return path[0] && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int path_is_file(const char *path) {
+    struct stat st;
+    return path[0] && stat(path, &st) == 0 && !S_ISDIR(st.st_mode);
+}
+
+/* The folder for a _DIR$ name, case-insensitively, with the aliases QB64
+ * accepts. Anything else is the desktop, as in QB64. */
+static void qb64_special_folder(const char *spec, BasicString *out) {
+    static const struct { const char *names; const char *home_relative; } folders[] = {
+        {"|desktop|", "Desktop"},
+        {"|download|downloads|", "Downloads"},
+        {"|documents|document|my documents|text|", "Documents"},
+        {"|music|my music|audio|sound|sounds|", "Music"},
+        {"|pictures|picture|my pictures|image|images|photo|photos|dcim|camera|camera roll|", "Pictures"},
+#ifdef __APPLE__
+        {"|video|videos|my videos|movie|movies|", "Movies"},
+        {"|appdata|data|application data|program data|common program data|", "Library/Application Support"},
+        {"|local data|localappdata|local application data|local program data|", "Library/Application Support"},
+        {"|fonts|font|user fonts|user font|userfont|userfonts|", "Library/Fonts"},
+#else
+        {"|video|videos|my videos|movie|movies|", "Videos"},
+        {"|appdata|data|application data|program data|common program data|", ".config"},
+        {"|local data|localappdata|local application data|local program data|", ".local/share"},
+        {"|fonts|font|user fonts|user font|userfont|userfonts|", ".local/share/fonts"},
+#endif
+        {"|home|user|profile|userprofile|user profile|", ""},
+    };
+    char key[128];
+    size_t n = 0;
+    key[n++] = '|';
+    for (const char *p = spec; *p && n < sizeof(key) - 2; p++) key[n++] = (char)tolower((unsigned char)*p);
+    key[n++] = '|';
+    key[n] = '\0';
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) home = "/";
+    if (strstr("|temp|tmp|", key)) {
+        const char *tmp = getenv("TMPDIR");
+        append_folder(out, tmp && tmp[0] ? tmp : "/tmp");
+        return;
+    }
+    if (strstr("|program files|programfiles|program files (x86)|program files x86|programfiles x86|"
+               "programfilesx86|program files 86|programfiles (x86)|program files(x86)|programfiles(x86)|", key)) {
+#ifdef __APPLE__
+        append_folder(out, "/Applications");
+#else
+        append_folder(out, "/usr/local/bin");
+#endif
+        return;
+    }
+    const char *relative = "Desktop";
+    for (size_t i = 0; i < sizeof(folders) / sizeof(folders[0]); i++) {
+        if (strstr(folders[i].names, key)) {
+            relative = folders[i].home_relative;
+            break;
+        }
+    }
+    char path[4096];
+    if (relative[0]) snprintf(path, sizeof(path), "%s/%s", home, relative);
+    else snprintf(path, sizeof(path), "%s", home);
+    append_folder(out, path);
+}
+
+/* _FILES$: the pattern's folder and the names in it matching the pattern,
+ * one per call; "" when they run out. */
+static struct {
+    int started;
+    char **names;
+    size_t count, next;
+} qb64_files;
+
+static void qb64_files_clear(void) {
+    for (size_t i = 0; i < qb64_files.count; i++) free(qb64_files.names[i]);
+    free(qb64_files.names);
+    qb64_files.names = NULL;
+    qb64_files.count = qb64_files.next = 0;
+}
+
+static void qb64_files_start(const char *spec) {
+    qb64_files_clear();
+    qb64_files.started = 1;
+    // "" means everything; a folder on its own means everything in it.
+    char pattern[4096];
+    if (!spec[0]) snprintf(pattern, sizeof(pattern), "*");
+    else if (path_is_dir(spec)) {
+        size_t n = strlen(spec);
+        snprintf(pattern, sizeof(pattern), "%s%s*", spec, spec[n - 1] == '/' ? "" : "/");
+    } else snprintf(pattern, sizeof(pattern), "%s", spec);
+    char folder[4096];
+    const char *slash = strrchr(pattern, '/');
+    const char *match = slash ? slash + 1 : pattern;
+    if (slash) snprintf(folder, sizeof(folder), "%.*s", (int)(slash - pattern + 1), pattern);
+    else snprintf(folder, sizeof(folder), "./");
+    DIR *dir = opendir(folder);
+    if (!dir) return;
+    size_t capacity = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (fnmatch(match, entry->d_name, 0) != 0) continue;
+        // . and .. come back too, as in QB64, but not hidden files for "*".
+        int dots = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        if (entry->d_name[0] == '.' && !dots && match[0] != '.') continue;
+        char full[4096];
+        snprintf(full, sizeof(full), "%s%s", folder, entry->d_name);
+        size_t n = strlen(entry->d_name);
+        char *name = malloc(n + 2);
+        if (!name) break;
+        memcpy(name, entry->d_name, n + 1);
+        if (path_is_dir(full)) { name[n] = '/'; name[n + 1] = '\0'; }
+        if (qb64_files.count == capacity) {
+            capacity = capacity ? capacity * 2 : 16;
+            char **grown = realloc(qb64_files.names, capacity * sizeof(char *));
+            if (!grown) { free(name); break; }
+            qb64_files.names = grown;
+        }
+        qb64_files.names[qb64_files.count++] = name;
+    }
+    closedir(dir);
+}
+
+/* Runs a file function. arg is its argument (NULL when there is none);
+ * a number goes in *number, a string in *out. Returns 0 or an error. */
+static int qb64_file_function(int id, const BasicString *arg, double *number, BasicString *out) {
+    const char *path = arg && arg->data ? (const char *)arg->data : "";
+    switch (id) {
+        case QB64_FILE_FILEEXISTS:
+            *number = path_is_file(path) ? -1 : 0;
+            return 0;
+        case QB64_FILE_DIREXISTS:
+            *number = path_is_dir(path) ? -1 : 0;
+            return 0;
+        case QB64_FILE_DIR:
+            qb64_special_folder(path, out);
+            return 0;
+        case QB64_FILE_CWD: {
+            char cwd[4096];
+            if (!getcwd(cwd, sizeof(cwd))) return ERR_INTERNAL_ERROR;
+            append_folder(out, cwd);
+            return 0;
+        }
+        case QB64_FILE_STARTDIR:
+            append_folder(out, qb64_start_dir[0] ? qb64_start_dir : ".");
+            return 0;
+        case QB64_FILE_FULLPATH: {
+            char full[PATH_MAX];
+            if (!path[0] || !realpath(path, full)) return ERR_PATH_NOT_FOUND;
+            if (path_is_dir(full)) append_folder(out, full);
+            else basic_string_append(out, full, strlen(full));
+            return 0;
+        }
+        case QB64_FILE_FILES:
+            if (arg) qb64_files_start(path);
+            else if (!qb64_files.started) return ERR_ILLEGAL_FUNCTION_CALL;
+            if (qb64_files.next < qb64_files.count) {
+                const char *name = qb64_files.names[qb64_files.next++];
+                basic_string_append(out, name, strlen(name));
+            }
+            return 0;
+        case QB64_FILE_READFILE: {
+            if (!path[0]) return ERR_BAD_FILE_NAME;
+            if (path_is_dir(path)) return ERR_PATH_FILE_ACCESS_ERROR;
+            FILE *f = fopen(path, "rb");
+            if (!f) return errno == ENOENT ? ERR_FILE_NOT_FOUND : ERR_PATH_FILE_ACCESS_ERROR;
+            char chunk[65536];
+            size_t got;
+            while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+                if (!basic_string_append(out, chunk, got)) { fclose(f); return ERR_OUT_OF_MEMORY; }
+            }
+            fclose(f);
+            return 0;
+        }
+    }
+    return ERR_SYNTAX_ERROR;
+}
+
+/* Calls file function id from tokens, with ts just past its name, reading
+ * the "(arg$)" after it if it has one. Errors are reported here. */
+static void call_qb64_file_function_tok(TokenStream *ts, int id, double *number, BasicString *out) {
+    BasicString arg = {0};
+    int have_arg = 0;
+    if (qb64_file_function_takes_argument(id) && ts->tokens[ts->pos].type == TOKEN_LPAREN) {
+        ts->pos++;
+        if (ts->tokens[ts->pos].type != TOKEN_RPAREN) {
+            parse_string_expression_tok_heap(ts, &arg);
+            have_arg = 1;
+        }
+        if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+        else if (!runtime_error_occurred) report_runtime_error(ERR_SYNTAX_ERROR);
+    }
+    if (!runtime_error_occurred) {
+        if (!have_arg && id != QB64_FILE_FILES && qb64_file_function_takes_argument(id)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+        } else {
+            int err = qb64_file_function(id, have_arg ? &arg : NULL, number, out);
+            if (err) report_runtime_error(err);
+        }
+    }
+    basic_string_release(&arg);
+}
+
+/* The same, reading the argument from text, with *input just past the name. */
+static void call_qb64_file_function_text(const char **input, int id, double *number, BasicString *out) {
+    BasicString arg = {0};
+    int have_arg = 0;
+    const char *saved = *input;
+    if (qb64_file_function_takes_argument(id) && get_next_token(input).type == TOKEN_LPAREN) {
+        const char *inner = *input;
+        if (get_next_token(input).type != TOKEN_RPAREN) {
+            *input = inner;
+            parse_string_expression_heap(input, &arg);
+            have_arg = 1;
+            if (get_next_token(input).type != TOKEN_RPAREN && !runtime_error_occurred) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+            }
+        }
+    } else {
+        *input = saved;
+    }
+    if (!runtime_error_occurred) {
+        if (!have_arg && id != QB64_FILE_FILES && qb64_file_function_takes_argument(id)) {
+            report_runtime_error(ERR_SYNTAX_ERROR);
+        } else {
+            int err = qb64_file_function(id, have_arg ? &arg : NULL, number, out);
+            if (err) report_runtime_error(err);
+        }
+    }
+    basic_string_release(&arg);
+}
+
+/* _WRITEFILE file$, contents$: replaces the file with the string's bytes. */
+static int qb64_write_file(const BasicString *name, const BasicString *contents) {
+    const char *path = name->data ? (const char *)name->data : "";
+    if (!path[0]) return ERR_BAD_FILE_NAME;
+    FILE *f = fopen(path, "wb");
+    if (!f) return errno == ENOENT ? ERR_PATH_NOT_FOUND : ERR_PATH_FILE_ACCESS_ERROR;
+    size_t n = contents->length;
+    int ok = n == 0 || fwrite(contents->data, 1, n, f) == n;
+    if (fclose(f) != 0) ok = 0;
+    return ok ? 0 : ERR_PATH_FILE_ACCESS_ERROR;
+}
+
 static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
     int parsed = 0;
 
@@ -4395,6 +4689,12 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
             ts->pos++;
+        } else if (t.type == TOKEN_IDENTIFIER && t.text[0] == '_' && qb64_file_function_id(t.text) &&
+                   qb64_file_function_is_string(qb64_file_function_id(t.text))) {
+            ts->pos++;
+            double unused = 0;
+            call_qb64_file_function_tok(ts, qb64_file_function_id(t.text), &unused, &term);
+            if (runtime_error_occurred) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_IDENTIFIER) {
             ProcedureDef *pfunc = find_procedure(t.text);
             if (pfunc && pfunc->is_function) {
@@ -4718,6 +5018,11 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             append_number_bytes(&term, t.type, val);
         } else if (t.type == TOKEN_STRING) {
             basic_string_append(&term, t.text, strlen(t.text));
+        } else if (t.type == TOKEN_IDENTIFIER && t.text[0] == '_' && qb64_file_function_id(t.text) &&
+                   qb64_file_function_is_string(qb64_file_function_id(t.text))) {
+            double unused = 0;
+            call_qb64_file_function_text(input, qb64_file_function_id(t.text), &unused, &term);
+            if (runtime_error_occurred) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_IDENTIFIER) {
             ProcedureDef *pfunc = find_procedure(t.text);
             if (pfunc && pfunc->is_function) {
@@ -6252,6 +6557,7 @@ static int parse_cached_primary(CachedExpressionParser *parser) {
             strcasecmp(name, "CSRLIN") == 0 ||
             strcasecmp(name, "FREEFILE") == 0 ||
             strcasecmp(name, "POS") == 0 ||
+            (name[0] == '_' && qb64_file_function_id(name)) ||
             ((name[0] == 'F' || name[0] == 'f') && (name[1] == 'N' || name[1] == 'n'))) {
             return cached_expression_failed(parser);
         }
@@ -8055,6 +8361,16 @@ static Num primary_tok(TokenStream *ts) {
             if (strcasecmp(token->text, "ERDEV") == 0) return num_i(0, NUM_INTEGER);
         }
 
+        if (first == '_') {
+            int file_id = qb64_file_function_id(token->text);
+            if (file_id && !qb64_file_function_is_string(file_id)) {
+                double value = 0;
+                BasicString unused = {0};
+                call_qb64_file_function_tok(ts, file_id, &value, &unused);
+                basic_string_release(&unused);
+                return num_i((int)value, NUM_INTEGER);
+            }
+        }
         if (first == '_' && strcasecmp(token->text, "_SNDOPEN") == 0) {
             // _SNDOPEN(file$[, capabilities$]) -> handle, or 0 if the file
             // cannot be loaded. The capabilities (STREAM, ...) are accepted
@@ -10304,6 +10620,20 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_WRITEFILE") == 0) {
+            // _WRITEFILE file$, contents$
+            BasicString name = {0}, contents = {0};
+            parse_string_expression_heap(&ptr, &name);
+            if (!runtime_error_occurred && get_next_token(&ptr).type != TOKEN_COMMA) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+            }
+            if (!runtime_error_occurred) parse_string_expression_heap(&ptr, &contents);
+            if (!runtime_error_occurred) {
+                int err = qb64_write_file(&name, &contents);
+                if (err) report_runtime_error(err);
+            }
+            basic_string_release(&name);
+            basic_string_release(&contents);
         } else if (t.type == TOKEN_IDENTIFIER && execute_sound_statement(t.text, &ptr)) {
             // done
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_FULLSCREEN") == 0) {
@@ -12490,7 +12820,8 @@ static void explicit_scan_declarations(const Statement *stmt, int start, int end
         if (item_start && depth == 0) {
             if (!check) explicit_declare(token->text, scope, everywhere);
         } else if (check && !*undefined && !explicit_is_declared(token->text, scope) &&
-                   !find_procedure(token->text) && !qb64_function_id(token->text)) {
+                   !find_procedure(token->text) && !qb64_function_id(token->text) &&
+                   !qb64_file_function_id(token->text)) {
             *undefined = token->text;
         }
         item_start = 0;

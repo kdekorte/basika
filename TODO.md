@@ -13,7 +13,94 @@
 
 ## QB64 extensions
 
-- `_CLEARCOLOR`, `_SETALPHA`, `_BLEND`/`_DONTBLEND`, `_SCREENIMAGE`, `_DISPLAY` as a handle function, `_PRINTMODE`, and `_TITLE$` are not implemented.
+Basika implements 75 of the 311 QB64 Phoenix Edition keywords (checked against the
+[alphabetical keyword reference](https://qb64phoenix.com/qb64wiki/index.php/Keyword_Reference_-_Alphabetical)
+on 2026-10-16), not counting the OpenGL `_gl...` set. An unknown `_NAME` is not an error:
+it reads as an ordinary variable, 0 or "", so `IF _MAX(a, b) > 0 THEN` is quietly false.
+Making unknown `_` names "Syntax error" would show QB64 programs what is missing.
+
+### Most useful first
+
+These come up in ordinary QB64 programs and are small to add.
+
+- Strings: `_TRIM$`, `_INSTRREV`, `_TOSTR$`, `_BIN$`, `_STRCMP`, `_STRICMP`.
+- Math: `_MIN`, `_MAX`, `_CLAMP`, `_CEIL`, `_HYPOT`, `_ATAN2`, the inverse and hyperbolic
+  functions (`_ACOS`, `_ASIN`, `_ACOSH`, `_ASINH`, `_ATANH`, `_COSH`, `_SINH`, `_TANH`), the
+  reciprocal ones (`_SEC`, `_CSC`, `_COT`, `_ARCSEC`, `_ARCCSC`, `_ARCCOT`, `_SECH`, `_CSCH`,
+  `_COTH`) and the angle conversions (`_D2R`, `_R2D`, `_D2G`, `_G2D`, `_R2G`, `_G2R`).
+- Bits: `_SHL`, `_SHR`, `_ROL`, `_ROR`, `_SETBIT`, `_RESETBIT`, `_TOGGLEBIT`, `_READBIT`.
+- Control flow: `_CONTINUE` (next loop iteration), `_IIF(condition, a, b)`, and the
+  short-circuit `_ANDALSO` / `_ORELSE`.
+- System: `_OS$`, `_UPTIME`, `_COMMANDCOUNT`, `_ENVIRONCOUNT`, `_ERRORLINE`, `_ERRORMESSAGE$`,
+  `_KEYCLEAR`, `_CAPSLOCK`, `_NUMLOCK`, `_SCROLLLOCK`, `_CLIPBOARD$`, `_CLIPBOARDIMAGE`.
+- Metacommands. Every line starting with `$` other than `$RESIZE` and `$NOPREFIX` is skipped
+  today, so these are quietly ignored: `$INCLUDE` (and `$INCLUDEONCE`) most of all, since the
+  included SUBs and declarations go missing; `$CONSOLE` / `$CONSOLE:ONLY` (no window),
+  `$SCREENHIDE` / `$SCREENSHOW`, and `$IF` / `$ELSEIF` / `$ELSE` / `$END IF` / `$LET`, whose
+  branches all run. `$DYNAMIC`, `$STATIC`, `$EXEICON` and `$VERSIONINFO` can stay ignored.
+  `'$INCLUDE: 'file'` in a comment, the QBasic form, is ignored as well.
+
+### Graphics
+
+- Transparency and blending: `_CLEARCOLOR`, `_SETALPHA`, `_BLEND` / `_DONTBLEND`.
+- Images: `_SAVEIMAGE`, `_SCREENIMAGE`, `_COPYPALETTE`, `_PALETTECOLOR`, `_PIXELSIZE`,
+  `_DEFAULTCOLOR`, `_BACKGROUNDCOLOR`, `_DISPLAY` as a function (the screen's image handle),
+  `_CLIP` (`_PUTIMAGE` partly off the edge),
+  `_MAPTRIANGLE` (textured triangles), `_DISPLAYORDER`, `_DEPTHBUFFER`.
+- Color functions: `_HSB32`, `_HSBA32`, `_HUE32`, `_SATURATION32`, `_BRIGHTNESS32`.
+- Fonts and text: `_FONTWIDTH`, `_FONTHEIGHT`, `_UPRINTSTRING`, `_UPRINTWIDTH`,
+  `_UFONTHEIGHT`, `_ULINESPACING`, `_UCHARPOS`, `_MAPUNICODE`, `_CONTROLCHR`, `_BLINK`.
+- The window: `_TITLE$`, `_SCREENMOVE`, `_SCREENX`, `_SCREENY`, `_SCREENEXISTS`,
+  `_SCREENHIDE`, `_SCREENSHOW`, `_SCREENICON`, `_ICON`, `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`,
+  `_DESKTOPREFRESHRATE`, `_WINDOWHASFOCUS`, `_WINDOWHANDLE`, `_WINDOWSIZELIMIT`,
+  `_ALLOWFULLSCREEN`, `_SCREENCLICK`, `_SCREENPRINT`, `_PRINTIMAGE`.
+- Dropped files: `_ACCEPTFILEDROP`, `_TOTALDROPPEDFILES`, `_DROPPEDFILE`, `_FINISHDROP`.
+
+### Mouse, keyboard and game controllers
+
+- Mouse: `_MOUSEHIDE`, `_MOUSESHOW`, `_MOUSEHIDDEN`, `_MOUSEMOVE`, `_MOUSECURSOR`,
+  `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`, `_MOUSEDISABLED`.
+- Devices (QB64's general controller interface; `STICK` and `STRIG` work today):
+  `_DEVICES`, `_DEVICE$`, `_DEVICEINPUT`, `_LASTBUTTON`, `_LASTAXIS`, `_LASTWHEEL`,
+  `_BUTTON`, `_BUTTONCHANGE`, `_AXIS`, `_WHEEL`.
+
+### Sound
+
+- `_SNDBAL`, `_SNDSETPOS`, `_SNDCOPY`, `_SNDLIMIT`, `_SNDRATE`, `_SNDNEW`, `_SNDOPENRAW`,
+  the raw sample queue (`_SNDRAW`, `_SNDRAWLEN`, `_SNDRAWDONE`, `_SNDRAWBATCH`), `_WAVE`,
+  `_MEMSOUND`, `_MIDISOUNDBANK`.
+
+### Data, encoding and memory
+
+- Checksums and encoding: `_CRC32`, `_ADLER32`, `_MD5$`, `_BASE64ENCODE$`, `_BASE64DECODE$`,
+  `_ENCODEURL$`, `_DECODEURL$`.
+- Binary conversion: `_MK$` and `_CV` (any numeric type, like `MKI$`/`CVI`).
+- Arrays and types: `_PRESERVE` (`REDIM _PRESERVE`), `_ARRAYCOPY`, `_DEFINE`, `_CAST`,
+  `_NEGATE`, `_BIT` (the bit type), `_OFFSET`, `_STATIC` / `_DYNAMIC` qualifiers.
+- The `_MEM` block interface: `_MEM`, `_MEMNEW`, `_MEMFREE`, `_MEMGET`, `_MEMPUT`,
+  `_MEMCOPY`, `_MEMFILL`, `_MEMEXISTS`, `_MEMELEMENT`, `_MEMIMAGE`.
+
+### Larger features
+
+- Dialogs: `_MESSAGEBOX`, `_INPUTBOX$`, `_OPENFILEDIALOG$`, `_SAVEFILEDIALOG$`,
+  `_SELECTFOLDERDIALOG$`, `_COLORCHOOSERDIALOG`, `_NOTIFYPOPUP`.
+- Networking (TCP/IP): `_OPENHOST`, `_OPENCLIENT`, `_OPENCONNECTION`, `_CONNECTED`,
+  `_CONNECTIONADDRESS$`, `_STATUSCODE`.
+- Console windows: `_CONSOLE`, `_CONSOLETITLE`, `_CONSOLECURSOR`, `_CONSOLEFONT`,
+  `_CONSOLEINPUT`, `_CINP`, `_ECHO`, `_DEST _CONSOLE`.
+- Logging and checks: `_LOGTRACE`, `_LOGINFO`, `_LOGWARN`, `_LOGERROR`, `_LOGMINLEVEL`,
+  `_ASSERT` with `$ASSERTS`, `$CHECKING`, `$DEBUG`, `$ERROR`, `$ERRORLOCATION`,
+  `_INCLERRORFILE$`, `_INCLERRORLINE`.
+- Timers and process control: `_FREETIMER`, `_EXIT`, `_SHELLHIDE`, `_DONTWAIT` and `_HIDE`
+  (`SHELL` options).
+- Embedding and build information: `$EMBED`, `_EMBEDDED$`, `_COMPILEDATE$`,
+  `_COMPILETIME$`, `_COMPILERVERSION$`, `$USELIBRARY`, `$UNSTABLE`, `$COLOR`, `$FORMAT`.
+
+### Probably out of scope
+
+- OpenGL: `_GL`, `_GLRENDER` and the `_gl...` functions (about 300), which need a QB64-style
+  OpenGL context.
+- `_RETAIN`, `_MIDDLE` and other options of features above that basika does not have.
 
 ## Interpreter correctness
 

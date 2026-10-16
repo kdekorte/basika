@@ -1,0 +1,25 @@
+FILEEXISTS file, folder, none:-1  0  0 
+DIREXISTS folder, file, none:-1  0  0 
+paths and empty names ok
+CWD$ ok
+STARTDIR$ is the starting folder
+CWD$ follows CHDIR
+FULLPATH$ file ok
+FULLPATH$ folder ok
+FULLPATH$ . ok
+DIR$ ok
+DIR$ names ok
+DIR$ desktop ok
+FILES$ *: ../ ./ a.txt b.bas sub/
+FILES$ sub: ../ ./ c.txt
+FILES$ *.txt: a.txt
+FILES$ none: []
+READFILE$ length 10 
+READFILE$ keeps every byte
+WRITEFILE replaces: short
+READFILE$ empty file: 0 
+--- errors
+FULLPATH$ missing: 76
+READFILE$ missing: 53
+WRITEFILE no folder: 76
+cleaned up:-1 

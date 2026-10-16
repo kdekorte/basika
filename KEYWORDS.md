@@ -41,7 +41,9 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
 `_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
-`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`.
+`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
+`_FILEEXISTS`, `_DIREXISTS`, `_DIR$`, `_CWD$`, `_STARTDIR$`, `_FULLPATH$`, `_FILES$`, `_READFILE$`,
+and the statement `_WRITEFILE`.
 
 Metacommand: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`.
 
@@ -210,6 +212,13 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `COMMON [SHARED] var[()] [AS type][, ...]`: Lists the module variables passed on by `CHAIN`; with `SHARED` they are also visible in every procedure. Named blocks (`COMMON /name/`) are accepted.
 - `CLEAR [, [memory][, stack]]`: Zeroes all variables and arrays (keeping their dimensions), empties strings, closes all files and resets the GOSUB/FOR stack. `CONST` values, `TYPE`s and `DEF FN`s are kept. Not allowed inside a procedure.
 - `LOCK [#]n[, record | [first] TO last]` / `UNLOCK ...`: Locks a whole file, a record or a range of records (bytes for BINARY files) with operating-system advisory locks; a range another process holds is a "Permission denied" error.
+- QB64 files and folders. True is -1, and folders come back ending in `/`, as in QB64 Phoenix Edition:
+  - `_FILEEXISTS(file$)` / `_DIREXISTS(folder$)`: -1 if the path is a file (or a folder), else 0; a folder is not a file.
+  - `_CWD$`: The current folder, which `CHDIR` changes. `_STARTDIR$`: The folder basika started in.
+  - `_FULLPATH$(path$)`: The absolute path of a file or folder that exists, with `.`, `..` and links resolved; "Path not found" otherwise.
+  - `_DIR$(name$)`: A special folder: `"desktop"`, `"downloads"`, `"documents"`, `"music"`, `"pictures"`, `"video"`, `"appdata"`, `"local data"`, `"program files"`, `"temp"`, `"home"` and `"fonts"`, with QB64's other spellings (`"my documents"`, `"tmp"`, ...), in any case. An unknown name gives the desktop, as in QB64. On macOS the data folders are `~/Library/Application Support/`, fonts `~/Library/Fonts/` and program files `/Applications/`.
+  - `_FILES$(pattern$)`: The first file or folder matching the pattern (`*` and `?` wildcards; a folder on its own lists everything in it); `_FILES$` with no argument returns the next one, and `""` when there are no more. Folders end in `/`, `./` and `../` are included, hidden files only when the pattern starts with `.`. Names come in no particular order. `_FILES$` with no argument before any pattern is "Illegal function call".
+  - `_READFILE$(file$)`: The whole file, every byte, as a string ("File not found" if it is missing). `_WRITEFILE file$, contents$`: Writes the string's bytes as the whole file, creating it or replacing what was there ("Path not found" if its folder is missing).
 - `WAIT port, and_mask[, xor_mask]`: Pauses until `(port XOR xor_mask) AND and_mask` is nonzero. Ports are simulated: `&H3DA` reports a 60 Hz vertical retrace in bits 8 and 1, so `WAIT &H3DA, 8` syncs animation to frames; every other port reads 0, and a `WAIT` that could never end returns at once.
 
 ## Graphics and Sound

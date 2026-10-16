@@ -54,6 +54,7 @@ TESTS=(
   "tests/file_io/files"
   "tests/file_io/dir_ops"
   "tests/file_io/dir_ops_ext"
+  "tests/file_io/qb64_files"
   "tests/file_io/shell_test"
   "tests/audio/sound_play"
   "tests/audio/no_audio"

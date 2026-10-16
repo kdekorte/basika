@@ -299,6 +299,8 @@ static const char *find_qb64_name(const char *name) {
         "_UNSIGNED", "_BYTE", "_INTEGER64", "_FLOAT",
         "_SNDOPEN", "_SNDCLOSE", "_SNDPLAY", "_SNDLOOP", "_SNDSTOP", "_SNDPAUSE", "_SNDVOL",
         "_SNDPLAYCOPY", "_SNDPLAYFILE", "_SNDPLAYING", "_SNDPAUSED", "_SNDLEN", "_SNDGETPOS",
+        "_FILEEXISTS", "_DIREXISTS", "_DIR$", "_CWD$", "_STARTDIR$", "_FULLPATH$", "_FILES$",
+        "_READFILE$", "_WRITEFILE",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         if (strcasecmp(name, names[i]) == 0) return names[i];
