@@ -128,6 +128,7 @@ TESTS=(
   "tests/control_flow/select_case_procedure"
   "tests/control_flow/select_case_loop_exit"
   "tests/errors/syntax_error"
+  "tests/errors/missing_operand"
   "tests/errors/unnumbered_syntax_error"
   "tests/errors/return_error"
   "tests/errors/option_explicit_undefined"

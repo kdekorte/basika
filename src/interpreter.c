@@ -8034,6 +8034,12 @@ static Num array_bound_tok(TokenStream *ts, TokenType which) {
 }
 
 static Num primary_tok(TokenStream *ts) {
+    // A missing operand (PRINT 1 +) must not step past the statement's last
+    // token: the caller reads the position back as a text pointer.
+    if (ts->tokens[ts->pos].type == TOKEN_EOF || ts->tokens[ts->pos].type == TOKEN_COLON) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return num_i(0, NUM_INTEGER);
+    }
     Token *token = &ts->tokens[ts->pos++];
     if (token->type == TOKEN_NUMBER) {
         if (token->is_double) last_expression_is_double = 1;
@@ -10852,6 +10858,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 const char *hash_saved = ptr;
                 if (get_next_token(&ptr).type != TOKEN_HASH) ptr = hash_saved;
                 fnum = evaluate_int_text(&ptr);
+                if (runtime_error_occurred) return;
                 saved = ptr;
                 if (get_next_token(&ptr).type == TOKEN_LEN && get_next_token(&ptr).type == TOKEN_EQUALS) {
                     reclen = evaluate_int_text(&ptr);
