@@ -43,7 +43,11 @@ QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
 `_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
 `_FILEEXISTS`, `_DIREXISTS`, `_DIR$`, `_CWD$`, `_STARTDIR$`, `_FULLPATH$`, `_FILES$`, `_READFILE$`,
-and the statement `_WRITEFILE`.
+the statement `_WRITEFILE`, the string functions `_TRIM$`, `_TOSTR$`, `_BIN$`, `_INSTRREV`, `_STRCMP`,
+`_STRICMP`, the math functions `_MIN`, `_MAX`, `_CLAMP`, `_CEIL`, `_HYPOT`, `_ATAN2`, `_ACOS`, `_ASIN`,
+`_ACOSH`, `_ASINH`, `_ATANH`, `_COSH`, `_SINH`, `_TANH`, `_SEC`, `_CSC`, `_COT`, `_ARCSEC`, `_ARCCSC`,
+`_ARCCOT`, `_SECH`, `_CSCH`, `_COTH`, `_D2R`, `_R2D`, `_D2G`, `_G2D`, `_R2G`, `_G2R`, and the bit
+functions `_SHL`, `_SHR`, `_ROL`, `_ROR`, `_SETBIT`, `_RESETBIT`, `_TOGGLEBIT`, `_READBIT`.
 
 Metacommand: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`.
 
@@ -276,7 +280,7 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_FREEIMAGE handle`: Releases an image; drawing returns to the screen if it was `_DEST`.
 - `_TITLE text$`: Sets the window title.
 - Line continuation: as in QB64, a line ending in a space and `_` (outside strings and comments) continues on the next line. Program lines may be up to 1023 characters.
-- `_ROUND(x)`: The nearest whole number, with halves rounding to even (`_ROUND(2.5)` is 2), for values of any size.
+- `_ROUND(x)`: The nearest whole number, with halves rounding to even (`_ROUND(2.5)` is 2), as an `_INTEGER64` (LONG when it fits); whole numbers come back exact, and a value beyond the `_INTEGER64` range is Overflow.
 - 32-bit colors in LONG variables: as in QB64, a whole number from 2^31 to 2^32 - 1 stored in a LONG keeps its bit pattern, so colors from `POINT`, `_RGB32` and the like fit (`&HFFFFFFFF` becomes -1). A SINGLE or DOUBLE value outside LONG range is still an Overflow.
 - `$NOPREFIX`: As in QB64, the QB64 names after it may be written without their `_` (`Display`, `RGB32`, `Option Explicit`, `FullScreen SquarePixels`). QBasic keywords keep their meaning (`Width` is still `WIDTH`).
 - `_FULLSCREEN [{_STRETCH|_SQUAREPIXELS|_OFF}][, _SMOOTH]`: Fills the monitor with the screen, scaled to fit (`_STRETCH`, the default) or by the largest whole number so pixels stay square (`_SQUAREPIXELS`); `_SMOOTH` filters the scaling and `_OFF` returns to a window. As a function, `_FULLSCREEN` returns 0 (off), 1 (stretch) or 2 (square pixels).
@@ -319,6 +323,15 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `TIMER`: Wall-clock seconds since midnight, with fractions.
 - `VAL(s$)`: Numeric value of string.
 - `VARPTR(var)`: Address of a variable.
+- QB64 math (from QB64 Phoenix Edition). The trigonometric ones work in radians and give SINGLE or DOUBLE results like `SIN`. A value outside a function's range is "Illegal function call", as for `SQR` and `LOG`; QB64 returns NaN there instead (`_ACOS(2)` prints `-1.#IND`).
+  - `_MIN(a, b)`, `_MAX(a, b)`, `_CLAMP(x, low, high)`: The smaller, the larger, or `x` kept within `low` to `high`; the value chosen keeps its own type, so an `_INTEGER64` stays exact. `_MIN` and `_MAX` give `a` when the two are equal.
+  - `_CEIL(x)`: The smallest whole number at least `x` (`_CEIL(-2.5)` is -2). `_HYPOT(x, y)`: The square root of x² + y². `_ATAN2(y, x)`: The angle of the point (x, y), -π to π; `_ATAN2(0, 0)` is 0.
+  - `_ACOS`, `_ASIN`, `_ACOSH`, `_ASINH`, `_ATANH`, `_COSH`, `_SINH`, `_TANH`; the reciprocals `_SEC` (1/COS), `_CSC` (1/SIN), `_COT` (1/TAN), `_SECH`, `_CSCH`, `_COTH`, and their inverses `_ARCSEC`, `_ARCCSC`, `_ARCCOT`.
+  - `_D2R`, `_R2D`, `_D2G`, `_G2D`, `_R2G`, `_G2R`: Convert between degrees, radians and gradians (400 to a circle).
+- QB64 bits. Bits count from 0, the least significant; each function returns a new value and leaves its argument alone (`a = _SETBIT(a, 3)`).
+  - `_SHL(x, n)`, `_SHR(x, n)`: Shift left or right by `n` bits. The result is not cut to `x`'s type until it is stored (`_SHL(b~%%, 8)` prints 256, but stored in a `~%%` it is 0); `_SHR` keeps the sign of a signed value.
+  - `_ROL(x, n)`, `_ROR(x, n)`: Rotate within the width of `x`'s type: 8 bits for a `_BYTE`, 16 for an INTEGER (and a whole-number literal), 32 for a LONG, 64 for an `_INTEGER64`; a `DIM ... AS` type counts.
+  - `_SETBIT(x, n)`, `_RESETBIT(x, n)`, `_TOGGLEBIT(x, n)`: `x` with bit `n` set, cleared or flipped. `_READBIT(x, n)`: -1 if bit `n` is set, else 0.
 
 ## String Functions
 
@@ -343,6 +356,12 @@ dynamic strings.
 - `STR$(n)`: Converts a number to the text `PRINT` shows, with a leading space for positive values (`STR$(1234567)` is `" 1234567"`).
 - Numbers print as in QBasic: fractions have no leading zero (`.5`, `-.25`) and exponents are uppercase, `E` for SINGLE and `D` for DOUBLE (`1E+20`, `1D+300`).
 - `TIME$`: Current system time.
+- QB64 strings (from QB64 Phoenix Edition):
+  - `_TRIM$(s$)`: `s$` without leading and trailing spaces (spaces only, like `LTRIM$(RTRIM$(s$))`).
+  - `_TOSTR$(n[, digits])`: `n` as `STR$` shows it, without the leading space; for SINGLE and DOUBLE values, `digits` limits the significant digits (rounded, 1-7 or 1-16), and a negative `digits` is "Illegal function call".
+  - `_BIN$(n)`: `n` in binary, without leading zeros; negatives in two's complement at their type's width (16 bits for an INTEGER, 32 for a LONG, 64 for an `_INTEGER64`), and floats lose their fraction (`_BIN$(-123.45)` is -123's).
+  - `_INSTRREV([start,] s$, find$)`: Where `find$` last starts in `s$`, at or before `start` (the end when it is missing or 0 or less), or 0. An empty `find$` gives `LEN(s$)`.
+  - `_STRCMP(a$, b$)`, `_STRICMP(a$, b$)`: -1, 0 or 1 as `a$` sorts before, the same as or after `b$`, byte by byte; `_STRICMP` ignores case.
 
 ## Memory and Special
 - `POKE addr, value`: Write byte to memory.

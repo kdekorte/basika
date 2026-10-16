@@ -9,26 +9,24 @@
 - `OUT port, value` / `INP(port)`: Hardware I/O port access (`WAIT` simulates the VGA status port only).
 - `DEF SEG` / `VARSEG` / `VARPTR$` / `FRE` / `BLOAD` / `BSAVE`: Legacy memory-segment operations (low priority).
 - `WIDTH #n` file widths are accepted but output is not wrapped.
+- `VAL` does not read `&H`, `&O` or `&B` prefixes: `VAL("&H1F")` is 0 where QBasic gives 31
+  (`&H1F` in a program works). QB64's `_BIN$` is meant to round-trip through `VAL("&B" + s$)`.
+- `PRINT a$ = b$` (a string comparison in a `PRINT` list) is "Syntax error"; QBasic prints -1 or
+  0. Comparisons work in `IF` and in assignments.
 - `CHAIN MERGE`, `CHAIN ... ALL` and `CHAIN ..., line` (GW-BASIC forms) are not supported.
 
 ## QB64 extensions
 
-Basika implements 75 of the 311 QB64 Phoenix Edition keywords (checked against the
+Basika implements 116 of the 311 QB64 Phoenix Edition keywords (checked against the
 [alphabetical keyword reference](https://qb64phoenix.com/qb64wiki/index.php/Keyword_Reference_-_Alphabetical)
 on 2026-10-16), not counting the OpenGL `_gl...` set. An unknown `_NAME` is not an error:
-it reads as an ordinary variable, 0 or "", so `IF _MAX(a, b) > 0 THEN` is quietly false.
+it reads as an ordinary variable, 0 or "", so `IF _UPTIME > 0 THEN` is quietly false.
 Making unknown `_` names "Syntax error" would show QB64 programs what is missing.
 
 ### Most useful first
 
 These come up in ordinary QB64 programs and are small to add.
 
-- Strings: `_TRIM$`, `_INSTRREV`, `_TOSTR$`, `_BIN$`, `_STRCMP`, `_STRICMP`.
-- Math: `_MIN`, `_MAX`, `_CLAMP`, `_CEIL`, `_HYPOT`, `_ATAN2`, the inverse and hyperbolic
-  functions (`_ACOS`, `_ASIN`, `_ACOSH`, `_ASINH`, `_ATANH`, `_COSH`, `_SINH`, `_TANH`), the
-  reciprocal ones (`_SEC`, `_CSC`, `_COT`, `_ARCSEC`, `_ARCCSC`, `_ARCCOT`, `_SECH`, `_CSCH`,
-  `_COTH`) and the angle conversions (`_D2R`, `_R2D`, `_D2G`, `_G2D`, `_R2G`, `_G2R`).
-- Bits: `_SHL`, `_SHR`, `_ROL`, `_ROR`, `_SETBIT`, `_RESETBIT`, `_TOGGLEBIT`, `_READBIT`.
 - Control flow: `_CONTINUE` (next loop iteration), `_IIF(condition, a, b)`, and the
   short-circuit `_ANDALSO` / `_ORELSE`.
 - System: `_OS$`, `_UPTIME`, `_COMMANDCOUNT`, `_ENVIRONCOUNT`, `_ERRORLINE`, `_ERRORMESSAGE$`,

@@ -326,9 +326,18 @@ static int qb64_function_id(const char *name);
 /* A user FUNCTION or a QB64 built-in such as _RESIZEWIDTH: a value, never a
  * by-reference variable. */
 static int qb64_file_function_id(const char *name);
+static int qb64_string_function_id(const char *name);
+static int qb64_argument_bit_width(const Token *tokens, int pos, int function_id);
+static int qb64_rotates_variable(const Token *tokens, int pos, int function_id);
+/* The bit width _ROL and _ROR turn through, from the declared type of the
+ * variable the value came from when that is known, else the value's kind;
+ * and whether that variable is _UNSIGNED. */
+static int qb64_bit_width_hint = 0;
+static int qb64_bit_width_unsigned = 0;
 
 static int is_function_name(const char *name) {
-    if (name[0] == '_' && (qb64_function_id(name) || qb64_file_function_id(name))) return 1;
+    if (name[0] == '_' && (qb64_function_id(name) || qb64_file_function_id(name) ||
+                           qb64_string_function_id(name))) return 1;
     ProcedureDef *proc = find_procedure(name);
     return proc && proc->is_function;
 }
@@ -4426,6 +4435,235 @@ static void call_qb64_file_function_text(const char **input, int id, double *num
     basic_string_release(&arg);
 }
 
+static void format_number_plain(Num value, int is_double, char *out, size_t size);
+static int is_string_member_reference_text(const char *text);
+
+/* ---- QB64 string functions: _TRIM$, _TOSTR$, _BIN$, _INSTRREV, _STRCMP and
+ * _STRICMP. Each parser reads the arguments into a QB64StringArgs (strings
+ * and numbers as they come) and qb64_string_function does the rest. */
+enum {
+    QB64_STR_NONE, QB64_STR_TRIM, QB64_STR_TOSTR, QB64_STR_BIN,
+    QB64_STR_INSTRREV, QB64_STR_STRCMP, QB64_STR_STRICMP
+};
+
+static int qb64_string_function_id(const char *name) {
+    static const struct { const char *name; int id; } functions[] = {
+        {"_TRIM$", QB64_STR_TRIM}, {"_TOSTR$", QB64_STR_TOSTR}, {"_BIN$", QB64_STR_BIN},
+        {"_INSTRREV", QB64_STR_INSTRREV}, {"_STRCMP", QB64_STR_STRCMP}, {"_STRICMP", QB64_STR_STRICMP},
+    };
+    if (name[0] != '_') return QB64_STR_NONE;
+    for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
+        if (strcasecmp(name, functions[i].name) == 0) return functions[i].id;
+    }
+    return QB64_STR_NONE;
+}
+
+/* _TRIM$, _TOSTR$ and _BIN$ give a string; the others a number. */
+static int qb64_string_function_is_string(int id) {
+    return id == QB64_STR_TRIM || id == QB64_STR_TOSTR || id == QB64_STR_BIN;
+}
+
+#define QB64_STRING_MAX_ARGS 3
+typedef struct {
+    int count;
+    int is_string[QB64_STRING_MAX_ARGS];
+    BasicString text[QB64_STRING_MAX_ARGS];
+    Num number[QB64_STRING_MAX_ARGS];
+    int number_is_double[QB64_STRING_MAX_ARGS]; // for _TOSTR$, as STR$ shows it
+} QB64StringArgs;
+
+static void qb64_string_args_release(QB64StringArgs *args) {
+    for (int i = 0; i < args->count && i < QB64_STRING_MAX_ARGS; i++) basic_string_release(&args->text[i]);
+}
+
+static const char *qb64_arg_text(const QB64StringArgs *args, int i, size_t *length) {
+    *length = args->text[i].length;
+    return args->text[i].data ? (const char *)args->text[i].data : "";
+}
+
+/* -1, 0 or 1 as a and b compare byte by byte, ignoring case if asked. */
+static int qb64_compare_strings(const char *a, size_t na, const char *b, size_t nb, int ignore_case) {
+    size_t n = na < nb ? na : nb;
+    for (size_t i = 0; i < n; i++) {
+        int x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (ignore_case) { x = tolower(x); y = tolower(y); }
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return na < nb ? -1 : na > nb ? 1 : 0;
+}
+
+/* Runs a string function on its arguments. A number goes in *number, a
+ * string in *out. Returns 0 or the error to report. */
+static int qb64_string_function(int id, const QB64StringArgs *args, Num *number, BasicString *out) {
+    size_t n0, n1;
+    // The number of arguments, and which of them are strings.
+    switch (id) {
+        case QB64_STR_TRIM: {
+            if (args->count != 1 || !args->is_string[0]) return ERR_TYPE_MISMATCH;
+            // Spaces only, as LTRIM$(RTRIM$(text$)).
+            const char *s = qb64_arg_text(args, 0, &n0);
+            size_t start = 0, end = n0;
+            while (start < end && s[start] == ' ') start++;
+            while (end > start && s[end - 1] == ' ') end--;
+            basic_string_append(out, s + start, end - start);
+            return 0;
+        }
+        case QB64_STR_TOSTR: {
+            if (args->count < 1 || args->count > 2 || args->is_string[0] ||
+                (args->count == 2 && args->is_string[1])) return ERR_TYPE_MISMATCH;
+            Num value = args->number[0];
+            int is_double = args->number_is_double[0];
+            char buf[96];
+            if (args->count == 2 && !num_is_int(value)) {
+                // At most `digits` significant digits, rounded, trailing
+                // zeros dropped; SINGLE allows 1-7 and DOUBLE 1-16.
+                int64_t digits;
+                if (!num_whole_operand(args->number[1], &digits)) return ERR_OVERFLOW;
+                if (digits < 0) return ERR_ILLEGAL_FUNCTION_CALL;
+                int most = is_double ? 16 : 7;
+                if (digits < 1) digits = 1;
+                if (digits > most) digits = most;
+                char raw[64];
+                snprintf(raw, sizeof(raw), "%.*g", (int)digits, value.d);
+                const char *p = raw;
+                size_t k = 0;
+                if (*p == '-') { buf[k++] = '-'; p++; }
+                if (p[0] == '0' && p[1] == '.') p++;
+                for (; *p && k + 1 < sizeof(buf); p++) buf[k++] = *p == 'e' ? (is_double ? 'D' : 'E') : *p;
+                buf[k] = '\0';
+            } else {
+                format_number_plain(value, is_double, buf, sizeof(buf));
+            }
+            basic_string_append(out, buf, strlen(buf));
+            return 0;
+        }
+        case QB64_STR_BIN: {
+            if (args->count != 1 || args->is_string[0]) return ERR_TYPE_MISMATCH;
+            // Like HEX$: negatives in two's complement at their type's
+            // width; floats keep only their whole part, as in QB64.
+            Num value = args->number[0];
+            int64_t whole;
+            int kind = value.kind;
+            if (num_is_int(value)) {
+                whole = value.i;
+            } else {
+                double t = trunc(value.d);
+                if (!(t >= -9223372036854775808.0 && t < 9223372036854775808.0)) return ERR_OVERFLOW;
+                whole = (int64_t)t;
+                kind = whole >= INT32_MIN && whole <= INT32_MAX ? NUM_LONG : NUM_INT64;
+                if (whole >= -32768 && whole < 0) kind = NUM_INTEGER;
+            }
+            uint64_t bits = (uint64_t)whole;
+            if (whole < 0 && kind == NUM_INTEGER) bits &= 0xFFFF;
+            else if (whole < 0 && kind == NUM_LONG) bits &= 0xFFFFFFFFu;
+            char buf[65];
+            int k = 64;
+            buf[k] = '\0';
+            do { buf[--k] = (char)('0' + (bits & 1)); bits >>= 1; } while (bits);
+            basic_string_append(out, buf + k, (size_t)(64 - k));
+            return 0;
+        }
+        case QB64_STR_INSTRREV: {
+            // _INSTRREV([start%,] base$, find$): the last place find$
+            // starts at or before start% (the end when start% <= 0), or 0.
+            int first = args->count == 3 ? 1 : 0;
+            if (args->count < 2 || args->count > 3 || !args->is_string[first] || !args->is_string[first + 1] ||
+                (first && args->is_string[0])) return ERR_TYPE_MISMATCH;
+            const char *base = qb64_arg_text(args, first, &n0);
+            const char *find = qb64_arg_text(args, first + 1, &n1);
+            int64_t start = 0;
+            if (first && !num_whole_operand(args->number[0], &start)) return ERR_OVERFLOW;
+            if (n0 == 0) { *number = num_i(0, NUM_LONG); return 0; }
+            if (n1 == 0) { *number = num_i((int64_t)n0, NUM_LONG); return 0; }
+            if (n1 > n0) { *number = num_i(0, NUM_LONG); return 0; }
+            int64_t from = (int64_t)(n0 - n1) + 1;
+            if (start > 0 && start < from) from = start;
+            for (int64_t pos = from; pos >= 1; pos--) {
+                if (memcmp(base + pos - 1, find, n1) == 0) { *number = num_i(pos, NUM_LONG); return 0; }
+            }
+            *number = num_i(0, NUM_LONG);
+            return 0;
+        }
+        case QB64_STR_STRCMP:
+        case QB64_STR_STRICMP: {
+            if (args->count != 2 || !args->is_string[0] || !args->is_string[1]) return ERR_TYPE_MISMATCH;
+            const char *a = qb64_arg_text(args, 0, &n0);
+            const char *b = qb64_arg_text(args, 1, &n1);
+            *number = num_i(qb64_compare_strings(a, n0, b, n1, id == QB64_STR_STRICMP), NUM_INTEGER);
+            return 0;
+        }
+    }
+    return ERR_SYNTAX_ERROR;
+}
+
+/* Reads "(arg, arg, ...)" of a string function from tokens, ts just past
+ * its name, then runs it. Errors are reported here. */
+static void call_qb64_string_function_tok(TokenStream *ts, int id, Num *number, BasicString *out) {
+    QB64StringArgs args = {0};
+    if (ts->tokens[ts->pos].type != TOKEN_LPAREN) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return;
+    }
+    ts->pos++;
+    while (!runtime_error_occurred) {
+        if (args.count >= QB64_STRING_MAX_ARGS) { report_runtime_error(ERR_SYNTAX_ERROR); break; }
+        int i = args.count++;
+        args.is_string[i] = is_string_token(&ts->tokens[ts->pos]) ||
+                            is_string_member_reference_text(ts->tokens[ts->pos].start_ptr);
+        if (args.is_string[i]) {
+            parse_string_expression_tok_heap(ts, &args.text[i]);
+        } else {
+            last_expression_is_double = 0;
+            args.number[i] = evaluate_num_tok(ts);
+            args.number_is_double[i] = last_expression_is_double;
+        }
+        if (ts->tokens[ts->pos].type != TOKEN_COMMA) break;
+        ts->pos++;
+    }
+    if (!runtime_error_occurred) {
+        if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
+        else report_runtime_error(ERR_SYNTAX_ERROR);
+    }
+    if (!runtime_error_occurred) {
+        int err = qb64_string_function(id, &args, number, out);
+        if (err) report_runtime_error(err);
+    }
+    qb64_string_args_release(&args);
+}
+
+/* The same, reading the arguments from text, *input just past the name. */
+static void call_qb64_string_function_text(const char **input, int id, Num *number, BasicString *out) {
+    QB64StringArgs args = {0};
+    if (get_next_token(input).type != TOKEN_LPAREN) {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+        return;
+    }
+    while (!runtime_error_occurred) {
+        if (args.count >= QB64_STRING_MAX_ARGS) { report_runtime_error(ERR_SYNTAX_ERROR); break; }
+        int i = args.count++;
+        const char *peek = *input;
+        Token next = get_next_token(&peek);
+        args.is_string[i] = is_string_token(&next) || is_string_member_reference_text(*input);
+        if (args.is_string[i]) {
+            parse_string_expression_heap(input, &args.text[i]);
+        } else {
+            last_expression_is_double = 0;
+            args.number[i] = evaluate_num_text(input);
+            args.number_is_double[i] = last_expression_is_double;
+        }
+        const char *sep = *input;
+        Token t = get_next_token(input);
+        if (t.type == TOKEN_COMMA) continue;
+        if (t.type != TOKEN_RPAREN) { *input = sep; report_runtime_error(ERR_SYNTAX_ERROR); }
+        break;
+    }
+    if (!runtime_error_occurred) {
+        int err = qb64_string_function(id, &args, number, out);
+        if (err) report_runtime_error(err);
+    }
+    qb64_string_args_release(&args);
+}
+
 /* _WRITEFILE file$, contents$: replaces the file with the string's bytes. */
 static int qb64_write_file(const BasicString *name, const BasicString *contents) {
     const char *path = name->data ? (const char *)name->data : "";
@@ -4694,6 +4932,12 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             ts->pos++;
             double unused = 0;
             call_qb64_file_function_tok(ts, qb64_file_function_id(t.text), &unused, &term);
+            if (runtime_error_occurred) { basic_string_release(&term); return 0; }
+        } else if (t.type == TOKEN_IDENTIFIER && t.text[0] == '_' && qb64_string_function_id(t.text) &&
+                   qb64_string_function_is_string(qb64_string_function_id(t.text))) {
+            ts->pos++;
+            Num unused;
+            call_qb64_string_function_tok(ts, qb64_string_function_id(t.text), &unused, &term);
             if (runtime_error_occurred) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_IDENTIFIER) {
             ProcedureDef *pfunc = find_procedure(t.text);
@@ -5022,6 +5266,11 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
                    qb64_file_function_is_string(qb64_file_function_id(t.text))) {
             double unused = 0;
             call_qb64_file_function_text(input, qb64_file_function_id(t.text), &unused, &term);
+            if (runtime_error_occurred) { basic_string_release(&term); return 0; }
+        } else if (t.type == TOKEN_IDENTIFIER && t.text[0] == '_' && qb64_string_function_id(t.text) &&
+                   qb64_string_function_is_string(qb64_string_function_id(t.text))) {
+            Num unused;
+            call_qb64_string_function_text(input, qb64_string_function_id(t.text), &unused, &term);
             if (runtime_error_occurred) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_IDENTIFIER) {
             ProcedureDef *pfunc = find_procedure(t.text);
@@ -6557,7 +6806,7 @@ static int parse_cached_primary(CachedExpressionParser *parser) {
             strcasecmp(name, "CSRLIN") == 0 ||
             strcasecmp(name, "FREEFILE") == 0 ||
             strcasecmp(name, "POS") == 0 ||
-            (name[0] == '_' && qb64_file_function_id(name)) ||
+            (name[0] == '_' && (qb64_file_function_id(name) || qb64_string_function_id(name))) ||
             ((name[0] == 'F' || name[0] == 'f') && (name[1] == 'N' || name[1] == 'n'))) {
             return cached_expression_failed(parser);
         }
@@ -6565,11 +6814,21 @@ static int parse_cached_primary(CachedExpressionParser *parser) {
 
         if (name[0] == '_') {
             int function_id = qb64_function_id(name);
+            // _ROL and _ROR read the declared type of a variable argument,
+            // which only the parser sees, once DIM has run.
+            int bit_width = 0;
+            if (qb64_rotates_variable(tokens, parser->pos, function_id)) {
+                if (!primitive_type_of_name(tokens[parser->pos + 1].text)) return cached_expression_failed(parser);
+                bit_width = qb64_argument_bit_width(tokens, parser->pos, function_id);
+                if (qb64_bit_width_unsigned) bit_width = -bit_width;
+                qb64_bit_width_unsigned = 0;
+            }
             int argc = function_id ? parse_cached_arguments(parser) : -1;
             if (argc < 0 || !emit_cached_call(parser, CEXPR_QB64, token_index, argc)) {
                 return cached_expression_failed(parser);
             }
             parser->instructions[parser->instruction_count - 1].function_id = function_id;
+            parser->instructions[parser->instruction_count - 1].bit_width = bit_width;
             return 1;
         }
         if (strcasecmp(name, "POINT") == 0) {
@@ -8055,7 +8314,16 @@ enum {
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
     QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
     QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE,
-    QB64_FN_FULLSCREEN, QB64_FN_SNDPLAYING, QB64_FN_SNDPAUSED, QB64_FN_SNDLEN, QB64_FN_SNDGETPOS
+    QB64_FN_FULLSCREEN, QB64_FN_SNDPLAYING, QB64_FN_SNDPAUSED, QB64_FN_SNDLEN, QB64_FN_SNDGETPOS,
+    // Math, from QB64 Phoenix Edition.
+    QB64_FN_MIN, QB64_FN_MAX, QB64_FN_CLAMP, QB64_FN_CEIL, QB64_FN_HYPOT, QB64_FN_ATAN2,
+    QB64_FN_ACOS, QB64_FN_ASIN, QB64_FN_ACOSH, QB64_FN_ASINH, QB64_FN_ATANH,
+    QB64_FN_COSH, QB64_FN_SINH, QB64_FN_TANH, QB64_FN_SEC, QB64_FN_CSC, QB64_FN_COT,
+    QB64_FN_ARCSEC, QB64_FN_ARCCSC, QB64_FN_ARCCOT, QB64_FN_SECH, QB64_FN_CSCH, QB64_FN_COTH,
+    QB64_FN_D2R, QB64_FN_R2D, QB64_FN_D2G, QB64_FN_G2D, QB64_FN_R2G, QB64_FN_G2R,
+    // Bits.
+    QB64_FN_SHL, QB64_FN_SHR, QB64_FN_ROL, QB64_FN_ROR,
+    QB64_FN_SETBIT, QB64_FN_RESETBIT, QB64_FN_TOGGLEBIT, QB64_FN_READBIT
 };
 
 static int qb64_function_id(const char *name) {
@@ -8076,6 +8344,19 @@ static int qb64_function_id(const char *name) {
         {"_PRINTMODE", QB64_FN_PRINTMODE}, {"_FULLSCREEN", QB64_FN_FULLSCREEN},
         {"_SNDPLAYING", QB64_FN_SNDPLAYING}, {"_SNDPAUSED", QB64_FN_SNDPAUSED},
         {"_SNDLEN", QB64_FN_SNDLEN}, {"_SNDGETPOS", QB64_FN_SNDGETPOS},
+        {"_MIN", QB64_FN_MIN}, {"_MAX", QB64_FN_MAX}, {"_CLAMP", QB64_FN_CLAMP},
+        {"_CEIL", QB64_FN_CEIL}, {"_HYPOT", QB64_FN_HYPOT}, {"_ATAN2", QB64_FN_ATAN2},
+        {"_ACOS", QB64_FN_ACOS}, {"_ASIN", QB64_FN_ASIN}, {"_ACOSH", QB64_FN_ACOSH},
+        {"_ASINH", QB64_FN_ASINH}, {"_ATANH", QB64_FN_ATANH}, {"_COSH", QB64_FN_COSH},
+        {"_SINH", QB64_FN_SINH}, {"_TANH", QB64_FN_TANH}, {"_SEC", QB64_FN_SEC},
+        {"_CSC", QB64_FN_CSC}, {"_COT", QB64_FN_COT}, {"_ARCSEC", QB64_FN_ARCSEC},
+        {"_ARCCSC", QB64_FN_ARCCSC}, {"_ARCCOT", QB64_FN_ARCCOT}, {"_SECH", QB64_FN_SECH},
+        {"_CSCH", QB64_FN_CSCH}, {"_COTH", QB64_FN_COTH}, {"_D2R", QB64_FN_D2R},
+        {"_R2D", QB64_FN_R2D}, {"_D2G", QB64_FN_D2G}, {"_G2D", QB64_FN_G2D},
+        {"_R2G", QB64_FN_R2G}, {"_G2R", QB64_FN_G2R},
+        {"_SHL", QB64_FN_SHL}, {"_SHR", QB64_FN_SHR}, {"_ROL", QB64_FN_ROL}, {"_ROR", QB64_FN_ROR},
+        {"_SETBIT", QB64_FN_SETBIT}, {"_RESETBIT", QB64_FN_RESETBIT},
+        {"_TOGGLEBIT", QB64_FN_TOGGLEBIT}, {"_READBIT", QB64_FN_READBIT},
     };
     if (name[0] != '_') return QB64_FN_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -8203,11 +8484,6 @@ static double qb64_function_value(int id, const double *args, int argc) {
             if (id == QB64_FN_SNDLEN) return audio_sound_length(handle);
             return audio_sound_position(handle);
         }
-        case QB64_FN_ROUND:
-            // _ROUND(x): the nearest whole number, halves to even, like CINT
-            // but for any size.
-            if (argc != 1) break;
-            return nearbyint(args[0]);
     }
     report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
     return 0;
@@ -8297,8 +8573,198 @@ static Num numeric_function_num(TokenType type, Num argument) {
     }
 }
 
-static Num qb64_function_num(int function_id, const double *args, int argc) {
-    double value = qb64_function_value(function_id, args, argc);
+/* The QB64 functions whose answer depends on the type of their arguments,
+ * or that must not round an _INTEGER64 through a double: sets *result and
+ * returns 1, or returns 0 for a function of plain doubles. */
+static int qb64_function_typed(int function_id, const Num *args, int argc, Num *result);
+
+
+static int qb64_bit_width(Num value) {
+    if (qb64_bit_width_hint) return qb64_bit_width_hint;
+    if (value.kind == NUM_INTEGER) return 16;
+    if (value.kind == NUM_LONG) return 32;
+    return 64;
+}
+
+static int var_type_bit_width(int vt);
+
+/* _ROL(x, n) or _ROR(x, n) of a lone variable x. tokens[pos] is the "(". */
+static int qb64_rotates_variable(const Token *tokens, int pos, int function_id) {
+    return (function_id == QB64_FN_ROL || function_id == QB64_FN_ROR) &&
+           tokens[pos].type == TOKEN_LPAREN && tokens[pos + 1].type == TOKEN_IDENTIFIER &&
+           tokens[pos + 2].type == TOKEN_COMMA;
+}
+
+/* For _ROL/_ROR: the declared width of the first argument when it is a
+ * lone variable, f(x, ...), else 0. tokens[pos] is the "(". */
+static int qb64_argument_bit_width(const Token *tokens, int pos, int function_id) {
+    qb64_bit_width_unsigned = 0;
+    if (!qb64_rotates_variable(tokens, pos, function_id)) return 0;
+    // A name DIMmed AS a type stands for the name with that type's suffix.
+    const char *name = tokens[pos + 1].text;
+    char typed[80];
+    const char *suffix = primitive_type_of_name(name) ? NULL : find_declared_suffix(name);
+    if (suffix) {
+        snprintf(typed, sizeof(typed), "%s%s", name, suffix);
+        name = typed;
+    }
+    int vt = var_type_of_name(name);
+    qb64_bit_width_unsigned = vt == VT_UBYTE || vt == VT_UINTEGER || vt == VT_ULONG || vt == VT_UINT64;
+    return var_type_bit_width(vt);
+}
+
+static int var_type_bit_width(int vt) {
+    switch (vt) {
+        case VT_BYTE: case VT_UBYTE: return 8;
+        case VT_INTEGER: case VT_UINTEGER: return 16;
+        case VT_LONG: case VT_ULONG: return 32;
+        case VT_INT64: case VT_UINT64: return 64;
+    }
+    return 0;
+}
+
+/* A math result: an Illegal function call for a value outside the
+ * function's range, as SQR and LOG have (QBasic has no NaN). */
+static int qb64_math_result(double value, Num *result) {
+    if (!isfinite(value)) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        value = 0;
+    }
+    *result = num_d(value);
+    return 1;
+}
+
+static int qb64_function_typed(int function_id, const Num *args, int argc, Num *result) {
+    if (function_id >= QB64_FN_MIN && function_id <= QB64_FN_G2R) {
+        int want = 1;
+        switch (function_id) {
+            case QB64_FN_MIN: case QB64_FN_MAX: case QB64_FN_HYPOT: case QB64_FN_ATAN2: want = 2; break;
+            case QB64_FN_CLAMP: want = 3; break;
+        }
+        if (argc != want) {
+            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            *result = num_i(0, NUM_INTEGER);
+            return 1;
+        }
+        double x = num_to_double(args[0]);
+        switch (function_id) {
+            // The value chosen comes back as it was, keeping its type.
+            case QB64_FN_MIN: *result = num_compare(args[1], args[0]) < 0 ? args[1] : args[0]; return 1;
+            case QB64_FN_MAX: *result = num_compare(args[1], args[0]) > 0 ? args[1] : args[0]; return 1;
+            case QB64_FN_CLAMP:
+                if (num_compare(args[0], args[1]) < 0) *result = args[1];
+                else if (num_compare(args[0], args[2]) > 0) *result = args[2];
+                else *result = args[0];
+                return 1;
+            case QB64_FN_CEIL:
+                if (num_is_int(args[0])) { *result = args[0]; return 1; }
+                *result = num_f(ceil(args[0].d), args[0].kind);
+                return 1;
+            case QB64_FN_HYPOT: return qb64_math_result(hypot(x, num_to_double(args[1])), result);
+            case QB64_FN_ATAN2: {
+                double y = x, xx = num_to_double(args[1]);
+                // _ATAN2(0, 0) is 0 rather than an error, as in QB64.
+                return qb64_math_result(y == 0 && xx == 0 ? 0 : atan2(y, xx), result);
+            }
+            case QB64_FN_ACOS: return qb64_math_result(fabs(x) > 1 ? NAN : acos(x), result);
+            case QB64_FN_ASIN: return qb64_math_result(fabs(x) > 1 ? NAN : asin(x), result);
+            case QB64_FN_ACOSH: return qb64_math_result(x < 1 ? NAN : acosh(x), result);
+            case QB64_FN_ASINH: return qb64_math_result(asinh(x), result);
+            case QB64_FN_ATANH: return qb64_math_result(fabs(x) >= 1 ? NAN : atanh(x), result);
+            case QB64_FN_COSH: return qb64_math_result(cosh(x), result);
+            case QB64_FN_SINH: return qb64_math_result(sinh(x), result);
+            case QB64_FN_TANH: return qb64_math_result(tanh(x), result);
+            case QB64_FN_SEC: return qb64_math_result(cos(x) == 0 ? NAN : 1 / cos(x), result);
+            case QB64_FN_CSC: return qb64_math_result(sin(x) == 0 ? NAN : 1 / sin(x), result);
+            case QB64_FN_COT: return qb64_math_result(tan(x) == 0 ? NAN : 1 / tan(x), result);
+            // The inverses of 1/cos, 1/sin and 1/tan; |x| >= 1 for the first two.
+            case QB64_FN_ARCSEC: return qb64_math_result(fabs(x) < 1 ? NAN : acos(1 / x), result);
+            case QB64_FN_ARCCSC: return qb64_math_result(fabs(x) < 1 ? NAN : asin(1 / x), result);
+            case QB64_FN_ARCCOT: return qb64_math_result(M_PI / 2 - atan(x), result);
+            case QB64_FN_SECH: return qb64_math_result(1 / cosh(x), result);
+            case QB64_FN_CSCH: return qb64_math_result(x == 0 ? NAN : 1 / sinh(x), result);
+            case QB64_FN_COTH: return qb64_math_result(x == 0 ? NAN : 1 / tanh(x), result);
+            // Degrees, radians and gradians (400 to a circle).
+            case QB64_FN_D2R: return qb64_math_result(x * M_PI / 180, result);
+            case QB64_FN_R2D: return qb64_math_result(x * 180 / M_PI, result);
+            case QB64_FN_D2G: return qb64_math_result(x * 400 / 360, result);
+            case QB64_FN_G2D: return qb64_math_result(x * 360 / 400, result);
+            case QB64_FN_R2G: return qb64_math_result(x * 200 / M_PI, result);
+            case QB64_FN_G2R: return qb64_math_result(x * M_PI / 200, result);
+        }
+    }
+    if (function_id >= QB64_FN_SHL && function_id <= QB64_FN_READBIT) {
+        // _SHL(value, n) and the rest: whole numbers, and a new value back.
+        int64_t value, n;
+        if (argc != 2) {
+            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            *result = num_i(0, NUM_INTEGER);
+            return 1;
+        }
+        int kind = num_whole_operand(args[0], &value);
+        if (!kind || !num_whole_operand(args[1], &n)) { *result = num_i(0, NUM_INTEGER); return 1; }
+        int width = qb64_bit_width(args[0]);
+        uint64_t mask = width == 64 ? UINT64_MAX : ((uint64_t)1 << width) - 1;
+        uint64_t bits = (uint64_t)value;
+        if (n < 0 || ((function_id >= QB64_FN_SETBIT) && n >= 64)) {
+            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            *result = num_i(0, NUM_INTEGER);
+            return 1;
+        }
+        switch (function_id) {
+            case QB64_FN_SHL:
+                // The result is not cut to the argument's width; assigning
+                // it to a variable does that, as in QB64.
+                *result = num_i(n >= 64 ? 0 : (int64_t)(bits << n), NUM_INT64);
+                return 1;
+            case QB64_FN_SHR:
+                // Signed values keep their sign bit (an arithmetic shift).
+                if (args[0].kind == NUM_UINT64) *result = num_i(n >= 64 ? 0 : (int64_t)(bits >> n), NUM_UINT64);
+                else *result = num_i(n >= 64 ? (value < 0 ? -1 : 0) : value >> n, kind);
+                return 1;
+            case QB64_FN_ROL:
+            case QB64_FN_ROR: {
+                uint64_t v = bits & mask;
+                int r = (int)(n % width);
+                if (function_id == QB64_FN_ROR) r = (width - r) % width;
+                if (r) v = ((v << r) | (v >> (width - r))) & mask;
+                // A signed type's result with its top bit set is negative.
+                // The declared width says whether the variable is signed;
+                // an untyped value counts as signed.
+                if (width < 64 && (v >> (width - 1)) & 1 && !qb64_bit_width_unsigned) v |= ~mask;
+                *result = num_i((int64_t)v, kind == NUM_INTEGER && width > 16 ? NUM_LONG : kind);
+                return 1;
+            }
+            case QB64_FN_SETBIT: *result = num_i((int64_t)(bits | ((uint64_t)1 << n)), kind); return 1;
+            case QB64_FN_RESETBIT: *result = num_i((int64_t)(bits & ~((uint64_t)1 << n)), kind); return 1;
+            case QB64_FN_TOGGLEBIT: *result = num_i((int64_t)(bits ^ ((uint64_t)1 << n)), kind); return 1;
+            case QB64_FN_READBIT: *result = num_i(n < 64 && (bits >> n) & 1 ? -1 : 0, NUM_INTEGER); return 1;
+        }
+    }
+    switch (function_id) {
+        case QB64_FN_ROUND: {
+            // _ROUND(x): the nearest whole number, halves to even, like CINT
+            // but for any size; whole numbers come back exactly.
+            if (argc != 1) break;
+            int64_t whole;
+            int kind = num_whole_operand(args[0], &whole);
+            if (!kind) { *result = num_i(0, NUM_LONG); return 1; } // too big: Overflow
+            if (kind == NUM_INTEGER) kind = NUM_LONG;
+            *result = num_i(whole, kind);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Runs a QB64 function on its arguments as the parsers read them. argc is 5
+ * when there were more than 4. */
+static Num qb64_function_num(int function_id, const Num *args, int argc) {
+    Num typed;
+    if (qb64_function_typed(function_id, args, argc, &typed)) return typed;
+    double dargs[4];
+    for (int k = 0; k < argc && k < 4; k++) dargs[k] = num_to_double(args[k]);
+    double value = qb64_function_value(function_id, dargs, argc);
     // Colors are _UNSIGNED LONG values in QB64, so they can be stored in a LONG.
     if (function_id >= QB64_FN_RGB32 && function_id <= QB64_FN_RGBA) {
         return num_i((int64_t)value, NUM_INT64);
@@ -8362,6 +8828,14 @@ static Num primary_tok(TokenStream *ts) {
         }
 
         if (first == '_') {
+            int string_id = qb64_string_function_id(token->text);
+            if (string_id && !qb64_string_function_is_string(string_id)) {
+                Num value = num_i(0, NUM_INTEGER);
+                BasicString unused = {0};
+                call_qb64_string_function_tok(ts, string_id, &value, &unused);
+                basic_string_release(&unused);
+                return value;
+            }
             int file_id = qb64_file_function_id(token->text);
             if (file_id && !qb64_file_function_is_string(file_id)) {
                 double value = 0;
@@ -8397,13 +8871,14 @@ static Num primary_tok(TokenStream *ts) {
         if (first == '_') {
             int function_id = qb64_function_id(token->text);
             if (function_id) {
-                double args[4];
+                Num args[4];
                 int argc = 0;
+                int width = qb64_argument_bit_width(ts->tokens, ts->pos, function_id);
                 if (ts->tokens[ts->pos].type == TOKEN_LPAREN) {
                     ts->pos++;
                     if (ts->tokens[ts->pos].type != TOKEN_RPAREN) {
                         while (1) {
-                            double value = evaluate_expression_tok(ts);
+                            Num value = evaluate_num_tok(ts);
                             if (argc < 4) args[argc] = value;
                             argc++;
                             if (ts->tokens[ts->pos].type != TOKEN_COMMA) break;
@@ -8412,7 +8887,11 @@ static Num primary_tok(TokenStream *ts) {
                     }
                     if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
                 }
-                return qb64_function_num(function_id, args, argc > 4 ? 5 : argc);
+                qb64_bit_width_hint = width;
+                Num value = qb64_function_num(function_id, args, argc > 4 ? 5 : argc);
+                qb64_bit_width_hint = 0;
+                qb64_bit_width_unsigned = 0;
+                return value;
             }
         }
 
@@ -9153,11 +9632,17 @@ static __attribute__((noinline)) int cached_call(TokenStream *ts, const Compiled
             values[stack_size++] = num_d(math_function_value(type, 0, 0));
             break;
         case CEXPR_QB64: {
-            double args[4];
+            Num args[4];
             int argc = instruction->argc;
             stack_size -= argc;
-            for (int k = 0; k < argc && k < 4; k++) args[k] = num_to_double(values[stack_size + k]);
+            for (int k = 0; k < argc && k < 4; k++) args[k] = values[stack_size + k];
+            if (instruction->bit_width) {
+                qb64_bit_width_hint = instruction->bit_width < 0 ? -instruction->bit_width : instruction->bit_width;
+                qb64_bit_width_unsigned = instruction->bit_width < 0;
+            }
             values[stack_size++] = qb64_function_num(instruction->function_id, args, argc > 4 ? 5 : argc);
+            qb64_bit_width_hint = 0;
+            qb64_bit_width_unsigned = 0;
             break;
         }
         case CEXPR_POINT: {
@@ -12821,7 +13306,7 @@ static void explicit_scan_declarations(const Statement *stmt, int start, int end
             if (!check) explicit_declare(token->text, scope, everywhere);
         } else if (check && !*undefined && !explicit_is_declared(token->text, scope) &&
                    !find_procedure(token->text) && !qb64_function_id(token->text) &&
-                   !qb64_file_function_id(token->text)) {
+                   !qb64_file_function_id(token->text) && !qb64_string_function_id(token->text)) {
             *undefined = token->text;
         }
         item_start = 0;

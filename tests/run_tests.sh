@@ -207,6 +207,8 @@ TESTS=(
   "tests/strings/string_compare_logic"
   "tests/strings/print_number_spacing"
   "tests/strings/print_shorthand"
+  "tests/strings/qb64_strings"
+  "tests/math/qb64_math_bits"
   "tests/user_types/user_types_fixed_string_print"
   "tests/user_types/user_types_comments"
   "tests/user_types/user_types_large_array"

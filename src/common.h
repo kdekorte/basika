@@ -106,6 +106,7 @@ typedef struct {
     int is_double;   /* the literal makes PRINT show 16 digits */
     int argc;        /* operands a call or array element takes from the stack */
     int function_id; /* QB64 function of a CEXPR_QB64 */
+    int bit_width;   /* for _ROL/_ROR of a typed variable: its width, negative if _UNSIGNED */
 } CompiledExpressionInstruction;
 
 typedef struct {
