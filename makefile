@@ -22,17 +22,13 @@ $(TARGET): $(OBJ)
 
 $(OBJ): src/common.h src/lexer.h
 
-.PHONY: test test-performance test-performance-window clean install uninstall package burrow-app
+.PHONY: test test-performance clean install uninstall package burrow-app
 
 test: $(TARGET)
 	./tests/run_tests.sh
 
 test-performance: $(TARGET)
 	bash tests/scripts/performance_guard.sh
-
-# Opens windows; times follow the display's refresh rate.
-test-performance-window: $(TARGET)
-	bash tests/scripts/performance_guard.sh --window
 
 # macOS only: dist/Burrow.app, a standalone app with its own basika and SDL libraries.
 burrow-app:

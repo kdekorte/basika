@@ -6,8 +6,8 @@
 - `system/` contains command-line and startup tests.
 - `manual/` contains exploratory programs that are not part of the automated
   suite.
-- `performance/` contains the benchmark programs the performance regression
-  guard times.
+- `performance/` contains `benchmark.bas`, the program the performance check
+  times.
 - `scripts/` contains test helpers, including the performance regression guard.
 - Shared binary fixtures and generated test output remain in this directory
   because BASIC programs and documentation refer to paths under `tests/`.

@@ -12,3 +12,4 @@ demo/jukebox/jukebox_selftest.dat
 dist/
 video_demo/build/
 video_demo/basika_demo.mp4
+tests/benchmark.result
