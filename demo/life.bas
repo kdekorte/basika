@@ -19,7 +19,7 @@
 '   the same way every time, runs that many generations, 50 by default,
 '   saves life_selftest.png and exits.)
 ' ============================================================================
-
+$RESIZE:SMOOTH ' Added dynamic scaling support
 DEFLNG A-Z
 
 CONST SW = 816
