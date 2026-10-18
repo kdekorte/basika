@@ -35,18 +35,14 @@ These come up in ordinary QB64 programs and are small to add.
 
 ### Graphics
 
-- Transparency and blending: `_CLEARCOLOR`, `_SETALPHA`, `_BLEND` / `_DONTBLEND`.
-- Images: `_SAVEIMAGE`, `_SCREENIMAGE`, `_COPYPALETTE`, `_PALETTECOLOR`, `_PIXELSIZE`,
-  `_DEFAULTCOLOR`, `_BACKGROUNDCOLOR`, `_DISPLAY` as a function (the screen's image handle),
+- Transparency and blending: `_BLEND` / `_DONTBLEND`.
+- Images: `_SCREENIMAGE`, `_COPYPALETTE`, `_DISPLAY` as a function (the screen's image handle),
   `_CLIP` (`_PUTIMAGE` partly off the edge),
   `_MAPTRIANGLE` (textured triangles), `_DISPLAYORDER`, `_DEPTHBUFFER`.
-- Color functions: `_HSB32`, `_HSBA32`, `_HUE32`, `_SATURATION32`, `_BRIGHTNESS32`.
-- Fonts and text: `_FONTWIDTH`, `_FONTHEIGHT`, `_UPRINTSTRING`, `_UPRINTWIDTH`,
+- Fonts and text: `_UPRINTSTRING`, `_UPRINTWIDTH`,
   `_UFONTHEIGHT`, `_ULINESPACING`, `_UCHARPOS`, `_MAPUNICODE`, `_CONTROLCHR`, `_BLINK`.
-- The window: `_TITLE$`, `_SCREENMOVE`, `_SCREENX`, `_SCREENY`, `_SCREENEXISTS`,
-  `_SCREENHIDE`, `_SCREENSHOW`, `_SCREENICON`, `_ICON`, `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`,
-  `_DESKTOPREFRESHRATE`, `_WINDOWHASFOCUS`, `_WINDOWHANDLE`, `_WINDOWSIZELIMIT`,
-  `_ALLOWFULLSCREEN`, `_SCREENCLICK`, `_SCREENPRINT`, `_PRINTIMAGE`.
+- The window: `_WINDOWHANDLE`, `_WINDOWSIZELIMIT`,
+  `_ALLOWFULLSCREEN`, `_ICON`, `_SCREENCLICK`, `_SCREENPRINT`, `_PRINTIMAGE`.
 - Dropped files: `_ACCEPTFILEDROP`, `_TOTALDROPPEDFILES`, `_DROPPEDFILE`, `_FINISHDROP`.
 
 ### Mouse, keyboard and game controllers

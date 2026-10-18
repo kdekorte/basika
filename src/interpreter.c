@@ -4175,7 +4175,7 @@ enum {
     // _ERRORLINE, _ERRORMESSAGE$, the lock keys and _CLIPBOARD$.
     QB64_SYS_OS, QB64_SYS_UPTIME, QB64_SYS_COMMANDCOUNT, QB64_SYS_ENVIRONCOUNT,
     QB64_SYS_ERRORLINE, QB64_SYS_ERRORMESSAGE, QB64_SYS_CAPSLOCK, QB64_SYS_NUMLOCK,
-    QB64_SYS_SCROLLLOCK, QB64_SYS_CLIPBOARD
+    QB64_SYS_SCROLLLOCK, QB64_SYS_CLIPBOARD, QB64_SYS_TITLE
 };
 
 static int qb64_file_function_id(const char *name) {
@@ -4189,6 +4189,7 @@ static int qb64_file_function_id(const char *name) {
         {"_ERRORLINE", QB64_SYS_ERRORLINE}, {"_ERRORMESSAGE$", QB64_SYS_ERRORMESSAGE},
         {"_CAPSLOCK", QB64_SYS_CAPSLOCK}, {"_NUMLOCK", QB64_SYS_NUMLOCK},
         {"_SCROLLLOCK", QB64_SYS_SCROLLLOCK}, {"_CLIPBOARD$", QB64_SYS_CLIPBOARD},
+        {"_TITLE$", QB64_SYS_TITLE},
     };
     if (name[0] != '_') return QB64_FILE_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -4358,6 +4359,11 @@ static int qb64_file_function(int id, const BasicString *arg, double *number, Ba
 #else
             basic_string_append(out, "[64BIT]", 7);
 #endif
+            return 0;
+        }
+        case QB64_SYS_TITLE: {
+            const char *title = graphics_window_title();
+            basic_string_append(out, title, strlen(title));
             return 0;
         }
         case QB64_SYS_UPTIME: {
@@ -8381,6 +8387,10 @@ enum {
     QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT,
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
     QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
+    QB64_FN_HSB32, QB64_FN_HSBA32, QB64_FN_HUE32, QB64_FN_SATURATION32, QB64_FN_BRIGHTNESS32,
+    QB64_FN_PIXELSIZE, QB64_FN_DEFAULTCOLOR, QB64_FN_BACKGROUNDCOLOR, QB64_FN_PALETTECOLOR,
+    QB64_FN_FONTWIDTH, QB64_FN_FONTHEIGHT, QB64_FN_SCREENX, QB64_FN_SCREENY, QB64_FN_SCREENEXISTS,
+    QB64_FN_DESKTOPWIDTH, QB64_FN_DESKTOPHEIGHT, QB64_FN_DESKTOPREFRESHRATE, QB64_FN_WINDOWHASFOCUS,
     QB64_FN_MOUSEHIDDEN, QB64_FN_MOUSEMOVEMENTX, QB64_FN_MOUSEMOVEMENTY, QB64_FN_MOUSEDISABLED,
     QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE,
     QB64_FN_FULLSCREEN, QB64_FN_SNDPLAYING, QB64_FN_SNDPAUSED, QB64_FN_SNDLEN, QB64_FN_SNDGETPOS,
@@ -8408,6 +8418,15 @@ static int qb64_function_id(const char *name) {
         {"_MOUSEX", QB64_FN_MOUSEX}, {"_MOUSEY", QB64_FN_MOUSEY},
         {"_MOUSEBUTTON", QB64_FN_MOUSEBUTTON}, {"_MOUSEINPUT", QB64_FN_MOUSEINPUT},
         {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL},
+        {"_HSB32", QB64_FN_HSB32}, {"_HSBA32", QB64_FN_HSBA32}, {"_HUE32", QB64_FN_HUE32},
+        {"_SATURATION32", QB64_FN_SATURATION32}, {"_BRIGHTNESS32", QB64_FN_BRIGHTNESS32},
+        {"_PIXELSIZE", QB64_FN_PIXELSIZE}, {"_DEFAULTCOLOR", QB64_FN_DEFAULTCOLOR},
+        {"_BACKGROUNDCOLOR", QB64_FN_BACKGROUNDCOLOR}, {"_PALETTECOLOR", QB64_FN_PALETTECOLOR},
+        {"_FONTWIDTH", QB64_FN_FONTWIDTH}, {"_FONTHEIGHT", QB64_FN_FONTHEIGHT},
+        {"_SCREENX", QB64_FN_SCREENX}, {"_SCREENY", QB64_FN_SCREENY},
+        {"_SCREENEXISTS", QB64_FN_SCREENEXISTS}, {"_DESKTOPWIDTH", QB64_FN_DESKTOPWIDTH},
+        {"_DESKTOPHEIGHT", QB64_FN_DESKTOPHEIGHT}, {"_DESKTOPREFRESHRATE", QB64_FN_DESKTOPREFRESHRATE},
+        {"_WINDOWHASFOCUS", QB64_FN_WINDOWHASFOCUS},
         {"_MOUSEHIDDEN", QB64_FN_MOUSEHIDDEN}, {"_MOUSEMOVEMENTX", QB64_FN_MOUSEMOVEMENTX},
         {"_MOUSEMOVEMENTY", QB64_FN_MOUSEMOVEMENTY}, {"_MOUSEDISABLED", QB64_FN_MOUSEDISABLED}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
         {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
@@ -8525,6 +8544,65 @@ static double qb64_function_value(int id, const double *args, int argc) {
             return graphics_is_active() ? graphics_mouse_input() : 0;
         case QB64_FN_MOUSEWHEEL:
             return graphics_is_active() ? graphics_mouse_wheel() : 0;
+        case QB64_FN_HSB32:
+        case QB64_FN_HSBA32:
+            if (argc != (id == QB64_FN_HSB32 ? 3 : 4)) break;
+            last_expression_is_double = 1;
+            return (double)graphics_hsb_to_rgb(args[0], args[1], args[2], id == QB64_FN_HSB32 ? 100 : args[3]);
+        case QB64_FN_HUE32:
+        case QB64_FN_SATURATION32:
+        case QB64_FN_BRIGHTNESS32: {
+            if (argc != 1) break;
+            double hue, sat, bri;
+            graphics_rgb_to_hsb(color_from_value(args[0]), &hue, &sat, &bri);
+            last_expression_is_double = 1;
+            return id == QB64_FN_HUE32 ? hue : id == QB64_FN_SATURATION32 ? sat : bri;
+        }
+        case QB64_FN_PIXELSIZE:
+        case QB64_FN_DEFAULTCOLOR:
+        case QB64_FN_BACKGROUNDCOLOR: {
+            // [(handle)]: of the current destination when left out.
+            if (!graphics_is_active()) init_graphics();
+            int handle = argc >= 1 ? round_to_int(args[0]) : graphics_get_dest_handle();
+            if (id == QB64_FN_PIXELSIZE) {
+                int size = graphics_pixel_size(handle);
+                if (size < 0) break;
+                return size;
+            }
+            int ok;
+            unsigned int color = graphics_image_color(handle, id == QB64_FN_BACKGROUNDCOLOR, &ok);
+            if (!ok) break;
+            last_expression_is_double = 1;
+            return (double)color;
+        }
+        case QB64_FN_PALETTECOLOR: {
+            // _PALETTECOLOR(index[, handle]): the 32-bit color of a palette entry.
+            if (argc < 1 || argc > 2) break;
+            if (!graphics_is_active()) init_graphics();
+            unsigned int color;
+            if (!graphics_palette_color(round_to_int(args[0]), argc == 2 ? round_to_int(args[1]) : graphics_get_dest_handle(), &color)) break;
+            last_expression_is_double = 1;
+            return (double)color;
+        }
+        case QB64_FN_FONTWIDTH:
+        case QB64_FN_FONTHEIGHT: {
+            if (!graphics_is_active()) init_graphics();
+            int size = graphics_font_size(argc >= 1 ? round_to_int(args[0]) : -1, id == QB64_FN_FONTHEIGHT);
+            if (size < 0) break;
+            return size;
+        }
+        case QB64_FN_SCREENX:
+        case QB64_FN_SCREENY:
+            return graphics_is_active() ? graphics_window_position(id == QB64_FN_SCREENY) : 0;
+        case QB64_FN_SCREENEXISTS:
+            return graphics_is_active() ? -1 : 0;
+        case QB64_FN_DESKTOPWIDTH:
+        case QB64_FN_DESKTOPHEIGHT:
+            return graphics_desktop_size(id == QB64_FN_DESKTOPHEIGHT);
+        case QB64_FN_DESKTOPREFRESHRATE:
+            return graphics_desktop_refresh_rate();
+        case QB64_FN_WINDOWHASFOCUS:
+            return graphics_is_active() ? graphics_window_has_focus() : 0;
         case QB64_FN_MOUSEHIDDEN:
             return graphics_is_active() ? graphics_mouse_hidden() : 0;
         case QB64_FN_MOUSEMOVEMENTX:
@@ -11409,6 +11487,92 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && (strcasecmp(t.text, "_SCREENHIDE") == 0 ||
+                   strcasecmp(t.text, "_SCREENSHOW") == 0 || strcasecmp(t.text, "_SCREENICON") == 0)) {
+            // _SCREENHIDE, _SCREENSHOW and _SCREENICON (minimize)
+            if (!graphics_is_active()) init_graphics();
+            if (strcasecmp(t.text, "_SCREENICON") == 0) graphics_window_minimize();
+            else graphics_set_screen_hidden(strcasecmp(t.text, "_SCREENHIDE") == 0);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_SCREENMOVE") == 0) {
+            // _SCREENMOVE x, y  or  _SCREENMOVE _MIDDLE
+            if (!graphics_is_active()) init_graphics();
+            const char *saved_move = ptr;
+            Token first = get_next_token(&ptr);
+            if (first.type == TOKEN_IDENTIFIER && strcasecmp(first.text, "_MIDDLE") == 0) {
+                int w = 0, h = 0;
+                w = graphics_desktop_size(0);
+                h = graphics_desktop_size(1);
+                graphics_window_move_middle(w, h);
+            } else {
+                ptr = saved_move;
+                int x = evaluate_int_text(&ptr);
+                if (!next_graphics_comma(&ptr)) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+                int y = evaluate_int_text(&ptr);
+                if (!runtime_error_occurred) graphics_window_move(x, y);
+            }
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_SAVEIMAGE") == 0) {
+            // _SAVEIMAGE file$[, handle][, format$]
+            char file[1024] = "", format[32] = "";
+            parse_string_expression(&ptr, file, sizeof(file));
+            int handle = 0;
+            if (!runtime_error_occurred && next_graphics_comma(&ptr)) {
+                if (graphics_arg_present(&ptr)) handle = evaluate_int_text(&ptr);
+                if (next_graphics_comma(&ptr)) parse_string_expression(&ptr, format, sizeof(format));
+            }
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                if (!file[0] || !graphics_save_image(file, handle, format, NULL)) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                }
+            }
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_SETALPHA") == 0) {
+            // _SETALPHA alpha[, color1[ TO color2]][, handle]
+            int alpha = evaluate_int_text(&ptr);
+            unsigned int low = 0, high = 0;
+            int has_range = 0, handle = graphics_is_active() ? graphics_get_dest_handle() : 0;
+            if (next_graphics_comma(&ptr)) {
+                if (graphics_arg_present(&ptr)) {
+                    low = high = color_from_value(evaluate_expression(&ptr));
+                    has_range = 1;
+                    if (peek_token_type(ptr) == TOKEN_TO) {
+                        get_next_token(&ptr);
+                        high = color_from_value(evaluate_expression(&ptr));
+                    }
+                }
+                if (next_graphics_comma(&ptr)) handle = evaluate_int_text(&ptr);
+            }
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                if (!graphics_set_alpha(alpha, has_range, low, high, handle)) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                }
+            }
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_CLEARCOLOR") == 0) {
+            // _CLEARCOLOR color[, handle]
+            unsigned int color = color_from_value(evaluate_expression(&ptr));
+            int handle = graphics_is_active() ? graphics_get_dest_handle() : 0;
+            if (next_graphics_comma(&ptr)) handle = evaluate_int_text(&ptr);
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                if (!graphics_clear_color(color, handle)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_PALETTECOLOR") == 0) {
+            // _PALETTECOLOR index, color32[, handle]
+            int index = evaluate_int_text(&ptr);
+            if (!next_graphics_comma(&ptr)) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            unsigned int color = color_from_value(evaluate_expression(&ptr));
+            int handle = graphics_is_active() ? graphics_get_dest_handle() : 0;
+            if (next_graphics_comma(&ptr)) handle = evaluate_int_text(&ptr);
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                if (!graphics_set_palette_color(index, color, handle)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
         } else if (t.type == TOKEN_IDENTIFIER && (strcasecmp(t.text, "_MOUSEHIDE") == 0 ||
                    strcasecmp(t.text, "_MOUSESHOW") == 0 || strcasecmp(t.text, "_MOUSECURSOR") == 0)) {
             // _MOUSEHIDE; _MOUSESHOW [style$]; _MOUSECURSOR style$
@@ -11586,7 +11750,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             // _TITLE text$ sets the window title.
             char title[256] = "";
             parse_string_expression(&ptr, title, sizeof(title));
-            if (graphics_is_active()) set_window_title(title);
+            set_window_title(title);
         } else if (t.type == TOKEN_PCOPY) {
             // PCOPY source_page, destination_page
             int source = evaluate_int_text(&ptr);

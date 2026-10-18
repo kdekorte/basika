@@ -828,6 +828,7 @@ typedef struct {
 
 typedef struct {
     int in_use;
+    int transparent; /* _CLEARCOLOR was used: _PUTIMAGE blends by alpha */
     DrawState state; /* state.canvas is the image's texture */
 } ImageSlot;
 
@@ -1105,8 +1106,9 @@ int graphics_putimage_ex(int has_dest, int dx1, int dy1, int has_dest2, int dx2,
     SDL_BlendMode original;
     SDL_GetTextureBlendMode(source_texture, &original);
     // 32-bit images blend by alpha; the screen and palette images copy.
-    SDL_SetTextureBlendMode(source_texture, src->color_mode_32 && source != 0 ? SDL_BLENDMODE_BLEND
-                                                                              : SDL_BLENDMODE_NONE);
+    ImageSlot *source_image = image_for_handle(source);
+    int blends = src->color_mode_32 || (source_image && source_image->transparent);
+    SDL_SetTextureBlendMode(source_texture, blends && source != 0 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(renderer, dst->canvas);
     SDL_SetRenderClipRect(renderer, NULL);
     SDL_FlipMode flip = (SDL_FlipMode)((flip_x ? SDL_FLIP_HORIZONTAL : 0) | (flip_y ? SDL_FLIP_VERTICAL : 0));
@@ -1389,6 +1391,9 @@ int graphics_is_active() {
     return window != NULL;
 }
 
+static char window_title[256] = "";
+static int window_title_set = 0; /* _TITLE was used before or after the window opened */
+
 int init_graphics() {
     if (window) return 1;
     if (headless_mode) {
@@ -1410,6 +1415,7 @@ int init_graphics() {
     window = SDL_CreateWindow("BASIKA Virtual Framebuffer", 1024, 768, flags);
         
     if (!window) return 0;
+    if (window_title_set) SDL_SetWindowTitle(window, window_title);
     renderer = SDL_CreateRenderer(window, NULL); // Use default renderer flags
 
     set_screen_mode(2); // Default graphics mode when no SCREEN command is issued
@@ -2391,7 +2397,10 @@ int graphics_save_screenshot(const char *filename) {
 }
 
 void set_window_title(const char *title) {
-    if (!window || !title) return;
+    if (!title) return;
+    snprintf(window_title, sizeof(window_title), "%s", title);
+    window_title_set = 1;
+    if (!window) return;
     SDL_SetWindowTitle(window, title);
     graphics_present_now();
 }
@@ -2813,6 +2822,269 @@ int graphics_mouse_cursor(const char *style) {
     }
     return 0;
 }
+
+/* ---- QB64 image, color and window extras ---- */
+
+/* The RGB of a 32-bit color (&HAARRGGBB) as hue 0-360, saturation and
+ * brightness 0-100. Gray has hue 0. */
+void graphics_rgb_to_hsb(unsigned int color, double *hue, double *sat, double *bri) {
+    double r = ((color >> 16) & 0xFF) / 255.0, g = ((color >> 8) & 0xFF) / 255.0, b = (color & 0xFF) / 255.0;
+    double high = fmax(r, fmax(g, b)), low = fmin(r, fmin(g, b)), delta = high - low;
+    double h = 0;
+    if (delta > 0) {
+        if (high == r) h = fmod((g - b) / delta, 6.0);
+        else if (high == g) h = (b - r) / delta + 2;
+        else h = (r - g) / delta + 4;
+        h *= 60;
+        if (h < 0) h += 360;
+    }
+    if (hue) *hue = h;
+    if (sat) *sat = high > 0 ? delta / high * 100 : 0;
+    if (bri) *bri = high * 100;
+}
+
+/* _HSB32 / _HSBA32: out-of-range values are clipped; alpha is 0-100 percent. */
+unsigned int graphics_hsb_to_rgb(double hue, double sat, double bri, double alpha) {
+    if (hue < 0) hue = 0;
+    if (hue > 360) hue = 360;
+    if (sat < 0) sat = 0;
+    if (sat > 100) sat = 100;
+    if (bri < 0) bri = 0;
+    if (bri > 100) bri = 100;
+    if (alpha < 0) alpha = 0;
+    if (alpha > 100) alpha = 100;
+    double v = bri / 100, s = sat / 100;
+    double c = v * s, h = fmod(hue, 360.0) / 60.0;
+    double x = c * (1 - fabs(fmod(h, 2.0) - 1)), m = v - c;
+    double r = 0, g = 0, b = 0;
+    if (h < 1) { r = c; g = x; }
+    else if (h < 2) { r = x; g = c; }
+    else if (h < 3) { g = c; b = x; }
+    else if (h < 4) { g = x; b = c; }
+    else if (h < 5) { r = x; b = c; }
+    else { r = c; b = x; }
+    unsigned int R = (unsigned int)lround((r + m) * 255), G = (unsigned int)lround((g + m) * 255);
+    unsigned int B = (unsigned int)lround((b + m) * 255), A = (unsigned int)lround(alpha * 255 / 100);
+    return (A << 24) | (R << 16) | (G << 8) | B;
+}
+
+/* _PIXELSIZE[(handle)]: bytes per pixel, 4 for a 32-bit image and 1 for a
+ * palette image; 0 for text mode. -1 for a bad handle. */
+int graphics_pixel_size(int handle) {
+    if (handle == dest_handle) save_draw_state(state_for_handle(handle));
+    DrawState *state = state_for_handle(handle);
+    if (!state) return -1;
+    if (handle == 0 && state->screen_mode == 0) return 0;
+    return state->color_mode_32 ? 4 : 1;
+}
+
+/* _DEFAULTCOLOR / _BACKGROUNDCOLOR [(handle)]. Returns 0 and sets *ok to 0 for a bad handle. */
+unsigned int graphics_image_color(int handle, int background, int *ok) {
+    if (handle == dest_handle) save_draw_state(state_for_handle(handle));
+    DrawState *state = state_for_handle(handle);
+    *ok = state != NULL;
+    if (!state) return 0;
+    return background ? state->bg_color : state->fg_color;
+}
+
+/* _PALETTECOLOR(index[, handle]): the 32-bit color of a palette entry; -1 if the image has no palette. */
+int graphics_palette_color(int index, int handle, unsigned int *color) {
+    DrawState *state = state_for_handle(handle);
+    if (!state || state->color_mode_32 || index < 0 || index > 255) return 0;
+    if (!palette_initialized) init_palette256();
+    SDL_Color c = palette256[index];
+    *color = 0xFF000000u | ((unsigned int)c.r << 16) | ((unsigned int)c.g << 8) | c.b;
+    return 1;
+}
+
+/* _PALETTECOLOR index, color32[, handle]: sets one palette entry from a 32-bit color. */
+int graphics_set_palette_color(int index, unsigned int color, int handle) {
+    DrawState *state = state_for_handle(handle);
+    if (!state || state->color_mode_32 || index < 0 || index > 255) return 0;
+    if (!palette_initialized) init_palette256();
+    SDL_Color old_palette[256];
+    memcpy(old_palette, palette256, sizeof(palette256));
+    palette256[index] = (SDL_Color){(Uint8)((color >> 16) & 0xFF), (Uint8)((color >> 8) & 0xFF),
+                                    (Uint8)(color & 0xFF), 255};
+    if (handle == dest_handle) {
+        current_text_color = get_graphics_color(fg_color);
+        apply_palette_change(old_palette);
+    }
+    return 1;
+}
+
+/* Reads a whole image (0 = the visual page) as RGBA pixels, or NULL. */
+static SDL_Surface *read_image_surface(int handle) {
+    if (!renderer) return NULL;
+    DrawState *state = state_for_handle(handle);
+    if (!state) return NULL;
+    if (handle == dest_handle) save_draw_state(state);
+    SDL_Texture *texture = state->canvas;
+    if (handle == 0 && pages[visual_page]) texture = pages[visual_page];
+    SDL_Texture *previous = render_target;
+    SDL_SetRenderTarget(renderer, texture);
+    SDL_SetRenderClipRect(renderer, NULL);
+    SDL_Surface *raw = SDL_RenderReadPixels(renderer, NULL);
+    SDL_SetRenderTarget(renderer, previous ? previous : canvas);
+    if (!raw) return NULL;
+    SDL_Surface *rgba = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(raw);
+    return rgba;
+}
+
+/* Writes pixels back into an image's texture. */
+static void write_image_surface(int handle, SDL_Surface *surface) {
+    DrawState *state = state_for_handle(handle);
+    if (!state || !state->canvas) return;
+    SDL_Surface *converted = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA8888);
+    if (!converted) return;
+    SDL_UpdateTexture(state->canvas, NULL, converted->pixels, converted->pitch);
+    SDL_DestroySurface(converted);
+    if (handle == 0) graphics_present_if_autodisplay();
+}
+
+/* _SAVEIMAGE file$[, handle][, format$]: PNG, JPG, BMP, TGA, GIF, ICO or WEBP.
+ * A file extension decides the format, else format$, else PNG. */
+int graphics_save_image(const char *filename, int handle, const char *format, const char **used_extension) {
+    SDL_Surface *surface = read_image_surface(handle);
+    if (!surface) return 0;
+    const char *dot = strrchr(filename, '.');
+    const char *slash = strrchr(filename, '/');
+    const char *kind = dot && (!slash || dot > slash) ? dot + 1 : (format && format[0] ? format : "PNG");
+    char path[1100];
+    int ok = 0;
+    snprintf(path, sizeof(path), "%s", filename);
+    if (!(dot && (!slash || dot > slash))) {
+        char lower[16];
+        size_t n = 0;
+        for (; kind[n] && n < sizeof(lower) - 1; n++) lower[n] = (char)tolower((unsigned char)kind[n]);
+        lower[n] = '\0';
+        snprintf(path, sizeof(path), "%s.%s", filename, lower);
+        kind = lower;
+    }
+    if (strcasecmp(kind, "png") == 0) ok = IMG_SavePNG(surface, path);
+    else if (strcasecmp(kind, "jpg") == 0 || strcasecmp(kind, "jpeg") == 0) ok = IMG_SaveJPG(surface, path, 90);
+    else if (strcasecmp(kind, "bmp") == 0) ok = IMG_SaveBMP(surface, path);
+    else if (strcasecmp(kind, "tga") == 0) ok = IMG_SaveTGA(surface, path);
+    else if (strcasecmp(kind, "gif") == 0) ok = IMG_SaveGIF(surface, path);
+    else if (strcasecmp(kind, "ico") == 0) ok = IMG_SaveICO(surface, path);
+    else if (strcasecmp(kind, "webp") == 0) ok = IMG_SaveWEBP(surface, path, 90);
+    SDL_DestroySurface(surface);
+    (void)used_extension;
+    return ok ? 1 : 0;
+}
+
+/* _SETALPHA alpha[, color1[ TO color2]][, handle]: changes the alpha of the pixels of a 32-bit image. */
+int graphics_set_alpha(int alpha, int has_range, unsigned int low, unsigned int high, int handle) {
+    DrawState *state = state_for_handle(handle);
+    if (!state || !state->color_mode_32 || alpha < 0 || alpha > 255) return 0;
+    SDL_Surface *surface = read_image_surface(handle);
+    if (!surface) return 0;
+    int lr = (low >> 16) & 0xFF, lg = (low >> 8) & 0xFF, lb = low & 0xFF, la = (low >> 24) & 0xFF;
+    int hr = (high >> 16) & 0xFF, hg = (high >> 8) & 0xFF, hb = high & 0xFF, ha = (high >> 24) & 0xFF;
+    Uint8 *row = (Uint8 *)surface->pixels;
+    for (int y = 0; y < surface->h; y++, row += surface->pitch) {
+        for (int x = 0; x < surface->w; x++) {
+            Uint8 *px = row + x * 4; /* R, G, B, A */
+            if (has_range && !(px[0] >= lr && px[0] <= hr && px[1] >= lg && px[1] <= hg &&
+                               px[2] >= lb && px[2] <= hb && px[3] >= la && px[3] <= ha)) continue;
+            px[3] = (Uint8)alpha;
+        }
+    }
+    write_image_surface(handle, surface);
+    SDL_DestroySurface(surface);
+    return 1;
+}
+
+/* _CLEARCOLOR color[, handle]: makes one color transparent in an image. */
+int graphics_clear_color(unsigned int color, int handle) {
+    DrawState *state = state_for_handle(handle);
+    if (!state || handle == 0) return 0;
+    SDL_Surface *surface = read_image_surface(handle);
+    if (!surface) return 0;
+    int is32 = state->color_mode_32;
+    SDL_Color target = {0};
+    if (is32) target = (SDL_Color){(Uint8)((color >> 16) & 0xFF), (Uint8)((color >> 8) & 0xFF), (Uint8)(color & 0xFF), 255};
+    else {
+        if (!palette_initialized) init_palette256();
+        target = palette256[color & 255];
+    }
+    Uint8 *row = (Uint8 *)surface->pixels;
+    for (int y = 0; y < surface->h; y++, row += surface->pitch) {
+        for (int x = 0; x < surface->w; x++) {
+            Uint8 *px = row + x * 4;
+            if (px[0] == target.r && px[1] == target.g && px[2] == target.b) px[3] = 0;
+        }
+    }
+    if (!is32) {
+        /* A palette image has no alpha channel: it becomes a 32-bit image. */
+        ImageSlot *image = image_for_handle(handle);
+        if (image) image->transparent = 1;
+    }
+    write_image_surface(handle, surface);
+    SDL_DestroySurface(surface);
+    return 1;
+}
+
+/* _FONTWIDTH / _FONTHEIGHT [(handle)]: the cell size of a font (0 is not
+ * fixed width for loaded fonts, so the width of "W" is used). */
+int graphics_font_size(int handle, int want_height) {
+    if (handle == -1) handle = graphics_current_font();
+    if (is_default_font_handle(handle)) return want_height ? current_row_height : current_col_width;
+    int slot = handle - FONT_HANDLE_BASE;
+    if (slot < 0 || slot >= MAX_FONT_SLOTS || !font_slots[slot].in_use) return -1;
+    return want_height ? font_slots[slot].row_height : font_slots[slot].col_width;
+}
+
+/* ---- The window ---- */
+
+const char *graphics_window_title(void) {
+    if (window_title_set) return window_title;
+    return window ? SDL_GetWindowTitle(window) : "BASIKA Virtual Framebuffer";
+}
+
+int graphics_window_position(int y) {
+    int px = 0, py = 0;
+    if (window) SDL_GetWindowPosition(window, &px, &py);
+    return y ? py : px;
+}
+
+void graphics_window_move(int x, int y) {
+    if (window) SDL_SetWindowPosition(window, x, y);
+}
+
+void graphics_window_move_middle(int desktop_w, int desktop_h) {
+    int w = 0, h = 0;
+    if (!window) return;
+    SDL_GetWindowSize(window, &w, &h);
+    SDL_SetWindowPosition(window, (desktop_w - w) / 2, (desktop_h - h) / 2);
+}
+
+void graphics_window_minimize(void) {
+    if (window) SDL_MinimizeWindow(window);
+}
+
+int graphics_window_has_focus(void) {
+    return window && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) ? -1 : 0;
+}
+
+int graphics_desktop_size(int want_height) {
+    if (!window) SDL_InitSubSystem(SDL_INIT_VIDEO);
+    SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
+    if (!display) display = SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display);
+    if (!mode) return 0;
+    return want_height ? mode->h : mode->w;
+}
+
+int graphics_desktop_refresh_rate(void) {
+    if (!window) SDL_InitSubSystem(SDL_INIT_VIDEO);
+    SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
+    if (!display) display = SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display);
+    return mode ? (int)(mode->refresh_rate + 0.5f) : 0;
+}
+
 
 void handle_events() {
     if (!window) return;

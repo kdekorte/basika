@@ -41,7 +41,7 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
 `_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
-`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_MOUSEHIDDEN`, `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`, `_MOUSEDISABLED`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
+`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_MOUSEHIDDEN`, `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`, `_MOUSEDISABLED`, `_HSB32`, `_HSBA32`, `_HUE32`, `_SATURATION32`, `_BRIGHTNESS32`, `_PIXELSIZE`, `_DEFAULTCOLOR`, `_BACKGROUNDCOLOR`, `_PALETTECOLOR`, `_FONTWIDTH`, `_FONTHEIGHT`, `_SCREENX`, `_SCREENY`, `_SCREENEXISTS`, `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`, `_DESKTOPREFRESHRATE`, `_WINDOWHASFOCUS`, `_TITLE$`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
 `_FILEEXISTS`, `_DIREXISTS`, `_DIR$`, `_CWD$`, `_STARTDIR$`, `_FULLPATH$`, `_FILES$`, `_READFILE$`,
 the statement `_WRITEFILE`, the system functions `_OS$`, `_UPTIME`, `_COMMANDCOUNT`, `_ENVIRONCOUNT`,
 `_ERRORLINE`, `_ERRORMESSAGE$`, `_CAPSLOCK`, `_NUMLOCK`, `_SCROLLLOCK` and `_CLIPBOARD$` (also assignable), the statement `_KEYCLEAR`, the string functions `_TRIM$`, `_TOSTR$`, `_BIN$`, `_INSTRREV`, `_STRCMP`,
@@ -301,6 +301,14 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_KEYHIT`: The next key from a queue, positive when pressed and negative when released, or 0.
 - `_MOUSEX`, `_MOUSEY`, `_MOUSEBUTTON(n)`: The mouse position in screen pixels and whether button n (1 left, 2 right, 3 middle) is down (-1).
 - `_MOUSEINPUT`: -1 while unread mouse events remain (so `DO WHILE _MOUSEINPUT: LOOP` catches up), then 0. `_MOUSEWHEEL`: Wheel movement since it was last read.
+- `_HSB32(hue, saturation, brightness)`, `_HSBA32(hue, saturation, brightness, alpha)`: A 32-bit color from hue 0-360 and saturation, brightness and alpha 0-100 (percent); out-of-range values are clipped. `_HUE32(color)`, `_SATURATION32(color)`, `_BRIGHTNESS32(color)`: The parts back out, hue 0-360 (0 for gray) and the others 0-100.
+- `_SAVEIMAGE file$[, handle][, format$]`: Saves an image (0 or no handle is the screen) as PNG, JPG, BMP, TGA, GIF, ICO or WEBP. A file extension decides the format; without one, `format$` does, and PNG is the default, with the extension added.
+- `_SETALPHA alpha[, color1[ TO color2]][, handle]`: Sets the alpha (0-255) of the pixels of a 32-bit image: all of them, those of one color, or those whose red, green, blue and alpha fall in the range.
+- `_CLEARCOLOR color[, handle]`: Makes every pixel of that color transparent, so `_PUTIMAGE` shows what is behind it. A palette image keeps its palette but is drawn with transparency.
+- `_PIXELSIZE[(handle)]`: Bytes per pixel: 4 for a 32-bit image, 1 for a palette image, 0 for text mode. `_DEFAULTCOLOR[(handle)]`, `_BACKGROUNDCOLOR[(handle)]`: The image's foreground and background color.
+- `_PALETTECOLOR(index[, handle])`: The 32-bit color of a palette entry; `_PALETTECOLOR index, color32[, handle]` sets one.
+- `_FONTWIDTH[(font)]`, `_FONTHEIGHT[(font)]`: The size of a character cell of the current or a given font.
+- `_TITLE$`: The window title. `_SCREENX`, `_SCREENY`: Where the window is on the desktop. `_SCREENMOVE x, y` or `_SCREENMOVE _MIDDLE`: Moves it. `_SCREENHIDE`, `_SCREENSHOW`, `_SCREENICON`: Hide, show or minimize it. `_SCREENEXISTS`: -1 once there is a window. `_WINDOWHASFOCUS`: -1 while it has keyboard focus. `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`, `_DESKTOPREFRESHRATE`: The main display.
 - `_MOUSEHIDE`, `_MOUSESHOW [style$]`, `_MOUSECURSOR style$`, `_MOUSEMOVE x, y`: Hide or show the pointer, pick its shape (`"DEFAULT"`, `"LINK"`, `"TEXT"`, `"CROSSHAIR"`, `"VERTICAL"`, `"HORIZONTAL"`, `"TOPLEFT_BOTTOMRIGHT"`, `"TOPRIGHT_BOTTOMLEFT"`) and put it on a screen pixel.
 - `_MOUSEHIDDEN`: -1 while the pointer is hidden. `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`: Pointer movement in screen pixels since last read. `_MOUSEDISABLED`: -1 when there is no window to read a mouse from.
 - `_RGB32(r, g, b[, a])`, `_RGB32(gray[, a])`, `_RGBA32(r, g, b, a)`: Return a 32-bit `&HAARRGGBB` color. Channels are clamped to 0-255.

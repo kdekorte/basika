@@ -164,6 +164,7 @@ TESTS=(
   "tests/graphics/font_handles"
   "tests/graphics/printmode"
   "tests/graphics/fullscreen"
+  "tests/graphics/qb64_image_extras"
   "tests/math/qb64_types"
   "tests/math/integer_math"
   "tests/math/restore_label"
@@ -295,7 +296,8 @@ for t in "${TESTS[@]}"; do
     fi
     rm -f tests/drawing_alpha.png
     rm -f tests/drawing_alpha.result
-  elif [ "$t" = "tests/graphics/point_cache" ] || [ "$t" = "tests/graphics/paint_fill" ]; then
+  elif [ "$t" = "tests/graphics/point_cache" ] || [ "$t" = "tests/graphics/paint_fill" ] ||
+       [ "$t" = "tests/graphics/qb64_image_extras" ]; then
     # PRINT goes to the virtual screen, so these write tests/<name>.result.
     RESULT="tests/$(basename "$t").result"
     rm -f "$RESULT"
