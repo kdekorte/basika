@@ -10306,17 +10306,7 @@ static int execute_editor_command(const char *line) {
             clear_variables(0);
             clear_data_pointer();
         }
-        char buffer[BASIC_LINE_MAX];
-        int first_line = 1, physical_line = 0;
-        while (1) {
-            int source_line_number = physical_line + 1;
-            if (!read_program_line(file, buffer, sizeof(buffer), &physical_line)) break;
-            if (first_line) {
-                first_line = 0;
-                if (buffer[0] == '#' && buffer[1] == '!') continue;
-            }
-            interpret_line(buffer, 1, &last_line_num, source_line_number);
-        }
+        load_program_lines(file, resolved, &last_line_num);
         fclose(file);
         if (run_after) run_program();
     } else if (strcasecmp(command.text, "RENUM") == 0) {
@@ -10615,12 +10605,203 @@ int read_program_line(FILE *file, char *line, size_t size, int *physical_line) {
     }
 }
 
-static int load_program_file(const char *path) {
-    FILE *file = fopen(path, "r");
-    if (!file) return 0;
-    clear_program();
+/* ---- Metacommands read while loading a program: $INCLUDE, $INCLUDEONCE,
+ * $IF / $ELSEIF / $ELSE / $END IF, $LET, $SCREENHIDE and $SCREENSHOW ---- */
+
+#define MAX_INCLUDE_DEPTH 16
+#define MAX_META_IF_DEPTH 32
+#define MAX_META_VARS 64
+#define MAX_INCLUDE_ONCE 128
+
+static struct { char name[48]; long value; } meta_vars[MAX_META_VARS];
+static int meta_var_count = 0;
+static struct { int parent_active, taken, active; } meta_if[MAX_META_IF_DEPTH];
+static int meta_if_depth = 0;
+static char include_once_seen[MAX_INCLUDE_ONCE][PATH_MAX];
+static int include_once_count = 0;
+
+static void meta_set_var(const char *name, long value) {
+    for (int i = 0; i < meta_var_count; i++) {
+        if (strcasecmp(meta_vars[i].name, name) == 0) {
+            meta_vars[i].value = value;
+            return;
+        }
+    }
+    if (meta_var_count >= MAX_META_VARS) return;
+    snprintf(meta_vars[meta_var_count].name, sizeof(meta_vars[0].name), "%s", name);
+    meta_vars[meta_var_count++].value = value;
+}
+
+static void meta_reset(void) {
+    meta_var_count = 0;
+    meta_if_depth = 0;
+    include_once_count = 0;
+#ifdef __APPLE__
+    meta_set_var("MAC", -1); meta_set_var("MACOSX", -1);
+    meta_set_var("LINUX", 0);
+#else
+    meta_set_var("MAC", 0); meta_set_var("MACOSX", 0);
+    meta_set_var("LINUX", __linux__ ? -1 : 0);
+#endif
+    meta_set_var("WIN", 0); meta_set_var("WINDOWS", 0);
+    meta_set_var("32BIT", sizeof(void *) == 4 ? -1 : 0);
+    meta_set_var("64BIT", sizeof(void *) == 8 ? -1 : 0);
+}
+
+/* A name from the $IF/$LET words, or a number; unknown names are 0. */
+static long meta_value(const char *word) {
+    if (isdigit((unsigned char)word[0]) || (word[0] == '-' && isdigit((unsigned char)word[1]))) {
+        return strtol(word, NULL, 0);
+    }
+    for (int i = 0; i < meta_var_count; i++) {
+        if (strcasecmp(meta_vars[i].name, word) == 0) return meta_vars[i].value;
+    }
+    return 0;
+}
+
+/* Splits text into words: names, numbers and the operators = <> < > <= >=. */
+static int meta_words(const char *text, char words[][48], int max) {
+    int count = 0;
+    while (*text && count < max) {
+        while (isspace((unsigned char)*text)) text++;
+        if (!*text || *text == '\'') break;
+        int n = 0;
+        if (strchr("=<>", *text)) {
+            while (*text && strchr("=<>", *text) && n < 3) words[count][n++] = *text++;
+        } else {
+            while (*text && !isspace((unsigned char)*text) && !strchr("=<>", *text) && n < 47) {
+                words[count][n++] = *text++;
+            }
+        }
+        words[count][n] = '\0';
+        count++;
+    }
+    return count;
+}
+
+/* Evaluates "[NOT] a [op b] {AND|OR [NOT] c [op d]}" with a trailing THEN dropped. */
+static int meta_condition(const char *text) {
+    char words[24][48];
+    int count = meta_words(text, words, 24);
+    if (count > 0 && strcasecmp(words[count - 1], "THEN") == 0) count--;
+    int result = 0, have_result = 0, pending_or = 0, i = 0;
+    while (i < count) {
+        int negate = 0;
+        while (i < count && strcasecmp(words[i], "NOT") == 0) { negate = !negate; i++; }
+        if (i >= count) break;
+        long left = meta_value(words[i++]);
+        int truth = left != 0;
+        if (i + 1 < count && strchr("=<>", words[i][0])) {
+            const char *op = words[i];
+            long right = meta_value(words[i + 1]);
+            if (strcmp(op, "=") == 0) truth = left == right;
+            else if (strcmp(op, "<>") == 0) truth = left != right;
+            else if (strcmp(op, "<") == 0) truth = left < right;
+            else if (strcmp(op, ">") == 0) truth = left > right;
+            else if (strcmp(op, "<=") == 0) truth = left <= right;
+            else if (strcmp(op, ">=") == 0) truth = left >= right;
+            i += 2;
+        }
+        if (negate) truth = !truth;
+        if (!have_result) result = truth;
+        else result = pending_or ? (result || truth) : (result && truth);
+        have_result = 1;
+        if (i < count) {
+            pending_or = strcasecmp(words[i], "OR") == 0;
+            i++;
+        }
+    }
+    return result;
+}
+
+static int meta_active(void) { return meta_if_depth == 0 || meta_if[meta_if_depth - 1].active; }
+
+/* If line is a conditional metacommand, applies it and returns 1. */
+static int meta_conditional_line(const char *line) {
+    if (line[0] != '$') return 0;
+    if (strncasecmp(line, "$IF", 3) == 0 && !isalnum((unsigned char)line[3])) {
+        int parent = meta_active();
+        int truth = parent && meta_condition(line + 3);
+        if (meta_if_depth < MAX_META_IF_DEPTH) {
+            meta_if[meta_if_depth].parent_active = parent;
+            meta_if[meta_if_depth].taken = truth;
+            meta_if[meta_if_depth].active = truth;
+            meta_if_depth++;
+        }
+        return 1;
+    }
+    if (strncasecmp(line, "$ELSEIF", 7) == 0 && meta_if_depth > 0) {
+        int top = meta_if_depth - 1;
+        int truth = meta_if[top].parent_active && !meta_if[top].taken && meta_condition(line + 7);
+        meta_if[top].active = truth;
+        if (truth) meta_if[top].taken = 1;
+        return 1;
+    }
+    if (strncasecmp(line, "$ELSE", 5) == 0 && !isalnum((unsigned char)line[5]) && meta_if_depth > 0) {
+        int top = meta_if_depth - 1;
+        meta_if[top].active = meta_if[top].parent_active && !meta_if[top].taken;
+        meta_if[top].taken = 1;
+        return 1;
+    }
+    if ((strncasecmp(line, "$END IF", 7) == 0 || strncasecmp(line, "$ENDIF", 6) == 0) && meta_if_depth > 0) {
+        meta_if_depth--;
+        return 1;
+    }
+    if (strncasecmp(line, "$LET", 4) == 0 && isspace((unsigned char)line[4])) {
+        if (meta_active()) {
+            char words[4][48];
+            int count = meta_words(line + 4, words, 4);
+            if (count >= 3 && strcmp(words[1], "=") == 0) meta_set_var(words[0], meta_value(words[2]));
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* If line is $INCLUDE:'file' (or the comment form '$INCLUDE:'file'), copies
+ * the file name into name and returns 1. */
+static int meta_include_name(const char *line, char *name, size_t size) {
+    if (line[0] == '\'') line++;
+    if (strncasecmp(line, "$INCLUDE", 8) != 0 || strncasecmp(line, "$INCLUDEONCE", 12) == 0) return 0;
+    line += 8;
+    while (isspace((unsigned char)*line)) line++;
+    if (*line++ != ':') return 0;
+    while (isspace((unsigned char)*line)) line++;
+    if (*line++ != '\'') return 0;
+    const char *end = strchr(line, '\'');
+    if (!end || (size_t)(end - line) >= size) return 0;
+    memcpy(name, line, (size_t)(end - line));
+    name[end - line] = '\0';
+    return 1;
+}
+
+static int load_source_file(FILE *file, const char *path, int *last_line_num, int depth);
+
+static void include_program_file(const char *name, const char *including_path, int *last_line_num, int depth) {
+    char candidate[PATH_MAX], resolved[PATH_MAX];
+    FILE *file = NULL;
+    // Relative to the including file first, then the current folder.
+    const char *slash = including_path ? strrchr(including_path, '/') : NULL;
+    if (slash && name[0] != '/') {
+        snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)(slash - including_path), including_path, name);
+        file = open_program_file(candidate, "r", resolved, sizeof(resolved));
+    }
+    if (!file) file = open_program_file(name, "r", resolved, sizeof(resolved));
+    if (!file) {
+        fprintf(stderr, "Include file not found: %s\n", name);
+        return;
+    }
+    load_source_file(file, resolved, last_line_num, depth + 1);
+    fclose(file);
+}
+
+/* Reads a program source file line by line, expanding includes and dropping
+ * the lines a false $IF branch skips; hands the rest to interpret_line.
+ * Returns 0 if the file asked to be skipped ($INCLUDEONCE seen before). */
+static int load_source_file(FILE *file, const char *path, int *last_line_num, int depth) {
     char buffer[BASIC_LINE_MAX];
-    int first_line = 1, last_line_num = 0, physical_line = 0;
+    int first_line = depth == 0, physical_line = 0;
+    int if_base = meta_if_depth;
     while (1) {
         int source_line_number = physical_line + 1;
         if (!read_program_line(file, buffer, sizeof(buffer), &physical_line)) break;
@@ -10628,8 +10809,51 @@ static int load_program_file(const char *path) {
             first_line = 0;
             if (buffer[0] == '#' && buffer[1] == '!') continue;
         }
-        interpret_line(buffer, 1, &last_line_num, source_line_number);
+        const char *line = buffer;
+        while (isspace((unsigned char)*line)) line++;
+        if (meta_conditional_line(line)) continue;
+        if (!meta_active()) continue;
+        if (strncasecmp(line, "$INCLUDEONCE", 12) == 0) {
+            char real[PATH_MAX];
+            if (!realpath(path, real)) snprintf(real, sizeof(real), "%s", path);
+            int seen = 0;
+            for (int i = 0; i < include_once_count; i++) seen |= strcmp(include_once_seen[i], real) == 0;
+            if (seen) {
+                meta_if_depth = if_base;
+                return 0;
+            }
+            if (include_once_count < MAX_INCLUDE_ONCE) {
+                snprintf(include_once_seen[include_once_count++], PATH_MAX, "%s", real);
+            }
+            continue;
+        }
+        char name[PATH_MAX];
+        if (meta_include_name(line, name, sizeof(name))) {
+            if (depth + 1 >= MAX_INCLUDE_DEPTH) fprintf(stderr, "Includes nested too deeply: %s\n", name);
+            else include_program_file(name, path, last_line_num, depth);
+            continue;
+        }
+        if (strncasecmp(line, "$SCREENHIDE", 11) == 0) graphics_set_screen_hidden(1);
+        else if (strncasecmp(line, "$SCREENSHOW", 11) == 0) graphics_set_screen_hidden(0);
+        interpret_line(buffer, 1, last_line_num, depth == 0 ? source_line_number : 0);
     }
+    meta_if_depth = if_base;
+    return 1;
+}
+
+/* Loads a program file's lines into the program, as LOAD, MERGE and running
+ * a file do; last_line_num is where automatic line numbering continues. */
+void load_program_lines(FILE *file, const char *path, int *last_line_num) {
+    meta_reset();
+    load_source_file(file, path, last_line_num, 0);
+}
+
+static int load_program_file(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) return 0;
+    clear_program();
+    int last_line_num = 0;
+    load_program_lines(file, path, &last_line_num);
     fclose(file);
     return 1;
 }

@@ -5,6 +5,7 @@
 
 void interpret_line(const char *input, int is_direct, int *last_line_num, int source_line_number);
 int read_program_line(FILE *file, char *line, size_t size, int *physical_line);
+void load_program_lines(FILE *file, const char *path, int *last_line_num);
 void run_program();
 void compile_statement_expressions(Statement *stmt);
 void basic_output(const char *text); // Expose for program.c

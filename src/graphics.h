@@ -83,6 +83,8 @@ int graphics_mouse_cursor(const char *style);
 int graphics_stick(int n);
 void wait_for_keypress();
 void set_window_title(const char *title);
+void graphics_set_screen_hidden(int hidden);
+int graphics_screen_hidden(void);
 /* $RESIZE / _RESIZE: allow lets the user resize the window; scaling is
  * RESIZE_SCALE_NONE, _STRETCH or _SMOOTH (-1 keeps the current method). */
 enum { RESIZE_SCALE_NONE, RESIZE_SCALE_STRETCH, RESIZE_SCALE_SMOOTH };

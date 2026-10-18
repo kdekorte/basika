@@ -1370,6 +1370,16 @@ void get_text_cursor(int *row, int *col) {
 }
 
 static int headless_mode = 0;
+static int screen_hidden = 0; /* $SCREENHIDE */
+
+/* $SCREENHIDE / $SCREENSHOW: hide the window, or show it again. */
+void graphics_set_screen_hidden(int hidden) {
+    screen_hidden = hidden;
+    if (!window || headless_mode) return;
+    if (hidden) SDL_HideWindow(window); else SDL_ShowWindow(window);
+}
+
+int graphics_screen_hidden(void) { return screen_hidden; }
 
 void set_graphics_headless(int headless) {
     headless_mode = headless;
@@ -1390,7 +1400,7 @@ int init_graphics() {
     
     // Create a 4:3 Window (1024x768)
     SDL_WindowFlags flags = 0;
-    if (headless_mode) {
+    if (headless_mode || screen_hidden) {
         flags |= SDL_WINDOW_HIDDEN;
     }
     // Draw in the display's own pixels; otherwise a Retina display blurs every frame.

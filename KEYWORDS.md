@@ -50,7 +50,7 @@ the statement `_WRITEFILE`, the system functions `_OS$`, `_UPTIME`, `_COMMANDCOU
 `_ARCCOT`, `_SECH`, `_CSCH`, `_COTH`, `_D2R`, `_R2D`, `_D2G`, `_G2D`, `_R2G`, `_G2R`, and the bit
 functions `_SHL`, `_SHR`, `_ROL`, `_ROR`, `_SETBIT`, `_RESETBIT`, `_TOGGLEBIT`, `_READBIT`.
 
-Metacommand: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`.
+Metacommands: `$RESIZE:{ON|OFF|STRETCH|SMOOTH}`, `$NOPREFIX`, `$INCLUDE`, `$INCLUDEONCE`, `$IF`, `$LET`, `$SCREENHIDE`, `$SCREENSHOW`.
 
 Drawing is shown in the window automatically, at most once a frame. `_DISPLAY` presents the completed frame and, as in QB64, turns automatic presents off, so the window shows only finished frames until `_AUTODISPLAY` (or `_AUTODISPLAY ON`) turns them back on. `_AUTODISPLAY OFF` turns them off without presenting. The `_AUTODISPLAY` function returns -1 while presents are automatic and 0 otherwise.
 
@@ -289,6 +289,10 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `SYSTEM [code]`: Ends the program and Basika; the optional code is the process exit status.
 - `OPTION _EXPLICITARRAY`: Like `OPTION _EXPLICIT`, but only arrays must be declared.
 - `OPTION _EXPLICIT`: Every variable must be declared before the program runs, as in QB64: with `DIM`, `STATIC`, `COMMON` or `CONST` in its scope, `DIM SHARED` / `COMMON SHARED` or a module-level `CONST` for every scope, `SHARED` inside a procedure, or as a parameter or the `FUNCTION`'s own name. Otherwise the program stops before running with "Variable not defined: name" (error 92).
+- `$INCLUDE: 'file'` (or `'$INCLUDE:'file'` in a comment): Reads the file's lines into the program at that point. The file is looked up beside the including file, then in the current folder, with `.bas` added when the name has no extension. Includes may nest 16 deep. `$INCLUDEONCE` on a line of the included file loads it only the first time.
+- `$LET name = value`, `$IF cond THEN`, `$ELSEIF cond THEN`, `$ELSE`, `$END IF`: Choose lines while the program loads; the skipped lines never run or define SUBs. A condition is names and numbers joined by `= <> < > <= >=`, `NOT`, `AND` and `OR`, read left to right. Unset names are 0. Predefined (-1 or 0): `MAC`, `MACOSX`, `LINUX`, `WIN`, `WINDOWS`, `32BIT`, `64BIT`.
+- `$SCREENHIDE`, `$SCREENSHOW`: Keep the graphics window hidden, or show it again. A hidden window does not wait for a key when the program ends.
+- `$CONSOLE`, `$DYNAMIC`, `$STATIC`, `$EXEICON`, `$VERSIONINFO`: Accepted and ignored.
 - `$RESIZE:ON`: Lets the user resize the window. The metacommand applies to the whole program wherever it appears. `$RESIZE:STRETCH` and `$RESIZE:SMOOTH` also allow resizing; SMOOTH scales the screen with linear filtering instead of keeping hard pixels. `$RESIZE:OFF` (the default) keeps the window fixed. The screen is always scaled to fit the window with its proportions kept, so a program that wants the extra room creates a new screen of the new size:
   `IF _RESIZE THEN SCREEN _NEWIMAGE(_RESIZEWIDTH, _RESIZEHEIGHT, 32): GOSUB Redraw`
 - `_RESIZE`: -1 once after each user resize of the window, then 0. Size changes the program makes itself (`SCREEN _NEWIMAGE`) do not count. `_RESIZEWIDTH` and `_RESIZEHEIGHT` give the window's current size in pixels.

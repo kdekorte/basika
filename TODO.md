@@ -30,12 +30,8 @@ These come up in ordinary QB64 programs and are small to add.
 - Control flow: `_CONTINUE` (next loop iteration), `_IIF(condition, a, b)`, and the
   short-circuit `_ANDALSO` / `_ORELSE`.
 - System: `_CLIPBOARDIMAGE` (the other system keywords are done).
-- Metacommands. Every line starting with `$` other than `$RESIZE` and `$NOPREFIX` is skipped
-  today, so these are quietly ignored: `$INCLUDE` (and `$INCLUDEONCE`) most of all, since the
-  included SUBs and declarations go missing; `$CONSOLE` / `$CONSOLE:ONLY` (no window),
-  `$SCREENHIDE` / `$SCREENSHOW`, and `$IF` / `$ELSEIF` / `$ELSE` / `$END IF` / `$LET`, whose
-  branches all run. `$DYNAMIC`, `$STATIC`, `$EXEICON` and `$VERSIONINFO` can stay ignored.
-  `'$INCLUDE: 'file'` in a comment, the QBasic form, is ignored as well.
+- Metacommands: `$CONSOLE` is ignored (the terminal is the console). `$DYNAMIC`, `$STATIC`,
+  `$EXEICON` and `$VERSIONINFO` can stay ignored too.
 
 ### Graphics
 

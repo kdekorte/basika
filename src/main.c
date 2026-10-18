@@ -97,25 +97,12 @@ void run_file(const char *filename) {
         perror("Error opening file");
         return;
     }
-    char buffer[BASIC_LINE_MAX];
-    int first_line = 1;
     int last_line_num = 0;
-    int physical_line = 0;
-    while (1) {
-        // Errors name the first file line of a line continued with " _".
-        int source_line_number = physical_line + 1;
-        if (!read_program_line(f, buffer, sizeof(buffer), &physical_line)) break;
-        // Skip shebang line so .bas files can be marked executable
-        if (first_line) {
-            first_line = 0;
-            if (buffer[0] == '#' && buffer[1] == '!') continue;
-        }
-        interpret_line(buffer, 1, &last_line_num, source_line_number);
-    }
+    load_program_lines(f, filename, &last_line_num);
     fclose(f);
     run_program();
 
-    if (graphics_is_active()) {
+    if (graphics_is_active() && !graphics_screen_hidden()) {
         if (!exit_on_finish) set_window_title("BASIKA Virtual Framebuffer - Press any key to quit...");
         graphics_present_now();
         if (!exit_on_finish) wait_for_keypress();
