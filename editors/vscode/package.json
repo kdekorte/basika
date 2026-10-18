@@ -2,7 +2,7 @@
   "name": "basika-runner",
   "displayName": "Basika Runner",
   "description": "Run BASIC (.bas) programs with the basika interpreter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "kdekorte",
   "license": "MIT",
   "repository": {
