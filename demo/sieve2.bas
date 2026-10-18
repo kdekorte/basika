@@ -1,31 +1,25 @@
 ' Modern Structured BASIC Version
-DIM N AS LONG
-DIM Flags(1000000) AS _BYTE
-DIM Count AS LONG
-DIM StartTime AS DOUBLE
-DIM EndTime AS DOUBLE
-DIM I AS LONG, J AS LONG
+Dim N As Long = 1000000
+Dim Flags(N) As _Byte
+Dim Count As Long = 0
+Dim StartTime As Double = Timer
 
-N = 1000000
-Count = 0
-StartTime = TIMER
-
-PRINT "Sieving up to "; N; "..."
+Print "Sieving up to "; N; "..."
 
 ' Core Sieve Algorithm
-FOR I = 2 TO SQR(N)
-    IF Flags(I) = 0 THEN
-        FOR J = I * I TO N STEP I
+For I As Long = 2 To Sqr(N)
+    If Flags(I) = 0 Then
+        For J As Long = I * I To N Step I
             Flags(J) = 1
-        NEXT J
-    END IF
-NEXT I
+        Next J
+    End If
+Next I
 
 ' Count Primes
-FOR I = 2 TO N
-    IF Flags(I) = 0 THEN Count = Count + 1
-NEXT I
+For I As Long = 2 To N
+    If Flags(I) = 0 Then Count = Count + 1
+Next I
 
-EndTime = TIMER
-PRINT "Execution Time: "; EndTime - StartTime; " seconds"
-PRINT "Primes found: "; Count
+Dim EndTime As Double = Timer
+Print "Execution Time: "; EndTime - StartTime; " seconds"
+Print "Primes found: "; Count

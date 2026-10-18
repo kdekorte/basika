@@ -1,0 +1,16 @@
+G = 5
+SUB P: PRINT "G is"; G: END SUB
+SUB E: END SUB
+SUB Q (A, B): PRINT A + B: PRINT "two": END SUB
+FUNCTION SQ (X): SQ = X * X: END FUNCTION
+SUB MULTI: PRINT "multi start"
+  PRINT "multi end"
+END SUB
+SUB S: PRINT "a:b": END SUB ' comment
+PRINT "start"
+CALL P
+E
+Q 2, 3
+PRINT SQ(7)
+MULTI
+S

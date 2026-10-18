@@ -116,6 +116,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 ## Control Flow and Program Structure
 - `END`: Terminates program execution.
 - `FOR var = start TO end [STEP step] ... NEXT [var[, var...]]`: Standard loop. `NEXT j, i` closes the inner loop and then the outer one.
+- `FOR var AS type = start TO end [STEP step]`: As in FreeBASIC, also declares the counter's type (`FOR i AS LONG = 1 TO n`), which it keeps after the loop. Declaring it again with a different type is a Duplicate Definition error.
 - `GOSUB line|label ... RETURN`: Subroutine call and return.
 - `GOTO line|label`: Unconditional jump.
 - `IF condition THEN [line | label | statement] [ELSE statement]`: Conditional execution. Multiline `IF...THEN` blocks support `ELSEIF`, `ELSE`, and `END IF`, including nesting and use in procedures.
@@ -154,6 +155,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `CONST name = value[, name = value...]`: Defines constants, numbers or strings (`CONST TITLE = "Demo"` needs no `$`). Constants defined at module level can be used inside every procedure.
 - `LBOUND(array[, dimension])`, `UBOUND(array[, dimension])`: Lowest and highest subscript of an array dimension (default 1); "Subscript out of range" for an array that is not dimensioned.
 - `DIM [SHARED] name[(bounds)] AS type[, ...]`: Declares a scalar or array of `INTEGER`, `LONG`, `_UNSIGNED LONG`, `SINGLE`, `DOUBLE`, `STRING`, or a user-defined type. The name is then used without a suffix (`DIM count AS INTEGER` makes `count` and `count%` the same variable). Declarations inside a `SUB` or `FUNCTION` are local to it.
+- `DIM name AS type = value[, name2 AS type = value2...]`: As in FreeBASIC, gives a scalar its first value (`DIM n AS LONG = 1000000`); arrays and user-defined types cannot be initialized this way.
 - `DIM SHARED ...`: At module level, makes the declared variables and arrays visible inside every `SUB` and `FUNCTION` without a `SHARED` statement.
 - Type suffixes: `%%` _BYTE (8-bit), `%` INTEGER (16-bit), `&` LONG (32-bit), `&&` _INTEGER64, `!` SINGLE, `#` DOUBLE, `$` STRING; a `~` before an integer suffix (`~%%`, `~%`, `~&`, `~&&`) makes it `_UNSIGNED`. The `AS` names are `_BYTE`, `INTEGER`, `LONG`, `_INTEGER64`, each optionally preceded by `_UNSIGNED`. Integer variables hold exact 64-bit values, so `_INTEGER64` is exact over its whole range. Unsigned values wrap around like QB64. Integer assignments round half to even like QBasic (`2.5` becomes 2, `3.5` becomes 4) and report Overflow when out of range.
 - `DIM name AS STRING * n`: Declares a fixed-width scalar string padded with spaces.
