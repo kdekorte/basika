@@ -47,13 +47,48 @@ static bool tracked_render_clear(SDL_Renderer *r) {
     return SDL_RenderClear(r);
 }
 
+/* An unblended fill of whole pixels changes POINT's copy the same way it
+ * changes the texture, so it is done to both and the copy is kept; reads
+ * between such writes (POINT, PSET, POINT, ...) stay off the GPU. Returns 0
+ * when the copy has to be dropped instead. Fills before the copy exists
+ * leave the read count alone, since the copy is taken from the texture. */
+static int fill_point_cache(SDL_Renderer *r, const SDL_FRect *rects, int count) {
+    if (render_target == NULL || render_target != point_cache_texture) return 1;
+    SDL_BlendMode mode;
+    if (!SDL_GetRenderDrawBlendMode(r, &mode) || mode != SDL_BLENDMODE_NONE) return 0;
+    SDL_Rect clip;
+    if (SDL_RenderClipEnabled(r) && SDL_GetRenderClipRect(r, &clip)) return 0;
+    if (!point_cache) return 1;
+    for (int i = 0; i < count; i++) {
+        const SDL_FRect *f = &rects[i];
+        if (f->x != floorf(f->x) || f->y != floorf(f->y) ||
+            f->w != floorf(f->w) || f->h != floorf(f->h)) return 0;
+    }
+    Uint8 cr, cg, cb, ca;
+    SDL_GetRenderDrawColor(r, &cr, &cg, &cb, &ca);
+    Uint32 pixel = ((Uint32)ca << 24) | ((Uint32)cr << 16) | ((Uint32)cg << 8) | cb;
+    for (int i = 0; i < count; i++) {
+        int x0 = (int)rects[i].x, y0 = (int)rects[i].y;
+        int x1 = x0 + (int)rects[i].w, y1 = y0 + (int)rects[i].h;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > point_cache->w) x1 = point_cache->w;
+        if (y1 > point_cache->h) y1 = point_cache->h;
+        for (int y = y0; y < y1; y++) {
+            Uint32 *row = (Uint32 *)((Uint8 *)point_cache->pixels + (size_t)y * point_cache->pitch);
+            for (int x = x0; x < x1; x++) row[x] = pixel;
+        }
+    }
+    return 1;
+}
+
 static bool tracked_render_fill_rect(SDL_Renderer *r, const SDL_FRect *rect) {
-    drop_point_cache(render_target);
+    if (!rect || !fill_point_cache(r, rect, 1)) drop_point_cache(render_target);
     return SDL_RenderFillRect(r, rect);
 }
 
 static bool tracked_render_fill_rects(SDL_Renderer *r, const SDL_FRect *rects, int count) {
-    drop_point_cache(render_target);
+    if (!fill_point_cache(r, rects, count)) drop_point_cache(render_target);
     return SDL_RenderFillRects(r, rects, count);
 }
 

@@ -23,8 +23,8 @@ INTEGER * INTEGER
   Overflow 6 
 LONG + 1
   Overflow 6 
-_INTEGER64 + 1
-  Overflow 6 
+_INTEGER64 + 1 wraps
+-9223372036854775808 
 negate -32768
   Overflow 6 
 -32768 \ -1

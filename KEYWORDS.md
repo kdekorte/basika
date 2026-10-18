@@ -169,7 +169,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 
 ## Operators
 - Precedence, from tightest to loosest, as in QBasic: `^` (left to right, so `2 ^ 3 ^ 2` is 64), negation (`-2 ^ 2` is -4), `*` and `/`, `\`, `MOD`, `+` and `-`, the relations `=`, `<>`, `<`, `<=`, `>`, `>=`, then `NOT`, `AND`, `OR`, `XOR`.
-- Arithmetic types follow QBasic: an operation takes the larger of its operands' types (INTEGER < LONG < `_INTEGER64` < `_UNSIGNED _INTEGER64` < SINGLE < DOUBLE). An INTEGER, LONG or `_INTEGER64` result that does not fit its type is an Overflow error even when it is assigned to a wider variable, so `a% * b%` with 200 and 200 overflows; write `CLNG(a%) * b%`. `_UNSIGNED _INTEGER64` arithmetic wraps around. `_BYTE` and the smaller unsigned types compute as LONG.
+- Arithmetic types follow QBasic: an operation takes the larger of its operands' types (INTEGER < LONG < `_INTEGER64` < `_UNSIGNED _INTEGER64` < SINGLE < DOUBLE). An INTEGER or LONG result that does not fit its type is an Overflow error even when it is assigned to a wider variable, so `a% * b%` with 200 and 200 overflows; write `CLNG(a%) * b%`. `_INTEGER64` and `_UNSIGNED _INTEGER64` arithmetic wraps around, as in QB64. `_BYTE` and the smaller unsigned types compute as LONG.
 - `/` and `^` always give a floating-point result. `\` and `MOD` round floating-point operands to whole numbers first (`7.6 \ 2` is 4) and keep integer types.
 - Comparisons between integers are exact, including against floating-point values, and give -1 (true) or 0 (false).
 - `AND`, `OR`, `XOR`, `EQV`, `IMP`, `NOT`: Bitwise operations on whole numbers (floating-point operands are rounded) at the width of their operand types. `a EQV b` is `NOT (a XOR b)` and `a IMP b` is `NOT a OR b`.

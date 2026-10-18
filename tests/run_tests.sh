@@ -59,6 +59,7 @@ TESTS=(
   "tests/system/metacommands"
   "tests/system/inline_declarations"
   "tests/system/one_line_procedures"
+  "tests/system/block_if_comments"
   "tests/file_io/shell_test"
   "tests/audio/sound_play"
   "tests/audio/no_audio"

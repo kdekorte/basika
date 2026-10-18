@@ -1296,15 +1296,9 @@ NUM_COLD Num num_arith_slow(int op, Num a, Num b) {
         int64_t r = op == '+' ? a.i + b.i : op == '-' ? a.i - b.i : a.i * b.i;
         return num_small_result(r, kind);
     }
-    if (kind == NUM_INT64) {
-        int64_t r;
-        int overflow = op == '+' ? __builtin_add_overflow(a.i, b.i, &r)
-                     : op == '-' ? __builtin_sub_overflow(a.i, b.i, &r)
-                                 : __builtin_mul_overflow(a.i, b.i, &r);
-        if (overflow) return num_overflow(kind);
-        return num_i(r, kind);
-    }
-    if (kind == NUM_UINT64) {
+    // _INTEGER64 wraps around like QB64's C++ int64_t, so the usual 64-bit
+    // random number generators (seed * 25214903917 + 11) work.
+    if (kind == NUM_INT64 || kind == NUM_UINT64) {
         uint64_t x = (uint64_t)a.i, y = (uint64_t)b.i;
         return num_i((int64_t)(op == '+' ? x + y : op == '-' ? x - y : x * y), kind);
     }
@@ -1335,11 +1329,7 @@ NUM_HOT Num num_multiply(Num a, Num b) {
 
 static Num num_negate(Num a) {
     if (a.kind <= NUM_LONG) return num_small_result(-a.i, a.kind);
-    if (a.kind == NUM_INT64) {
-        if (a.i == INT64_MIN) return num_overflow(a.kind);
-        return num_i(-a.i, a.kind);
-    }
-    if (a.kind == NUM_UINT64) return num_i((int64_t)(0 - (uint64_t)a.i), a.kind);
+    if (a.kind == NUM_INT64 || a.kind == NUM_UINT64) return num_i((int64_t)(0 - (uint64_t)a.i), a.kind);
     return num_f(-a.d, a.kind);
 }
 
@@ -3703,22 +3693,35 @@ typedef struct {
     int else_seen;
 } BlockIfFrame;
 
+/* The tokens of a statement before a trailing ' or REM comment. */
+static int tokens_before_comment(const Statement *stmt) {
+    int count = stmt->token_count;
+    if (count > 0 && (stmt->tokens[count - 1].type == TOKEN_APOSTROPHE ||
+                      stmt->tokens[count - 1].type == TOKEN_REM)) {
+        count--;
+    }
+    return count;
+}
+
 static int is_block_if_header(const Statement *stmt) {
     if (!stmt || stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_IF) {
         return 0;
     }
-    return stmt->tokens[stmt->token_count - 1].type == TOKEN_THEN;
+    int count = tokens_before_comment(stmt);
+    return count >= 2 && stmt->tokens[count - 1].type == TOKEN_THEN;
 }
 
 static int is_block_elseif_header(const Statement *stmt) {
     if (!stmt || stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_ELSEIF) {
         return 0;
     }
-    return stmt->tokens[stmt->token_count - 1].type == TOKEN_THEN;
+    int count = tokens_before_comment(stmt);
+    return count >= 2 && stmt->tokens[count - 1].type == TOKEN_THEN;
 }
 
 static int is_block_else(const Statement *stmt) {
-    return stmt && stmt->token_count == 1 && stmt->tokens[0].type == TOKEN_ELSE;
+    return stmt && stmt->token_count >= 1 && stmt->tokens[0].type == TOKEN_ELSE &&
+           tokens_before_comment(stmt) == 1;
 }
 
 static int is_end_if(const Statement *stmt) {

@@ -1,6 +1,6 @@
 ' Integer arithmetic is exact and follows QBasic: INTEGER and LONG results
 ' that do not fit are Overflow errors, _INTEGER64 is exact over its whole
-' range, and _UNSIGNED _INTEGER64 wraps. Also covers operator precedence.
+' range, and _INTEGER64 and _UNSIGNED _INTEGER64 wrap. Also covers operator precedence.
 DECLARE SUB Swapper (a AS LONG, b AS LONG)
 DEF FNHALF% (X) = X / 2
 PRINT 2 ^ 3; 2 ^ 3 ^ 2; -2 ^ 2; 2 ^ -1
@@ -29,7 +29,7 @@ ON ERROR GOTO Trap
 a% = 200: b% = 200
 PRINT "INTEGER * INTEGER": c& = a% * b%
 PRINT "LONG + 1": z& = 2147483647: z& = z& + 1
-PRINT "_INTEGER64 + 1": w&& = max&& + 1
+PRINT "_INTEGER64 + 1 wraps": w&& = max&& + 1: PRINT w&&
 PRINT "negate -32768": n% = -32768: n% = -n%
 PRINT "-32768 \ -1": n% = -32768: n% = n% \ -1
 PRINT "FOR past 32767": FOR n% = 32766 TO 32767: NEXT
