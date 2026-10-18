@@ -1,0 +1,3 @@
+10 SUB P: PRINT "in P": END SUB
+20 P
+30 PRINT "done"

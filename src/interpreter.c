@@ -10894,8 +10894,17 @@ static int starts_with_word(const char *text, const char *word) {
 
 /* A one-line procedure, SUB P: PRINT G: END SUB, is loaded as its header,
  * its body and its END SUB on separate lines, the way the procedure scan
- * expects them. Returns 0 for any other line. Numbered lines stay as is. */
+ * expects them. Returns 0 for any other line. A numbered line keeps its number
+ * on the header; the body and END SUB take the next two numbers. */
 static int load_one_line_procedure(const char *line, int *last_line_num, int source_line_number) {
+    const char *header = line;
+    long number = -1;
+    if (isdigit((unsigned char)*line)) {
+        char *after;
+        number = strtol(line, &after, 10);
+        line = after;
+        while (isspace((unsigned char)*line)) line++;
+    }
     const char *keyword = starts_with_word(line, "SUB") ? "SUB"
                         : starts_with_word(line, "FUNCTION") ? "FUNCTION" : NULL;
     if (!keyword) return 0;
@@ -10926,8 +10935,8 @@ static int load_one_line_procedure(const char *line, int *last_line_num, int sou
     }
     if (!has_end) last_colon = NULL;
 
-    char part[BASIC_LINE_MAX];
-    snprintf(part, sizeof(part), "%.*s", (int)(first_colon - line), line);
+    char part[BASIC_LINE_MAX], text[BASIC_LINE_MAX];
+    snprintf(part, sizeof(part), "%.*s", (int)(first_colon - header), header);
     interpret_line(part, 1, last_line_num, source_line_number);
     const char *body = first_colon + 1;
     int body_length = last_colon ? (int)(last_colon - body) : (int)strlen(body);
@@ -10935,10 +10944,19 @@ static int load_one_line_procedure(const char *line, int *last_line_num, int sou
     int blank = 1;
     for (int i = 0; i < body_length; i++) blank &= isspace((unsigned char)body[i]) != 0;
     if (!blank) {
-        snprintf(part, sizeof(part), "%.*s", body_length, body);
+        snprintf(text, sizeof(text), "%.*s", body_length, body);
+        if (number >= 0) snprintf(part, sizeof(part), "%ld %s", number + 1, text);
+        else snprintf(part, sizeof(part), "%s", text);
         interpret_line(part, 1, last_line_num, source_line_number);
     }
-    if (has_end) interpret_line(tail, 1, last_line_num, source_line_number);
+    if (has_end) {
+        if (number >= 0) {
+            snprintf(part, sizeof(part), "%ld %s", number + 2, tail);
+            interpret_line(part, 1, last_line_num, source_line_number);
+        } else {
+            interpret_line(tail, 1, last_line_num, source_line_number);
+        }
+    }
     return 1;
 }
 
