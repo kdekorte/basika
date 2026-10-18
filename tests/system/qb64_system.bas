@@ -1,0 +1,21 @@
+' QB64 system functions
+os$ = _OS$
+PRINT INSTR(os$, "[64BIT]") > 0, LEFT$(os$, 1)
+t# = _UPTIME
+PRINT t# >= 0, t# < 30
+PRINT _COMMANDCOUNT
+PRINT _ENVIRONCOUNT > 0
+PRINT "[" + _ERRORMESSAGE$ + "]", _ERRORLINE
+ON ERROR GOTO handler
+OPEN "no_such_folder/x" FOR INPUT AS #1
+PRINT "continued"
+saved$ = _CLIPBOARD$
+_CLIPBOARD$ = "basika clip"
+PRINT _CLIPBOARD$
+_CLIPBOARD$ = saved$
+_KEYCLEAR
+PRINT _CAPSLOCK = 0 OR _CAPSLOCK = -1
+END
+handler:
+PRINT _ERRORMESSAGE$; " at"; _ERRORLINE
+RESUME NEXT

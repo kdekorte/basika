@@ -1,0 +1,100 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Basika BASIC",
+  "scopeName": "source.basika",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#metacommands"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#labels"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.apostrophe.basika",
+          "match": "'.*$"
+        },
+        {
+          "name": "comment.line.rem.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])REM\\b.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.basika",
+      "begin": "\"",
+      "end": "\"|$"
+    },
+    "metacommands": {
+      "name": "meta.preprocessor.basika",
+      "match": "(?i)^\\s*\\$[A-Za-z]+.*$"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.basika",
+          "match": "(?i)&H[0-9A-F]+(?:~?&&?|%)?"
+        },
+        {
+          "name": "constant.numeric.octal.basika",
+          "match": "(?i)&O?[0-7]+(?:~?&&?|%)?"
+        },
+        {
+          "name": "constant.numeric.binary.basika",
+          "match": "(?i)&B[01]+(?:~?&&?|%)?"
+        },
+        {
+          "name": "constant.numeric.basika",
+          "match": "(?i)(?<![A-Za-z0-9_$])(?:\\d+\\.?\\d*|\\.\\d+)(?:[ED][+-]?\\d+)?(?:~?&&|[%&!#])?"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])(FUNCTION|ELSEIF|RESUME|RETURN|SELECT|SYSTEM|CHAIN|GOSUB|UNTIL|WHILE|CALL|CASE|ELSE|EXIT|GOTO|LOOP|NEXT|QUIT|STEP|STOP|THEN|WEND|END|FOR|RUN|SUB|DO|IF|ON|TO)(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "keyword.operator.word.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])(AND|EQV|IMP|MOD|NOT|XOR|OR)(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "storage.type.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])(_INTEGER64|_UNSIGNED|INTEGER|_OFFSET|DOUBLE|SINGLE|STRING|_FLOAT|_BYTE|LONG|_BIT|_MEM)(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "storage.modifier.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])(DECLARE|COMMON|DEFDBL|DEFINT|DEFLNG|DEFSNG|DEFSTR|OPTION|SHARED|STATIC|CONST|ERASE|TYPE|DEF|DIM|LET|AS)(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "support.function.qb64.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])(_FILLBACKGROUND|_KEEPBACKGROUND|_ONLYBACKGROUND|_ERRORMESSAGE\\$|_EXPLICITARRAY|_COMMANDCOUNT|_ENVIRONCOUNT|_RESIZEHEIGHT|_SQUAREPIXELS|_AUTODISPLAY|_MOUSEBUTTON|_PRINTSTRING|_RESIZEWIDTH|_SNDPLAYCOPY|_SNDPLAYFILE|_CLIPBOARD\\$|_FILEEXISTS|_FULLSCREEN|_MOUSEINPUT|_MOUSEWHEEL|_PRINTWIDTH|_SCROLLLOCK|_SNDPLAYING|_COPYIMAGE|_DIREXISTS|_ERRORLINE|_FREEIMAGE|_FULLPATH\\$|_LOADIMAGE|_PRINTMODE|_READFILE\\$|_SNDGETPOS|_SNDPAUSED|_STARTDIR\\$|_TOGGLEBIT|_WRITEFILE|_CAPSLOCK|_DEFLATE\\$|_EXPLICIT|_FREEFONT|_INFLATE\\$|_INSTRREV|_KEYCLEAR|_LOADFONT|_NEWIMAGE|_PUTIMAGE|_RESETBIT|_SNDCLOSE|_SNDPAUSE|_ALPHA32|_DISPLAY|_GREEN32|_KEYDOWN|_NUMLOCK|_READBIT|_SNDLOOP|_SNDOPEN|_SNDPLAY|_SNDSTOP|_STRETCH|_STRICMP|_ARCCOT|_ARCCSC|_ARCSEC|_BLUE32|_FILES\\$|_HEIGHT|_KEYHIT|_MOUSEX|_MOUSEY|_RESIZE|_RGBA32|_SETBIT|_SMOOTH|_SNDLEN|_SNDVOL|_SOURCE|_STRCMP|_TOSTR\\$|_UPTIME|_ACOSH|_ALPHA|_ASINH|_ATAN2|_ATANH|_CLAMP|_DELAY|_GREEN|_HYPOT|_LIMIT|_RED32|_RGB32|_ROUND|_TITLE|_TRIM\\$|_WIDTH|_ACOS|_ASIN|_BIN\\$|_BLUE|_CEIL|_COSH|_COTH|_CSCH|_CWD\\$|_DEST|_DIR\\$|_FONT|_RGBA|_SECH|_SINH|_TANH|_COT|_CSC|_D2G|_D2R|_G2D|_G2R|_MAX|_MIN|_OS\\$|_R2D|_R2G|_RED|_RGB|_ROL|_ROR|_SEC|_SHL|_SHR|_PI)(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "support.function.basika",
+          "match": "(?i)(?<![A-Za-z0-9_.$])(SCREENSHOT|RANDOMIZE|COMMAND\\$|ENVIRON\\$|ENVIRON|PALETTE|RESTORE|REVERSE|STRING\\$|CIRCLE|DELETE|INKEY\\$|INPUT\\$|LBOUND|LCASE\\$|LOCATE|LTRIM\\$|PRESET|RIGHT\\$|RTRIM\\$|SCREEN|SPACE\\$|UBOUND|UCASE\\$|UNLOCK|VARPTR|WINDOW|ARGV\\$|CHDIR|CLEAR|CLOSE|COLOR|DATE\\$|ERROR|FIELD|FILES|INPUT|INSTR|LEFT\\$|MKDIR|PAINT|PCOPY|PRINT|RMDIR|SHELL|SLEEP|SOUND|STICK|STRIG|TIME\\$|TIMER|TRIM\\$|USING|WIDTH|WRITE|ARGC|BASE|BEEP|CDBL|CHR\\$|CINT|CLNG|CONT|CSNG|DATA|DRAW|GET\\$|HEX\\$|KILL|LINE|LIST|LOCK|LSET|MID\\$|MKD\\$|MKI\\$|MKL\\$|MKS\\$|NAME|OCT\\$|OPEN|PEEK|PLAY|POKE|PSET|READ|RSET|SEEK|STR\\$|SWAP|VIEW|WAIT|ABS|ASC|ATN|CLS|COS|CVD|CVI|CVL|CVS|EOF|EXP|FIX|GET|INT|KEY|LEN|LOC|LOF|LOG|NEW|OFF|PEN|PUT|RND|SGN|SIN|SPC|SQR|TAB|TAN|VAL)(?![A-Za-z0-9_])"
+        }
+      ]
+    },
+    "labels": {
+      "name": "entity.name.label.basika",
+      "match": "^\\s*[A-Za-z_][A-Za-z0-9_]*(?=:)"
+    }
+  }
+}

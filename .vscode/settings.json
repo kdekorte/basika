@@ -7,5 +7,6 @@
             "matchCommandLine": true
         },
         "./tests/run_tests.sh": true
-    }
+    },
+    "makefile.configureOnOpen": false
 }

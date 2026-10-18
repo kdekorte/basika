@@ -301,6 +301,8 @@ static const char *find_qb64_name(const char *name) {
         "_SNDPLAYCOPY", "_SNDPLAYFILE", "_SNDPLAYING", "_SNDPAUSED", "_SNDLEN", "_SNDGETPOS",
         "_FILEEXISTS", "_DIREXISTS", "_DIR$", "_CWD$", "_STARTDIR$", "_FULLPATH$", "_FILES$",
         "_READFILE$", "_WRITEFILE",
+        "_OS$", "_UPTIME", "_COMMANDCOUNT", "_ENVIRONCOUNT", "_ERRORLINE", "_ERRORMESSAGE$",
+        "_CAPSLOCK", "_NUMLOCK", "_SCROLLLOCK", "_CLIPBOARD$", "_KEYCLEAR",
         "_TRIM$", "_TOSTR$", "_BIN$", "_INSTRREV", "_STRCMP", "_STRICMP",
         "_MIN", "_MAX", "_CLAMP", "_CEIL", "_HYPOT", "_ATAN2", "_ACOS", "_ASIN", "_ACOSH", "_ASINH",
         "_ATANH", "_COSH", "_SINH", "_TANH", "_SEC", "_CSC", "_COT", "_ARCSEC", "_ARCCSC", "_ARCCOT",

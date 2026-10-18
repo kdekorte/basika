@@ -220,6 +220,26 @@
           "description": "Save the program before running it."
         }
       }
-    }
+    },
+    "languages": [
+      {
+        "id": "basika",
+        "aliases": [
+          "Basika BASIC",
+          "BASIC"
+        ],
+        "extensions": [
+          ".bas"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "basika",
+        "scopeName": "source.basika",
+        "path": "./syntaxes/basika.tmLanguage.json"
+      }
+    ]
   }
 }

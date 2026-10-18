@@ -107,6 +107,7 @@ static int internal_argc = 0;
 static char **internal_argv = NULL;
 static char internal_command_line[1024] = "";
 static char qb64_start_dir[4096] = ""; // _STARTDIR$: where basika started
+static struct timespec qb64_start_time; // _UPTIME counts from here
 static int fixed_string_declarations_present = 0;
 
 static unsigned char basika_memory[65536];
@@ -782,6 +783,7 @@ static void reset_variable_hash_table(void) {
 void set_args(int argc, char **argv) {
     // Initialize hash table
     reset_variable_hash_table();
+    if (qb64_start_time.tv_sec == 0) clock_gettime(CLOCK_MONOTONIC, &qb64_start_time);
     if (!qb64_start_dir[0] && !getcwd(qb64_start_dir, sizeof(qb64_start_dir))) qb64_start_dir[0] = '\0';
     internal_argc = argc;
     internal_argv = argv;
@@ -4168,7 +4170,12 @@ static void append_number_bytes(BasicString *out, TokenType type, Num value) {
 enum {
     QB64_FILE_NONE, QB64_FILE_FILEEXISTS, QB64_FILE_DIREXISTS, QB64_FILE_DIR,
     QB64_FILE_CWD, QB64_FILE_STARTDIR, QB64_FILE_FULLPATH, QB64_FILE_FILES,
-    QB64_FILE_READFILE
+    QB64_FILE_READFILE,
+    // System, no argument: _OS$, _UPTIME, _COMMANDCOUNT, _ENVIRONCOUNT,
+    // _ERRORLINE, _ERRORMESSAGE$, the lock keys and _CLIPBOARD$.
+    QB64_SYS_OS, QB64_SYS_UPTIME, QB64_SYS_COMMANDCOUNT, QB64_SYS_ENVIRONCOUNT,
+    QB64_SYS_ERRORLINE, QB64_SYS_ERRORMESSAGE, QB64_SYS_CAPSLOCK, QB64_SYS_NUMLOCK,
+    QB64_SYS_SCROLLLOCK, QB64_SYS_CLIPBOARD
 };
 
 static int qb64_file_function_id(const char *name) {
@@ -4177,6 +4184,11 @@ static int qb64_file_function_id(const char *name) {
         {"_DIR$", QB64_FILE_DIR}, {"_CWD$", QB64_FILE_CWD},
         {"_STARTDIR$", QB64_FILE_STARTDIR}, {"_FULLPATH$", QB64_FILE_FULLPATH},
         {"_FILES$", QB64_FILE_FILES}, {"_READFILE$", QB64_FILE_READFILE},
+        {"_OS$", QB64_SYS_OS}, {"_UPTIME", QB64_SYS_UPTIME},
+        {"_COMMANDCOUNT", QB64_SYS_COMMANDCOUNT}, {"_ENVIRONCOUNT", QB64_SYS_ENVIRONCOUNT},
+        {"_ERRORLINE", QB64_SYS_ERRORLINE}, {"_ERRORMESSAGE$", QB64_SYS_ERRORMESSAGE},
+        {"_CAPSLOCK", QB64_SYS_CAPSLOCK}, {"_NUMLOCK", QB64_SYS_NUMLOCK},
+        {"_SCROLLLOCK", QB64_SYS_SCROLLLOCK}, {"_CLIPBOARD$", QB64_SYS_CLIPBOARD},
     };
     if (name[0] != '_') return QB64_FILE_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -4188,12 +4200,15 @@ static int qb64_file_function_id(const char *name) {
 /* _FILEEXISTS and _DIREXISTS take a path and give a number; the others give
  * a string. */
 static int qb64_file_function_is_string(int id) {
-    return id != QB64_FILE_FILEEXISTS && id != QB64_FILE_DIREXISTS;
+    return id != QB64_FILE_FILEEXISTS && id != QB64_FILE_DIREXISTS &&
+           id != QB64_SYS_UPTIME && id != QB64_SYS_COMMANDCOUNT && id != QB64_SYS_ENVIRONCOUNT &&
+           id != QB64_SYS_ERRORLINE && id != QB64_SYS_CAPSLOCK && id != QB64_SYS_NUMLOCK &&
+           id != QB64_SYS_SCROLLLOCK;
 }
 
 /* _CWD$, _STARTDIR$ take no argument; _FILES$ may or may not have one. */
 static int qb64_file_function_takes_argument(int id) {
-    return id != QB64_FILE_CWD && id != QB64_FILE_STARTDIR;
+    return id != QB64_FILE_CWD && id != QB64_FILE_STARTDIR && id < QB64_SYS_OS;
 }
 
 static void append_folder(BasicString *out, const char *path) {
@@ -4331,6 +4346,59 @@ static void qb64_files_start(const char *spec) {
 static int qb64_file_function(int id, const BasicString *arg, double *number, BasicString *out) {
     const char *path = arg && arg->data ? (const char *)arg->data : "";
     switch (id) {
+        case QB64_SYS_OS: {
+#if defined(__APPLE__)
+            const char *os = "[MACOSX]";
+#else
+            const char *os = "[LINUX]";
+#endif
+            basic_string_append(out, os, strlen(os));
+#if defined(__aarch64__) || defined(__arm64__)
+            basic_string_append(out, "[64BIT][ARM]", 12);
+#else
+            basic_string_append(out, "[64BIT]", 7);
+#endif
+            return 0;
+        }
+        case QB64_SYS_UPTIME: {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            *number = (double)(now.tv_sec - qb64_start_time.tv_sec) +
+                      (double)(now.tv_nsec - qb64_start_time.tv_nsec) / 1e9;
+            return 0;
+        }
+        case QB64_SYS_COMMANDCOUNT:
+            *number = internal_argc > 1 ? internal_argc - 1 : 0;
+            return 0;
+        case QB64_SYS_ENVIRONCOUNT: {
+            extern char **environ;
+            int count = 0;
+            while (environ && environ[count]) count++;
+            *number = count;
+            return 0;
+        }
+        case QB64_SYS_ERRORLINE:
+            *number = last_runtime_error_line;
+            return 0;
+        case QB64_SYS_ERRORMESSAGE:
+            if (last_runtime_error_code) {
+                const char *msg = get_error_message((RuntimeError)last_runtime_error_code);
+                basic_string_append(out, msg, strlen(msg));
+            }
+            return 0;
+        case QB64_SYS_CAPSLOCK:
+        case QB64_SYS_NUMLOCK:
+        case QB64_SYS_SCROLLLOCK:
+            *number = graphics_lock_state(id == QB64_SYS_CAPSLOCK ? 1 : id == QB64_SYS_NUMLOCK ? 2 : 3);
+            return 0;
+        case QB64_SYS_CLIPBOARD: {
+            char *text = graphics_clipboard_get();
+            if (text) {
+                basic_string_append(out, text, strlen(text));
+                graphics_clipboard_free(text);
+            }
+            return 0;
+        }
         case QB64_FILE_FILEEXISTS:
             *number = path_is_file(path) ? -1 : 0;
             return 0;
@@ -8842,7 +8910,8 @@ static Num primary_tok(TokenStream *ts) {
                 BasicString unused = {0};
                 call_qb64_file_function_tok(ts, file_id, &value, &unused);
                 basic_string_release(&unused);
-                return num_i((int)value, NUM_INTEGER);
+                if (file_id == QB64_SYS_UPTIME) return num_d(value);
+                return num_i((int)value, file_id >= QB64_SYS_OS ? NUM_LONG : NUM_INTEGER);
             }
         }
         if (first == '_' && strcasecmp(token->text, "_SNDOPEN") == 0) {
@@ -11105,6 +11174,23 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_KEYCLEAR") == 0) {
+            // _KEYCLEAR: drop the waiting key presses
+            if (graphics_is_active()) graphics_keyclear();
+            else while (get_stdin_char()) {}
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_CLIPBOARD$") == 0) {
+            // _CLIPBOARD$ = text$
+            if (get_next_token(&ptr).type != TOKEN_EQUALS) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+            } else {
+                BasicString text = {0};
+                parse_string_expression_heap(&ptr, &text);
+                if (!runtime_error_occurred) {
+                    basic_string_append(&text, "", 1);
+                    graphics_clipboard_set((const char *)text.data);
+                }
+                basic_string_release(&text);
+            }
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_WRITEFILE") == 0) {
             // _WRITEFILE file$, contents$
             BasicString name = {0}, contents = {0};
@@ -14378,6 +14464,18 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     curr = enter_inline_sub(proc, &ts, exec_stmt);
                     jumped = 1;
                     break;
+                }
+                // _CLIPBOARD$ = text$ sets the clipboard rather than a variable.
+                if (t->text[0] == '_' && strcasecmp(t->text, "_CLIPBOARD$") == 0 &&
+                    ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
+                    ts.pos++;
+                    BasicString text = {0};
+                    if (parse_string_expression_tok_heap(&ts, &text) && !runtime_error_occurred) {
+                        basic_string_append(&text, "", 1);
+                        graphics_clipboard_set((const char *)text.data);
+                    }
+                    basic_string_release(&text);
+                    continue;
                 }
                 // Direct handling of assignments
                 name_string_function_result(current_token);

@@ -3,6 +3,13 @@
 Runs `.bas` programs with the [basika](https://github.com/kdekorte/basika)
 interpreter from the editor.
 
+## Syntax highlighting
+
+`.bas` files get highlighting for BASIC keywords, QB64 `_` keywords, numbers,
+strings, comments and labels. The grammar is generated from the interpreter's
+keyword tables: run `python3 tools/make_vscode_grammar.py` from the basika
+checkout after adding keywords.
+
 ## Running a program
 
 Open a `.bas` file and do one of:

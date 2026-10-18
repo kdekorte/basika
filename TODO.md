@@ -29,8 +29,7 @@ These come up in ordinary QB64 programs and are small to add.
 
 - Control flow: `_CONTINUE` (next loop iteration), `_IIF(condition, a, b)`, and the
   short-circuit `_ANDALSO` / `_ORELSE`.
-- System: `_OS$`, `_UPTIME`, `_COMMANDCOUNT`, `_ENVIRONCOUNT`, `_ERRORLINE`, `_ERRORMESSAGE$`,
-  `_KEYCLEAR`, `_CAPSLOCK`, `_NUMLOCK`, `_SCROLLLOCK`, `_CLIPBOARD$`, `_CLIPBOARDIMAGE`.
+- System: `_CLIPBOARDIMAGE` (the other system keywords are done).
 - Metacommands. Every line starting with `$` other than `$RESIZE` and `$NOPREFIX` is skipped
   today, so these are quietly ignored: `$INCLUDE` (and `$INCLUDEONCE`) most of all, since the
   included SUBs and declarations go missing; `$CONSOLE` / `$CONSOLE:ONLY` (no window),

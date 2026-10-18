@@ -2656,6 +2656,64 @@ int graphics_keyhit(void) {
     return code;
 }
 
+/* _KEYCLEAR: forget the keys waiting for _KEYHIT and INKEY$. */
+void graphics_keyclear(void) {
+    handle_events();
+    keyhit_head = keyhit_tail = 0;
+    last_key_char = 0;
+}
+
+/* The state of a lock key, 1 caps, 2 num, 3 scroll: -1 if on, else 0. */
+int graphics_lock_state(int which) {
+    SDL_Keymod mod = SDL_GetModState();
+    SDL_Keymod bit = which == 1 ? SDL_KMOD_CAPS : which == 2 ? SDL_KMOD_NUM : SDL_KMOD_SCROLL;
+    return (mod & bit) ? -1 : 0;
+}
+
+/* _CLIPBOARD$: the system clipboard's text, "" when there is none. SDL needs
+ * a running video system, so without a window the platform tools do it. */
+static char *clipboard_from_command(const char *command) {
+    FILE *p = popen(command, "r");
+    if (!p) return NULL;
+    size_t size = 0, cap = 256;
+    char *text = malloc(cap);
+    size_t got;
+    while (text && (got = fread(text + size, 1, cap - size - 1, p)) > 0) {
+        size += got;
+        if (cap - size < 2) {
+            char *grown = realloc(text, cap *= 2);
+            if (!grown) { free(text); text = NULL; break; }
+            text = grown;
+        }
+    }
+    pclose(p);
+    if (text) text[size] = '\0';
+    return text;
+}
+
+char *graphics_clipboard_get(void) {
+    if (window) return SDL_GetClipboardText();
+#ifdef __APPLE__
+    return clipboard_from_command("pbpaste 2>/dev/null");
+#else
+    return clipboard_from_command("xclip -selection clipboard -o 2>/dev/null || wl-paste 2>/dev/null");
+#endif
+}
+
+void graphics_clipboard_free(char *text) { if (window) SDL_free(text); else free(text); }
+
+int graphics_clipboard_set(const char *text) {
+    if (window) return SDL_SetClipboardText(text) ? 1 : 0;
+#ifdef __APPLE__
+    FILE *p = popen("pbcopy 2>/dev/null", "w");
+#else
+    FILE *p = popen("xclip -selection clipboard 2>/dev/null || wl-copy 2>/dev/null", "w");
+#endif
+    if (!p) return 0;
+    fputs(text, p);
+    return pclose(p) == 0;
+}
+
 /* _KEYDOWN(code): whether the key with that QB64 code is held. */
 int graphics_keydown(int code) {
     handle_events();
