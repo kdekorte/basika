@@ -55,8 +55,6 @@ These come up in ordinary QB64 programs and are small to add.
 
 ### Mouse, keyboard and game controllers
 
-- Mouse: `_MOUSEHIDE`, `_MOUSESHOW`, `_MOUSEHIDDEN`, `_MOUSEMOVE`, `_MOUSECURSOR`,
-  `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`, `_MOUSEDISABLED`.
 - Devices (QB64's general controller interface; `STICK` and `STRIG` work today):
   `_DEVICES`, `_DEVICE$`, `_DEVICEINPUT`, `_LASTBUTTON`, `_LASTAXIS`, `_LASTWHEEL`,
   `_BUTTON`, `_BUTTONCHANGE`, `_AXIS`, `_WHEEL`.

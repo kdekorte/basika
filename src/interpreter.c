@@ -8381,6 +8381,7 @@ enum {
     QB64_FN_PI, QB64_FN_WIDTH, QB64_FN_HEIGHT,
     QB64_FN_KEYDOWN, QB64_FN_KEYHIT, QB64_FN_MOUSEX, QB64_FN_MOUSEY,
     QB64_FN_MOUSEBUTTON, QB64_FN_MOUSEINPUT, QB64_FN_MOUSEWHEEL, QB64_FN_COPYIMAGE,
+    QB64_FN_MOUSEHIDDEN, QB64_FN_MOUSEMOVEMENTX, QB64_FN_MOUSEMOVEMENTY, QB64_FN_MOUSEDISABLED,
     QB64_FN_RESIZE, QB64_FN_RESIZEWIDTH, QB64_FN_RESIZEHEIGHT, QB64_FN_ROUND, QB64_FN_PRINTMODE,
     QB64_FN_FULLSCREEN, QB64_FN_SNDPLAYING, QB64_FN_SNDPAUSED, QB64_FN_SNDLEN, QB64_FN_SNDGETPOS,
     // Math, from QB64 Phoenix Edition.
@@ -8406,7 +8407,9 @@ static int qb64_function_id(const char *name) {
         {"_KEYDOWN", QB64_FN_KEYDOWN}, {"_KEYHIT", QB64_FN_KEYHIT},
         {"_MOUSEX", QB64_FN_MOUSEX}, {"_MOUSEY", QB64_FN_MOUSEY},
         {"_MOUSEBUTTON", QB64_FN_MOUSEBUTTON}, {"_MOUSEINPUT", QB64_FN_MOUSEINPUT},
-        {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
+        {"_MOUSEWHEEL", QB64_FN_MOUSEWHEEL},
+        {"_MOUSEHIDDEN", QB64_FN_MOUSEHIDDEN}, {"_MOUSEMOVEMENTX", QB64_FN_MOUSEMOVEMENTX},
+        {"_MOUSEMOVEMENTY", QB64_FN_MOUSEMOVEMENTY}, {"_MOUSEDISABLED", QB64_FN_MOUSEDISABLED}, {"_COPYIMAGE", QB64_FN_COPYIMAGE},
         {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
         {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT}, {"_ROUND", QB64_FN_ROUND},
         {"_PRINTMODE", QB64_FN_PRINTMODE}, {"_FULLSCREEN", QB64_FN_FULLSCREEN},
@@ -8522,6 +8525,14 @@ static double qb64_function_value(int id, const double *args, int argc) {
             return graphics_is_active() ? graphics_mouse_input() : 0;
         case QB64_FN_MOUSEWHEEL:
             return graphics_is_active() ? graphics_mouse_wheel() : 0;
+        case QB64_FN_MOUSEHIDDEN:
+            return graphics_is_active() ? graphics_mouse_hidden() : 0;
+        case QB64_FN_MOUSEMOVEMENTX:
+        case QB64_FN_MOUSEMOVEMENTY:
+            return graphics_is_active() ? graphics_mouse_movement(id == QB64_FN_MOUSEMOVEMENTY) : 0;
+        case QB64_FN_MOUSEDISABLED:
+            // There is no mouse to read without a window.
+            return graphics_is_active() ? 0 : -1;
         case QB64_FN_RESIZE:
             return graphics_is_active() ? graphics_resize_event() : 0;
         case QB64_FN_RESIZEWIDTH:
@@ -11174,6 +11185,35 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             ptr += strlen(ptr);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_RESIZE") == 0) {
             execute_resize_statement(&ptr);
+        } else if (t.type == TOKEN_IDENTIFIER && (strcasecmp(t.text, "_MOUSEHIDE") == 0 ||
+                   strcasecmp(t.text, "_MOUSESHOW") == 0 || strcasecmp(t.text, "_MOUSECURSOR") == 0)) {
+            // _MOUSEHIDE; _MOUSESHOW [style$]; _MOUSECURSOR style$
+            int hide = strcasecmp(t.text, "_MOUSEHIDE") == 0;
+            int cursor_only = strcasecmp(t.text, "_MOUSECURSOR") == 0;
+            char style[64] = "";
+            const char *after = skip_whitespace_fast(ptr);
+            if (!hide && *after && *after != ':' && *after != '\'') {
+                parse_string_expression(&ptr, style, sizeof(style));
+            } else if (cursor_only) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+            }
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                if (style[0] && !graphics_mouse_cursor(style)) report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                else if (!cursor_only) graphics_mouse_visible(!hide);
+            }
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_MOUSEMOVE") == 0) {
+            // _MOUSEMOVE x, y
+            int x = evaluate_int_text(&ptr);
+            if (!next_graphics_comma(&ptr)) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            int y = evaluate_int_text(&ptr);
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                graphics_mouse_move(x, y);
+            }
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_KEYCLEAR") == 0) {
             // _KEYCLEAR: drop the waiting key presses
             if (graphics_is_active()) graphics_keyclear();

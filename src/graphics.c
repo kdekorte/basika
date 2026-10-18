@@ -2591,6 +2591,8 @@ static int held_key_code[SDL_SCANCODE_COUNT];
 static int mouse_buttons[4] = {0};
 static int mouse_events_pending = 0;
 static int mouse_wheel_total = 0;
+static double mouse_move_x = 0, mouse_move_y = 0; /* movement since last read, screen pixels */
+static SDL_Cursor *mouse_cursor = NULL;
 
 /* QB64 key codes: ASCII for printable keys (letters follow Shift), 256 *
  * scan code for cursor and function keys, and 1003xx for modifier keys. */
@@ -2750,6 +2752,58 @@ int graphics_mouse_wheel(void) {
     return total;
 }
 
+/* _MOUSEMOVEMENTX/Y: movement since the last read, in screen pixels. */
+int graphics_mouse_movement(int y) {
+    handle_events();
+    double *total = y ? &mouse_move_y : &mouse_move_x;
+    int whole = (int)*total;
+    *total -= whole;
+    return whole;
+}
+
+/* _MOUSEHIDE, _MOUSESHOW and _MOUSEHIDDEN. */
+void graphics_mouse_visible(int visible) {
+    if (visible) SDL_ShowCursor(); else SDL_HideCursor();
+}
+
+int graphics_mouse_hidden(void) { return SDL_CursorVisible() ? 0 : -1; }
+
+/* _MOUSEMOVE x, y: puts the pointer on a screen pixel. */
+void graphics_mouse_move(int x, int y) {
+    if (!window || presented_area.w <= 0 || presented_area.h <= 0) return;
+    double fx = mode_res_w > 1 ? (double)x / (mode_res_w - 1) : 0;
+    double fy = mode_res_h > 1 ? (double)y / (mode_res_h - 1) : 0;
+    if (fx < 0) fx = 0;
+    if (fx > 1) fx = 1;
+    if (fy < 0) fy = 0;
+    if (fy > 1) fy = 1;
+    SDL_WarpMouseInWindow(window, (float)(presented_area.x + fx * presented_area.w),
+                          (float)(presented_area.y + fy * presented_area.h));
+    pen_x = (int)(fx * (mode_res_w - 1) + 0.5);
+    pen_y = (int)(fy * (mode_res_h - 1) + 0.5);
+}
+
+/* _MOUSESHOW style$ / _MOUSECURSOR style$: returns 0 only for a style name it does not know. */
+int graphics_mouse_cursor(const char *style) {
+    static const struct { const char *name; SDL_SystemCursor id; } styles[] = {
+        {"DEFAULT", SDL_SYSTEM_CURSOR_DEFAULT}, {"LINK", SDL_SYSTEM_CURSOR_POINTER},
+        {"TEXT", SDL_SYSTEM_CURSOR_TEXT}, {"CROSSHAIR", SDL_SYSTEM_CURSOR_CROSSHAIR},
+        {"VERTICAL", SDL_SYSTEM_CURSOR_NS_RESIZE}, {"HORIZONTAL", SDL_SYSTEM_CURSOR_EW_RESIZE},
+        {"TOPLEFT_BOTTOMRIGHT", SDL_SYSTEM_CURSOR_NWSE_RESIZE},
+        {"TOPRIGHT_BOTTOMLEFT", SDL_SYSTEM_CURSOR_NESW_RESIZE},
+    };
+    for (size_t i = 0; i < sizeof(styles) / sizeof(styles[0]); i++) {
+        if (strcasecmp(style, styles[i].name) != 0) continue;
+        SDL_Cursor *cursor = SDL_CreateSystemCursor(styles[i].id);
+        if (!cursor) return 1; /* a known style this display cannot make */
+        SDL_SetCursor(cursor);
+        if (mouse_cursor) SDL_DestroyCursor(mouse_cursor);
+        mouse_cursor = cursor;
+        return 1;
+    }
+    return 0;
+}
+
 void handle_events() {
     if (!window) return;
     SDL_Event e;
@@ -2769,6 +2823,10 @@ void handle_events() {
         }
         if (e.type == SDL_EVENT_MOUSE_MOTION) {
             update_pen_position(e.motion.x, e.motion.y);
+            if (presented_area.w > 0 && presented_area.h > 0) {
+                mouse_move_x += e.motion.xrel * mode_res_w / presented_area.w;
+                mouse_move_y += e.motion.yrel * mode_res_h / presented_area.h;
+            }
             mouse_events_pending++;
         }
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
@@ -2897,6 +2955,10 @@ void close_graphics() {
     free_point_cache();
     point_cache_texture = NULL;
     render_target = NULL;
+    if (mouse_cursor) {
+        SDL_DestroyCursor(mouse_cursor);
+        mouse_cursor = NULL;
+    }
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();

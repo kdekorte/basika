@@ -41,7 +41,7 @@ DOUBLE, as are literals with a `#` suffix or `D` exponent; an `E` exponent or
 QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_RED32`, `_GREEN32`, `_BLUE32`, `_ALPHA32`, `_RED`, `_GREEN`, `_BLUE`, `_ALPHA`,
 `_PI`, `_WIDTH`, `_HEIGHT`, `_COPYIMAGE`, `_KEYDOWN`, `_KEYHIT`, `_MOUSEX`, `_MOUSEY`,
-`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
+`_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_MOUSEHIDDEN`, `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`, `_MOUSEDISABLED`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
 `_FILEEXISTS`, `_DIREXISTS`, `_DIR$`, `_CWD$`, `_STARTDIR$`, `_FULLPATH$`, `_FILES$`, `_READFILE$`,
 the statement `_WRITEFILE`, the system functions `_OS$`, `_UPTIME`, `_COMMANDCOUNT`, `_ENVIRONCOUNT`,
 `_ERRORLINE`, `_ERRORMESSAGE$`, `_CAPSLOCK`, `_NUMLOCK`, `_SCROLLLOCK` and `_CLIPBOARD$` (also assignable), the statement `_KEYCLEAR`, the string functions `_TRIM$`, `_TOSTR$`, `_BIN$`, `_INSTRREV`, `_STRCMP`,
@@ -297,6 +297,8 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_KEYHIT`: The next key from a queue, positive when pressed and negative when released, or 0.
 - `_MOUSEX`, `_MOUSEY`, `_MOUSEBUTTON(n)`: The mouse position in screen pixels and whether button n (1 left, 2 right, 3 middle) is down (-1).
 - `_MOUSEINPUT`: -1 while unread mouse events remain (so `DO WHILE _MOUSEINPUT: LOOP` catches up), then 0. `_MOUSEWHEEL`: Wheel movement since it was last read.
+- `_MOUSEHIDE`, `_MOUSESHOW [style$]`, `_MOUSECURSOR style$`, `_MOUSEMOVE x, y`: Hide or show the pointer, pick its shape (`"DEFAULT"`, `"LINK"`, `"TEXT"`, `"CROSSHAIR"`, `"VERTICAL"`, `"HORIZONTAL"`, `"TOPLEFT_BOTTOMRIGHT"`, `"TOPRIGHT_BOTTOMLEFT"`) and put it on a screen pixel.
+- `_MOUSEHIDDEN`: -1 while the pointer is hidden. `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`: Pointer movement in screen pixels since last read. `_MOUSEDISABLED`: -1 when there is no window to read a mouse from.
 - `_RGB32(r, g, b[, a])`, `_RGB32(gray[, a])`, `_RGBA32(r, g, b, a)`: Return a 32-bit `&HAARRGGBB` color. Channels are clamped to 0-255.
 - `_RGB(r, g, b)`, `_RGBA(r, g, b, a)`: A 32-bit color in a 32-bit image, otherwise the nearest palette index.
 - `_RED32(c)`, `_GREEN32(c)`, `_BLUE32(c)`, `_ALPHA32(c)`: Channels of a 32-bit color. `_RED(c)`, `_GREEN(c)`, `_BLUE(c)`, `_ALPHA(c)` do the same for a color in the current mode, looking palette indexes up in the palette.
