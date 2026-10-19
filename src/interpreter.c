@@ -4550,13 +4550,15 @@ static int is_string_member_reference_text(const char *text);
  * and numbers as they come) and qb64_string_function does the rest. */
 enum {
     QB64_STR_NONE, QB64_STR_TRIM, QB64_STR_TOSTR, QB64_STR_BIN,
-    QB64_STR_INSTRREV, QB64_STR_STRCMP, QB64_STR_STRICMP
+    QB64_STR_INSTRREV, QB64_STR_STRCMP, QB64_STR_STRICMP,
+    QB64_STR_UPRINTWIDTH, QB64_STR_UCHARPOS
 };
 
 static int qb64_string_function_id(const char *name) {
     static const struct { const char *name; int id; } functions[] = {
         {"_TRIM$", QB64_STR_TRIM}, {"_TOSTR$", QB64_STR_TOSTR}, {"_BIN$", QB64_STR_BIN},
         {"_INSTRREV", QB64_STR_INSTRREV}, {"_STRCMP", QB64_STR_STRCMP}, {"_STRICMP", QB64_STR_STRICMP},
+        {"_UPRINTWIDTH", QB64_STR_UPRINTWIDTH}, {"_UCHARPOS", QB64_STR_UCHARPOS},
     };
     if (name[0] != '_') return QB64_STR_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -4570,13 +4572,16 @@ static int qb64_string_function_is_string(int id) {
     return id == QB64_STR_TRIM || id == QB64_STR_TOSTR || id == QB64_STR_BIN;
 }
 
-#define QB64_STRING_MAX_ARGS 3
+#define QB64_STRING_MAX_ARGS 4
 typedef struct {
     int count;
     int is_string[QB64_STRING_MAX_ARGS];
     BasicString text[QB64_STRING_MAX_ARGS];
     Num number[QB64_STRING_MAX_ARGS];
     int number_is_double[QB64_STRING_MAX_ARGS]; // for _TOSTR$, as STR$ shows it
+    int is_array[QB64_STRING_MAX_ARGS];         // _UCHARPOS's array argument,
+    int array_var[QB64_STRING_MAX_ARGS];        // its variable
+    int array_start[QB64_STRING_MAX_ARGS];      // and the first element to fill
 } QB64StringArgs;
 
 static void qb64_string_args_release(QB64StringArgs *args) {
@@ -4699,6 +4704,50 @@ static int qb64_string_function(int id, const QB64StringArgs *args, Num *number,
             *number = num_i(qb64_compare_strings(a, n0, b, n1, id == QB64_STR_STRICMP), NUM_INTEGER);
             return 0;
         }
+        case QB64_STR_UPRINTWIDTH:
+        case QB64_STR_UCHARPOS: {
+            // _UPRINTWIDTH(text$[, encoding][, font]) and
+            // _UCHARPOS(text$[, positions&()][, encoding][, font]).
+            if (args->count < 1 || !args->is_string[0]) return ERR_TYPE_MISMATCH;
+            int first = 1;
+            if (id == QB64_STR_UCHARPOS && args->count > 1 && args->is_array[1]) first = 2;
+            if (args->count > first + 2) return ERR_SYNTAX_ERROR;
+            int64_t encoding = 0, font_handle = -1;
+            for (int i = 1; i < args->count; i++) {
+                if (args->is_string[i]) return ERR_TYPE_MISMATCH;
+                if (args->is_array[i]) continue;
+                int64_t *dest = i == first ? &encoding : &font_handle;
+                if (!num_whole_operand(args->number[i], dest)) return ERR_OVERFLOW;
+            }
+            if (!graphics_is_active()) init_graphics();
+            const unsigned char *text = (const unsigned char *)qb64_arg_text(args, 0, &n0);
+            if (id == QB64_STR_UPRINTWIDTH) {
+                int w = graphics_uprintwidth(text, n0, (int)encoding, (int)font_handle);
+                if (w < 0) return ERR_ILLEGAL_FUNCTION_CALL;
+                *number = num_i(w, NUM_LONG);
+                return 0;
+            }
+            int *positions = NULL;
+            int room = 0;
+            Variable *array = NULL;
+            if (first == 2) {
+                array = get_variable_ptr(args->array_var[1]);
+                room = array->array_size - args->array_start[1];
+                if (!array->iarray || room < 0) return ERR_SUBSCRIPT_OUT_OF_RANGE;
+                if ((size_t)room > n0 + 1) room = (int)n0 + 1;
+                positions = calloc((size_t)room + 1, sizeof(int));
+                if (!positions) return ERR_OUT_OF_MEMORY;
+            }
+            int count = graphics_ucharpos(text, n0, (int)encoding, (int)font_handle, positions, room);
+            if (count < 0) { free(positions); return ERR_ILLEGAL_FUNCTION_CALL; }
+            if (positions && count > 0) {
+                for (int i = 0; i <= count && i < room; i++)
+                    store_num(array, args->array_start[1] + i, num_i(positions[i], NUM_LONG));
+            }
+            free(positions);
+            *number = num_i(count, NUM_LONG);
+            return 0;
+        }
     }
     return ERR_SYNTAX_ERROR;
 }
@@ -4717,7 +4766,23 @@ static void call_qb64_string_function_tok(TokenStream *ts, int id, Num *number, 
         int i = args.count++;
         args.is_string[i] = is_string_token(&ts->tokens[ts->pos]) ||
                             is_string_member_reference_text(ts->tokens[ts->pos].start_ptr);
-        if (args.is_string[i]) {
+        if (id == QB64_STR_UCHARPOS && i == 1 && ts->tokens[ts->pos].type == TOKEN_IDENTIFIER &&
+            ts->tokens[ts->pos + 1].type == TOKEN_LPAREN && !args.is_string[i]) {
+            // An array (name() or name(index)) that receives the positions.
+            int var = resolve_token_variable(&ts->tokens[ts->pos]);
+            if (var < 0) { report_runtime_error(ERR_SYNTAX_ERROR); break; }
+            ts->pos++;
+            if (ts->tokens[ts->pos + 1].type == TOKEN_RPAREN) {
+                ts->pos += 2;
+                args.array_start[i] = 0;
+            } else {
+                int linear = parse_array_index_tok(ts, var);
+                if (linear < 0 || runtime_error_occurred) break;
+                args.array_start[i] = linear;
+            }
+            args.is_array[i] = 1;
+            args.array_var[i] = var;
+        } else if (args.is_string[i]) {
             parse_string_expression_tok_heap(ts, &args.text[i]);
         } else {
             last_expression_is_double = 0;
@@ -8436,7 +8501,9 @@ enum {
     QB64_FN_D2R, QB64_FN_R2D, QB64_FN_D2G, QB64_FN_G2D, QB64_FN_R2G, QB64_FN_G2R,
     // Bits.
     QB64_FN_SHL, QB64_FN_SHR, QB64_FN_ROL, QB64_FN_ROR,
-    QB64_FN_SETBIT, QB64_FN_RESETBIT, QB64_FN_TOGGLEBIT, QB64_FN_READBIT
+    QB64_FN_SETBIT, QB64_FN_RESETBIT, QB64_FN_TOGGLEBIT, QB64_FN_READBIT,
+    // Text.
+    QB64_FN_UFONTHEIGHT, QB64_FN_ULINESPACING, QB64_FN_MAPUNICODE, QB64_FN_CONTROLCHR, QB64_FN_BLINK
 };
 
 static int qb64_function_id(const char *name) {
@@ -8466,6 +8533,8 @@ static int qb64_function_id(const char *name) {
         {"_RESIZE", QB64_FN_RESIZE}, {"_RESIZEWIDTH", QB64_FN_RESIZEWIDTH},
         {"_RESIZEHEIGHT", QB64_FN_RESIZEHEIGHT}, {"_ROUND", QB64_FN_ROUND},
         {"_PRINTMODE", QB64_FN_PRINTMODE}, {"_FULLSCREEN", QB64_FN_FULLSCREEN},
+        {"_UFONTHEIGHT", QB64_FN_UFONTHEIGHT}, {"_ULINESPACING", QB64_FN_ULINESPACING},
+        {"_MAPUNICODE", QB64_FN_MAPUNICODE}, {"_CONTROLCHR", QB64_FN_CONTROLCHR}, {"_BLINK", QB64_FN_BLINK},
         {"_SNDPLAYING", QB64_FN_SNDPLAYING}, {"_SNDPAUSED", QB64_FN_SNDPAUSED},
         {"_SNDLEN", QB64_FN_SNDLEN}, {"_SNDGETPOS", QB64_FN_SNDGETPOS},
         {"_MIN", QB64_FN_MIN}, {"_MAX", QB64_FN_MAX}, {"_CLAMP", QB64_FN_CLAMP},
@@ -8625,6 +8694,23 @@ static double qb64_function_value(int id, const double *args, int argc) {
             if (size < 0) break;
             return size;
         }
+        case QB64_FN_UFONTHEIGHT:
+        case QB64_FN_ULINESPACING: {
+            if (!graphics_is_active()) init_graphics();
+            int size = graphics_ufont_metric(argc >= 1 ? round_to_int(args[0]) : -1, id == QB64_FN_ULINESPACING);
+            if (size < 0) break;
+            return size;
+        }
+        case QB64_FN_MAPUNICODE: {
+            if (argc != 1) break;
+            int code = graphics_mapunicode_get(round_to_int(args[0]));
+            if (code < 0) break;
+            return code;
+        }
+        case QB64_FN_CONTROLCHR:
+            return graphics_controlchr() ? 0 : -1;
+        case QB64_FN_BLINK:
+            return graphics_blink() ? -1 : 0;
         case QB64_FN_SCREENX:
         case QB64_FN_SCREENY:
             return graphics_is_active() ? graphics_window_position(id == QB64_FN_SCREENY) : 0;
@@ -11775,6 +11861,58 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             if (!graphics_is_active()) init_graphics();
             graphics_set_fullscreen(mode, smooth);
+        } else if (t.type == TOKEN_IDENTIFIER && (strcasecmp(t.text, "_CONTROLCHR") == 0 ||
+                                                  strcasecmp(t.text, "_BLINK") == 0)) {
+            // _CONTROLCHR {ON|OFF} and _BLINK {ON|OFF}
+            Token state = get_next_token(&ptr);
+            if (state.type != TOKEN_ON && state.type != TOKEN_OFF) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            if (strcasecmp(t.text, "_BLINK") == 0) graphics_set_blink(state.type == TOKEN_ON);
+            else graphics_set_controlchr(state.type == TOKEN_ON);
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_MAPUNICODE") == 0) {
+            // _MAPUNICODE unicode& TO ascii%
+            int unicode = evaluate_int_text(&ptr);
+            if (get_next_token(&ptr).type != TOKEN_TO) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
+            }
+            int ascii = evaluate_int_text(&ptr);
+            if (!runtime_error_occurred && !graphics_mapunicode_set(unicode, ascii)) {
+                report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+            }
+        } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_UPRINTSTRING") == 0) {
+            // _UPRINTSTRING (x, y), text$[, maxWidth][, encoding][, font][, image]
+            if (get_next_token(&ptr).type != TOKEN_LPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+            int px = evaluate_int_text(&ptr);
+            if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+            int py = evaluate_int_text(&ptr);
+            if (get_next_token(&ptr).type != TOKEN_RPAREN) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+            if (get_next_token(&ptr).type != TOKEN_COMMA) { report_runtime_error(ERR_SYNTAX_ERROR); return; }
+            BasicString text = {0};
+            parse_string_expression_heap(&ptr, &text);
+            // Optional: maxWidth, encoding, font handle, image handle.
+            int opts[4] = {0, 0, -1, -2};
+            int given[4] = {0};
+            for (int i = 0; i < 4 && !runtime_error_occurred; i++) {
+                const char *saved = ptr;
+                if (get_next_token(&ptr).type != TOKEN_COMMA) { ptr = saved; break; }
+                const char *peek = ptr;
+                Token next = get_next_token(&peek);
+                if (next.type == TOKEN_COMMA) continue;   // argument left out
+                opts[i] = evaluate_int_text(&ptr);
+                given[i] = 1;
+            }
+            if (!runtime_error_occurred) {
+                if (!graphics_is_active()) init_graphics();
+                int image = given[3] ? opts[3] : graphics_get_dest_handle();
+                if (graphics_uprintstring(px, py, (const unsigned char *)(text.data ? text.data : (const unsigned char *)""),
+                                          text.length, opts[0], opts[1], opts[2], image)) {
+                    report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                }
+            }
+            basic_string_release(&text);
         } else if (t.type == TOKEN_IDENTIFIER && strcasecmp(t.text, "_PRINTMODE") == 0) {
             // _PRINTMODE {_KEEPBACKGROUND|_ONLYBACKGROUND|_FILLBACKGROUND}[, handle]
             Token mode_tok = get_next_token(&ptr);
@@ -15044,6 +15182,8 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     basic_string_release(&text);
                     continue;
                 }
+                // _UPRINTSTRING (x, y), ... is a statement, not an array element.
+                if (t->text[0] == '_' && strcasecmp(t->text, "_UPRINTSTRING") == 0) goto identifier_statement;
                 // Direct handling of assignments
                 name_string_function_result(current_token);
                 int idx = resolve_token_variable(current_token);
@@ -15086,6 +15226,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     continue;
                 }
                 // If not an assignment, fall back to interpret_line_at_ptr
+            identifier_statement:
                 ts.pos--; // Put identifier back
                 /* fall through */
             }

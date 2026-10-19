@@ -126,6 +126,18 @@ void graphics_limit(double fps);
 void graphics_print(const char *text);
 void graphics_printstring(int px, int py, const char *text);
 int graphics_printwidth(const char *text);
+int graphics_mapunicode_set(int unicode, int ascii);
+int graphics_mapunicode_get(int ascii);
+void graphics_set_controlchr(int on);
+int graphics_controlchr(void);
+void graphics_set_blink(int on);
+int graphics_blink(void);
+int graphics_uprintstring(int px, int py, const unsigned char *text, size_t length, int max_width,
+                          int encoding, int font_handle, int image_handle);
+int graphics_uprintwidth(const unsigned char *text, size_t length, int encoding, int font_handle);
+int graphics_ufont_metric(int font_handle, int line_spacing);
+int graphics_ucharpos(const unsigned char *text, size_t length, int encoding, int font_handle,
+                      int *positions, int max_positions);
 /* _LOADFONT styles, combined: */
 enum { FONT_STYLE_BOLD = 1, FONT_STYLE_ITALIC = 2, FONT_STYLE_UNDERLINE = 4 };
 /* _PRINTMODE values, as QB64 numbers them. */

@@ -749,11 +749,192 @@ static void graphics_set_printmode(int mode) {
 }
 
 
+/* ---- QB64 text extensions: _MAPUNICODE, _CONTROLCHR, _BLINK ---- */
+
+static const unsigned short cp437_unicode[256] = {
+    0x0000, 0x263A, 0x263B, 0x2665, 0x2666, 0x2663, 0x2660, 0x2022,
+    0x25D8, 0x25CB, 0x25D9, 0x2642, 0x2640, 0x266A, 0x266B, 0x263C,
+    0x25BA, 0x25C4, 0x2195, 0x203C, 0x00B6, 0x00A7, 0x25AC, 0x21A8,
+    0x2191, 0x2193, 0x2192, 0x2190, 0x221F, 0x2194, 0x25B2, 0x25BC,
+    0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027,
+    0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F,
+    0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037,
+    0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D, 0x003E, 0x003F,
+    0x0040, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047,
+    0x0048, 0x0049, 0x004A, 0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+    0x0050, 0x0051, 0x0052, 0x0053, 0x0054, 0x0055, 0x0056, 0x0057,
+    0x0058, 0x0059, 0x005A, 0x005B, 0x005C, 0x005D, 0x005E, 0x005F,
+    0x0060, 0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067,
+    0x0068, 0x0069, 0x006A, 0x006B, 0x006C, 0x006D, 0x006E, 0x006F,
+    0x0070, 0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077,
+    0x0078, 0x0079, 0x007A, 0x007B, 0x007C, 0x007D, 0x007E, 0x2302,
+    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+    0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+    0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+    0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+    0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+    0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4,
+    0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248,
+    0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0,
+};
+static unsigned short unicode_map[256];
+static int unicode_map_ready = 0;
+static int control_chr_on = 1;
+static int blink_on = 1;
+
+static void ensure_unicode_map(void) {
+    if (unicode_map_ready) return;
+    memcpy(unicode_map, cp437_unicode, sizeof(unicode_map));
+    unicode_map_ready = 1;
+}
+
+int graphics_mapunicode_set(int unicode, int ascii) {
+    if (ascii < 0 || ascii > 255 || unicode < 0 || unicode > 0xFFFF) return 0;
+    ensure_unicode_map();
+    unicode_map[ascii] = (unsigned short)unicode;
+    return 1;
+}
+
+int graphics_mapunicode_get(int ascii) {
+    if (ascii < 0 || ascii > 255) return -1;
+    ensure_unicode_map();
+    return unicode_map[ascii];
+}
+
+void graphics_set_controlchr(int on) { control_chr_on = on; }
+int graphics_controlchr(void) { return control_chr_on; }
+void graphics_set_blink(int on) { blink_on = on; }
+int graphics_blink(void) { return blink_on; }
+
+static size_t encode_utf8(uint32_t cp, char *out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) { out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12)); out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F)); return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18)); out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* Turns text in a _UPRINTSTRING encoding (0 codepage, 8 UTF-8, 16 UTF-16,
+ * 32 UTF-32) into code points. Returns a malloc'd array, or NULL when the
+ * text is not valid in that encoding. */
+static uint32_t *decode_codepoints(const unsigned char *s, size_t n, int enc, size_t *count) {
+    uint32_t *cps = malloc((n + 1) * sizeof(uint32_t));
+    size_t k = 0;
+    if (!cps) return NULL;
+    if (enc == 0) {
+        ensure_unicode_map();
+        for (size_t i = 0; i < n; i++) if (unicode_map[s[i]]) cps[k++] = unicode_map[s[i]];
+    } else if (enc == 8) {
+        size_t i = 0;
+        while (i < n) {
+            unsigned char c = s[i];
+            int len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+            if (!len || i + (size_t)len > n) { free(cps); return NULL; }
+            uint32_t cp = len == 1 ? c : c & (0xFF >> (len + 1));
+            for (int j = 1; j < len; j++) {
+                if ((s[i + j] & 0xC0) != 0x80) { free(cps); return NULL; }
+                cp = (cp << 6) | (s[i + j] & 0x3F);
+            }
+            cps[k++] = cp;
+            i += (size_t)len;
+        }
+    } else if (enc == 16) {
+        size_t i = 0;
+        int big = 0;
+        if (n % 2) { free(cps); return NULL; }
+        if (n >= 2 && s[0] == 0xFF && s[1] == 0xFE) i = 2;
+        else if (n >= 2 && s[0] == 0xFE && s[1] == 0xFF) { i = 2; big = 1; }
+        while (i < n) {
+            uint32_t u = big ? (uint32_t)(s[i] << 8 | s[i + 1]) : (uint32_t)(s[i + 1] << 8 | s[i]);
+            i += 2;
+            if (u >= 0xD800 && u < 0xDC00) {
+                if (i + 2 > n) { free(cps); return NULL; }
+                uint32_t lo = big ? (uint32_t)(s[i] << 8 | s[i + 1]) : (uint32_t)(s[i + 1] << 8 | s[i]);
+                if (lo < 0xDC00 || lo > 0xDFFF) { free(cps); return NULL; }
+                i += 2;
+                u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
+            } else if (u >= 0xDC00 && u <= 0xDFFF) {
+                free(cps); return NULL;
+            }
+            cps[k++] = u;
+        }
+    } else if (enc == 32) {
+        size_t i = 0;
+        int big = 0;
+        if (n % 4) { free(cps); return NULL; }
+        if (n >= 4 && s[0] == 0xFF && s[1] == 0xFE && s[2] == 0 && s[3] == 0) i = 4;
+        else if (n >= 4 && s[0] == 0 && s[1] == 0 && s[2] == 0xFE && s[3] == 0xFF) { i = 4; big = 1; }
+        for (; i < n; i += 4) {
+            uint32_t u = big ? (uint32_t)s[i] << 24 | s[i + 1] << 16 | s[i + 2] << 8 | s[i + 3]
+                             : (uint32_t)s[i + 3] << 24 | s[i + 2] << 16 | s[i + 1] << 8 | s[i];
+            if (u > 0x10FFFF || (u >= 0xD800 && u <= 0xDFFF)) { free(cps); return NULL; }
+            cps[k++] = u;
+        }
+    } else {
+        free(cps);
+        return NULL;
+    }
+    *count = k;
+    return cps;
+}
+
+static char *codepoints_to_utf8(const uint32_t *cps, size_t count) {
+    char *out = malloc(count * 4 + 1);
+    size_t n = 0;
+    if (!out) return NULL;
+    for (size_t i = 0; i < count; i++) n += encode_utf8(cps[i], out + n);
+    out[n] = '\0';
+    return out;
+}
+
+/* Draws one code point in the text cell at the cursor, as PRINT does for a
+ * control code when _CONTROLCHR is OFF. */
+static void draw_cell_glyph(uint32_t cp) {
+    char s[5] = {0};
+    encode_utf8(cp, s);
+    clear_text_cell(cursor_x, cursor_y);
+    if (print_mode == PRINTMODE_ONLY) return;
+    SDL_Surface *surf = TTF_RenderText_Blended(font, s, 0, current_text_color);
+    if (!surf) return;
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, surf);
+    if (tex) {
+        SDL_FRect dest = {(float)cursor_x, (float)cursor_y, (float)current_col_width, (float)current_row_height};
+        SDL_RenderTexture(renderer, tex, NULL, &dest);
+        SDL_DestroyTexture(tex);
+    }
+    SDL_DestroySurface(surf);
+}
+
 void graphics_print(const char *text) {
     if (!font || !canvas || !text) return;
     SDL_SetRenderTarget(renderer, canvas);
     
     while (*text) {
+        if (!control_chr_on && (unsigned char)*text < 32) {
+            ensure_unicode_map();
+            draw_cell_glyph(unicode_map[(unsigned char)*text]);
+            text++;
+            cursor_x += current_col_width;
+            if (cursor_x >= canvas_width) {
+                cursor_x = 0;
+                cursor_y += current_row_height;
+                check_scroll();
+                SDL_SetRenderTarget(renderer, canvas);
+            }
+            continue;
+        }
         if (*text == '\n') {
             cursor_x = 0;
             cursor_y += current_row_height;
@@ -3069,6 +3250,108 @@ int graphics_font_size(int handle, int want_height) {
     int slot = handle - FONT_HANDLE_BASE;
     if (slot < 0 || slot >= MAX_FONT_SLOTS || !font_slots[slot].in_use) return -1;
     return want_height ? font_slots[slot].row_height : font_slots[slot].col_width;
+}
+
+
+/* ---- _UPRINTSTRING and the other Unicode text functions ---- */
+
+static TTF_Font *font_for_handle(int handle) {
+    if (handle == -1) return font;
+    if (is_default_font_handle(handle)) return base_font ? base_font : font;
+    int slot = handle - FONT_HANDLE_BASE;
+    if (slot < 0 || slot >= MAX_FONT_SLOTS || !font_slots[slot].in_use) return NULL;
+    return font_slots[slot].font;
+}
+
+/* _UPRINTSTRING (x, y), text$[, maxWidth][, encoding][, font][, image].
+ * Returns 0, or 1 for an illegal call. Text that is invalid in its
+ * encoding prints nothing. */
+int graphics_uprintstring(int px, int py, const unsigned char *text, size_t length, int max_width,
+                          int encoding, int font_handle, int image_handle) {
+    TTF_Font *f = font_for_handle(font_handle);
+    int previous = dest_handle;
+    if (!f || !renderer) return 1;
+    if (image_handle != dest_handle && !graphics_set_dest(image_handle)) return 1;
+    if (current_screen_mode == 0) {
+        if (previous != dest_handle) graphics_set_dest(previous);
+        return 1;
+    }
+    size_t count = 0;
+    uint32_t *cps = decode_codepoints(text, length, encoding, &count);
+    int bad = encoding != 0 && encoding != 8 && encoding != 16 && encoding != 32;
+    if (cps && count) {
+        char *utf8 = codepoints_to_utf8(cps, count);
+        SDL_Surface *surf = utf8 ? TTF_RenderText_Blended(f, utf8, 0, current_text_color) : NULL;
+        if (surf) {
+            int w = surf->w;
+            if (max_width > 0 && w > max_width) w = max_width;
+            SDL_SetRenderTarget(renderer, canvas);
+            fill_text_background((float)px, (float)py, (float)w, (float)surf->h);
+            SDL_Texture *tex = print_mode == PRINTMODE_ONLY ? NULL : SDL_CreateTextureFromSurface(renderer, surf);
+            if (tex) {
+                SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+                SDL_FRect src = {0, 0, (float)w, (float)surf->h};
+                SDL_FRect dest = {(float)px, (float)py, (float)w, (float)surf->h};
+                SDL_RenderTexture(renderer, tex, &src, &dest);
+                SDL_DestroyTexture(tex);
+            }
+            SDL_DestroySurface(surf);
+        }
+        free(utf8);
+    }
+    free(cps);
+    if (previous != dest_handle) graphics_set_dest(previous);
+    update_graphics();
+    return bad;
+}
+
+/* _UPRINTWIDTH: the width in pixels, 0 for invalid text; -1 for a bad
+ * font or encoding. */
+int graphics_uprintwidth(const unsigned char *text, size_t length, int encoding, int font_handle) {
+    TTF_Font *f = font_for_handle(font_handle);
+    size_t count = 0;
+    if (!f || (encoding != 0 && encoding != 8 && encoding != 16 && encoding != 32)) return -1;
+    uint32_t *cps = decode_codepoints(text, length, encoding, &count);
+    int w = 0;
+    if (cps && count) {
+        char *utf8 = codepoints_to_utf8(cps, count);
+        int h = 0;
+        if (utf8) TTF_GetStringSize(f, utf8, 0, &w, &h);
+        free(utf8);
+    }
+    free(cps);
+    return w;
+}
+
+/* _UFONTHEIGHT and _ULINESPACING; -1 for a bad font. */
+int graphics_ufont_metric(int font_handle, int line_spacing) {
+    TTF_Font *f = font_for_handle(font_handle);
+    if (!f) return -1;
+    return line_spacing ? TTF_GetFontLineSkip(f) : TTF_GetFontHeight(f);
+}
+
+/* _UCHARPOS: the number of code points; positions[0..count] (up to
+ * max_positions of them) get each one's start x, then the end of the text.
+ * Returns -1 for a bad font or encoding, 0 for invalid text. */
+int graphics_ucharpos(const unsigned char *text, size_t length, int encoding, int font_handle,
+                      int *positions, int max_positions) {
+    TTF_Font *f = font_for_handle(font_handle);
+    size_t count = 0;
+    if (!f || (encoding != 0 && encoding != 8 && encoding != 16 && encoding != 32)) return -1;
+    uint32_t *cps = decode_codepoints(text, length, encoding, &count);
+    if (!cps) return 0;
+    for (size_t i = 0; i <= count && (int)i < max_positions; i++) {
+        int w = 0, h = 0;
+        if (i > 0) {
+            char *prefix = codepoints_to_utf8(cps, i);
+            if (prefix) TTF_GetStringSize(f, prefix, 0, &w, &h);
+            free(prefix);
+        }
+        positions[i] = w;
+    }
+    free(cps);
+    return (int)count;
 }
 
 /* ---- The window ---- */

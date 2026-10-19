@@ -39,8 +39,7 @@ These come up in ordinary QB64 programs and are small to add.
 - Images: `_SCREENIMAGE`, `_COPYPALETTE`, `_DISPLAY` as a function (the screen's image handle),
   `_CLIP` (`_PUTIMAGE` partly off the edge),
   `_MAPTRIANGLE` (textured triangles), `_DISPLAYORDER`, `_DEPTHBUFFER`.
-- Fonts and text: `_UPRINTSTRING`, `_UPRINTWIDTH`,
-  `_UFONTHEIGHT`, `_ULINESPACING`, `_UCHARPOS`, `_MAPUNICODE`, `_CONTROLCHR`, `_BLINK`.
+- Fonts and text: `_BLINK` does not make colors 16-31 blink (it only keeps its setting).
 - The window: `_WINDOWHANDLE`, `_WINDOWSIZELIMIT`,
   `_ALLOWFULLSCREEN`, `_ICON`, `_SCREENCLICK`, `_SCREENPRINT`, `_PRINTIMAGE`.
 - Dropped files: `_ACCEPTFILEDROP`, `_TOTALDROPPEDFILES`, `_DROPPEDFILE`, `_FINISHDROP`.
