@@ -3407,6 +3407,10 @@ static int on_key_line[32];
 static int key_state[32]; // 0=OFF, 1=ON, 2=STOP
 static int key_event_pending[32];
 static int key_event_active[32];
+/* Number of set slots in key_event_pending. The statement loop polls event
+ * traps after every statement, so this count keeps that poll O(1) for
+ * programs with no pending key traps, which is the common case. */
+static int key_event_pending_count = 0;
 
 /* ON TIMER traps. Slot 0 is the classic unnamed timer; slots 1... hold
  * numbers that _FREETIMER handed out, and TIMER(t) FREE gives them back. */
@@ -3437,6 +3441,9 @@ static int on_pen_line = 0;
 static int pen_state = 0; // 0=OFF, 1=ON, 2=STOP
 static int pen_event_pending = 0;
 static int pen_event_active = 0;
+/* Number of pending PEN and STRIG events combined, so the statement loop's
+ * device-trap poll is O(1) when nothing is pending. */
+static int device_event_pending_count = 0;
 
 static double wall_time_seconds(void) {
     struct timeval tv;
@@ -3447,6 +3454,7 @@ static double wall_time_seconds(void) {
 void basika_trigger_key_event(int key_idx) {
     if (key_idx >= 1 && key_idx < 32) {
         if (key_state[key_idx] == 1 || key_state[key_idx] == 2) {
+            if (!key_event_pending[key_idx]) key_event_pending_count++;
             key_event_pending[key_idx] = 1;
         }
     }
@@ -3492,6 +3500,7 @@ static int dispatch_pending_timer_event(Statement *exec_stmt, TokenStream *ts, S
 }
 
 static int dispatch_pending_key_event(Statement *exec_stmt, TokenStream *ts, Statement **curr, const char **resume_ptr) {
+    if (key_event_pending_count == 0) return 0; /* nothing pending */
     for (int k = 1; k < 32; k++) {
         if (!key_event_pending[k]) continue;
         if ((key_state[k] != 1 && key_state[k] != 2) || key_event_active[k] || on_key_line[k] == 0) continue;
@@ -3500,11 +3509,13 @@ static int dispatch_pending_key_event(Statement *exec_stmt, TokenStream *ts, Sta
         if (!target) {
             report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
             key_event_pending[k] = 0;
+            key_event_pending_count--;
             return 1;
         }
         if (gosub_ptr >= 32) {
             report_runtime_error(ERR_OUT_OF_MEMORY);
             key_event_pending[k] = 0;
+            key_event_pending_count--;
             return 1;
         }
 
@@ -3519,6 +3530,7 @@ static int dispatch_pending_key_event(Statement *exec_stmt, TokenStream *ts, Sta
         gosub_ptr++;
 
         key_event_pending[k] = 0;
+        key_event_pending_count--;
         key_event_active[k] = 1;
         *curr = target;
         *resume_ptr = NULL;
@@ -3552,14 +3564,17 @@ static int enter_event_handler(Statement *exec_stmt, TokenStream *ts, Statement 
 }
 
 static int dispatch_pending_device_event(Statement *exec_stmt, TokenStream *ts, Statement **curr, const char **resume_ptr) {
+    if (device_event_pending_count == 0) return 0; /* nothing pending */
     if (pen_event_pending && pen_state == 1 && !pen_event_active && on_pen_line) {
         pen_event_pending = 0;
+        device_event_pending_count--;
         pen_event_active = 1;
         return enter_event_handler(exec_stmt, ts, curr, resume_ptr, on_pen_line, EVENT_PEN, 0);
     }
     for (int s = 0; s < 8; s += 2) {
         if (!strig_event_pending[s] || strig_state != 1 || strig_event_active[s] || !on_strig_line[s]) continue;
         strig_event_pending[s] = 0;
+        device_event_pending_count--;
         strig_event_active[s] = 1;
         return enter_event_handler(exec_stmt, ts, curr, resume_ptr, on_strig_line[s], EVENT_STRIG, s);
     }
@@ -3660,7 +3675,10 @@ static void maybe_queue_timer_event(void) {
 }
 
 void basika_trigger_pen_event(void) {
-    if (pen_state == 1 || pen_state == 2) pen_event_pending = 1;
+    if (pen_state == 1 || pen_state == 2) {
+        if (!pen_event_pending) device_event_pending_count++;
+        pen_event_pending = 1;
+    }
 }
 
 void basika_trigger_strig_event(int strig_idx, int pressed) {
@@ -3669,6 +3687,7 @@ void basika_trigger_strig_event(int strig_idx, int pressed) {
             strig_button_pressed_since[strig_idx] = 1;
             strig_button_currently_pressed[strig_idx] = 1;
             if (strig_state == 1 || strig_state == 2) {
+                if (!strig_event_pending[strig_idx]) device_event_pending_count++;
                 strig_event_pending[strig_idx] = 1;
             }
         } else {
@@ -11639,6 +11658,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                     } else if (mode.type == TOKEN_OFF) {
                         if (k >= 1 && k < 32) {
                             key_state[k] = 0;
+                            if (key_event_pending[k]) key_event_pending_count--;
                             key_event_pending[k] = 0;
                         }
                         *ptr_addr = ptr;
@@ -11675,7 +11695,11 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             // PEN ON | OFF | STOP: enables, disables or holds ON PEN trapping.
             Token mode = get_next_token(&ptr);
             if (mode.type == TOKEN_ON) pen_state = 1;
-            else if (mode.type == TOKEN_OFF) { pen_state = 0; pen_event_pending = 0; }
+            else if (mode.type == TOKEN_OFF) {
+                pen_state = 0;
+                if (pen_event_pending) device_event_pending_count--;
+                pen_event_pending = 0;
+            }
             else if (mode.type == TOKEN_STOP) pen_state = 2;
             else report_runtime_error(ERR_SYNTAX_ERROR);
             *ptr_addr = ptr;
@@ -11688,7 +11712,10 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 return;
             } else if (mode.type == TOKEN_OFF) {
                 strig_state = 0;
-                for (int i = 0; i < 8; i++) strig_event_pending[i] = 0;
+                for (int i = 0; i < 8; i++) {
+                    if (strig_event_pending[i]) device_event_pending_count--;
+                    strig_event_pending[i] = 0;
+                }
                 *ptr_addr = ptr;
                 return;
             } else if (mode.type == TOKEN_STOP) {
@@ -14442,12 +14469,14 @@ static void run_program_from(Statement *start) {
         key_event_pending[i] = 0;
         key_event_active[i] = 0;
     }
+    key_event_pending_count = 0;
     for (int i = 0; i < 8; i++) {
         strig_event_pending[i] = 0;
         strig_event_active[i] = 0;
     }
     pen_event_pending = 0;
     pen_event_active = 0;
+    device_event_pending_count = 0;
     for (int i = 1; i < 16; i++) {
         reset_file_field_state(i);
     }
@@ -14506,7 +14535,9 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
     int poll_counter = 0;
     while (curr && !stop_running) {
 
-        if (curr->token_count >= 2 && curr->tokens[0].type == TOKEN_TYPE) {
+        int stmt_token_count = curr->token_count;
+        TokenType stmt_first_type = stmt_token_count > 0 ? curr->tokens[0].type : TOKEN_EOF;
+        if (stmt_token_count >= 2 && stmt_first_type == TOKEN_TYPE) {
             Statement *end_type = curr->next;
             while (end_type && !(end_type->token_count >= 2 &&
                    end_type->tokens[0].type == TOKEN_END &&
@@ -14519,15 +14550,14 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
             continue;
         }
 
-        if (call_stack_depth == 0 && curr->token_count > 0) {
-            if (curr->tokens[0].type == TOKEN_SUB || curr->tokens[0].type == TOKEN_FUNCTION) {
-                ProcedureDef *p = find_procedure_by_header(curr);
-                if (p && p->end_stmt) {
-                    curr = p->end_stmt->next;
-                    resume_ptr = NULL;
-                    resume_ts_pos = -1;
-                    continue;
-                }
+        if (call_stack_depth == 0 &&
+            (stmt_first_type == TOKEN_SUB || stmt_first_type == TOKEN_FUNCTION)) {
+            ProcedureDef *p = find_procedure_by_header(curr);
+            if (p && p->end_stmt) {
+                curr = p->end_stmt->next;
+                resume_ptr = NULL;
+                resume_ts_pos = -1;
+                continue;
             }
         }
 
@@ -15421,17 +15451,27 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
             }
 
             maybe_queue_timer_event();
-            if (!jumped && !runtime_error_occurred && dispatch_pending_timer_event(exec_stmt, &ts, &curr, &resume_ptr)) {
-                jumped = 1;
-                break;
-            }
-            if (!jumped && !runtime_error_occurred && dispatch_pending_key_event(exec_stmt, &ts, &curr, &resume_ptr)) {
-                jumped = 1;
-                break;
-            }
-            if (!jumped && !runtime_error_occurred && dispatch_pending_device_event(exec_stmt, &ts, &curr, &resume_ptr)) {
-                jumped = 1;
-                break;
+            /* Each dispatcher early-outs on its own counter; the combined
+             * test makes the common case (no traps pending) one branch
+             * instead of three calls. The dispatchers cannot change jumped
+             * (the caller owns it), but they can report errors, so the
+             * runtime_error_occurred checks between them stay. */
+            if (!jumped && !runtime_error_occurred &&
+                (timer_trap_count | key_event_pending_count | device_event_pending_count)) {
+                if (dispatch_pending_timer_event(exec_stmt, &ts, &curr, &resume_ptr)) {
+                    jumped = 1;
+                    break;
+                }
+                if (!runtime_error_occurred &&
+                    dispatch_pending_key_event(exec_stmt, &ts, &curr, &resume_ptr)) {
+                    jumped = 1;
+                    break;
+                }
+                if (!runtime_error_occurred &&
+                    dispatch_pending_device_event(exec_stmt, &ts, &curr, &resume_ptr)) {
+                    jumped = 1;
+                    break;
+                }
             }
         }
 
