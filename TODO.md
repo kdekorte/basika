@@ -17,7 +17,7 @@
 
 ## QB64 extensions
 
-Basika implements 116 of the 311 QB64 Phoenix Edition keywords (checked against the
+Basika implements 121 of the 311 QB64 Phoenix Edition keywords (checked against the
 [alphabetical keyword reference](https://qb64phoenix.com/qb64wiki/index.php/Keyword_Reference_-_Alphabetical)
 on 2026-10-16), not counting the OpenGL `_gl...` set. An unknown `_NAME` is not an error:
 it reads as an ordinary variable, 0 or "", so `IF _UPTIME > 0 THEN` is quietly false.
@@ -77,8 +77,6 @@ These come up in ordinary QB64 programs and are small to add.
 - Logging and checks: `_LOGTRACE`, `_LOGINFO`, `_LOGWARN`, `_LOGERROR`, `_LOGMINLEVEL`,
   `_ASSERT` with `$ASSERTS`, `$CHECKING`, `$DEBUG`, `$ERROR`, `$ERRORLOCATION`,
   `_INCLERRORFILE$`, `_INCLERRORLINE`.
-- Timers and process control: `_FREETIMER`, `_EXIT`, `_SHELLHIDE`, `_DONTWAIT` and `_HIDE`
-  (`SHELL` options).
 - Embedding and build information: `$EMBED`, `_EMBEDDED$`, `_COMPILEDATE$`,
   `_COMPILETIME$`, `_COMPILERVERSION$`, `$USELIBRARY`, `$UNSTABLE`, `$COLOR`, `$FORMAT`.
 

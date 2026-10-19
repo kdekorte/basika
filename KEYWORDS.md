@@ -44,6 +44,7 @@ QB64-style functions recognized by name: `_RGB32`, `_RGBA32`, `_RGB`, `_RGBA`,
 `_MOUSEBUTTON`, `_MOUSEINPUT`, `_MOUSEWHEEL`, `_MOUSEHIDDEN`, `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`, `_MOUSEDISABLED`, `_HSB32`, `_HSBA32`, `_HUE32`, `_SATURATION32`, `_BRIGHTNESS32`, `_PIXELSIZE`, `_DEFAULTCOLOR`, `_BACKGROUNDCOLOR`, `_PALETTECOLOR`, `_FONTWIDTH`, `_FONTHEIGHT`, `_SCREENX`, `_SCREENY`, `_SCREENEXISTS`, `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`, `_DESKTOPREFRESHRATE`, `_WINDOWHASFOCUS`, `_TITLE$`, `_RESIZE`, `_RESIZEWIDTH`, `_RESIZEHEIGHT`, `_ROUND`,
 `_FILEEXISTS`, `_DIREXISTS`, `_DIR$`, `_CWD$`, `_STARTDIR$`, `_FULLPATH$`, `_FILES$`, `_READFILE$`,
 the statement `_WRITEFILE`, the system functions `_OS$`, `_UPTIME`, `_COMMANDCOUNT`, `_ENVIRONCOUNT`,
+`_EXIT`, `_FREETIMER`, `_SHELLHIDE`,
 `_ERRORLINE`, `_ERRORMESSAGE$`, `_CAPSLOCK`, `_NUMLOCK`, `_SCROLLLOCK` and `_CLIPBOARD$` (also assignable), the statement `_KEYCLEAR`, the string functions `_TRIM$`, `_TOSTR$`, `_BIN$`, `_INSTRREV`, `_STRCMP`,
 `_STRICMP`, the math functions `_MIN`, `_MAX`, `_CLAMP`, `_CEIL`, `_HYPOT`, `_ATAN2`, `_ACOS`, `_ASIN`,
 `_ACOSH`, `_ASINH`, `_ATANH`, `_COSH`, `_SINH`, `_TANH`, `_SEC`, `_CSC`, `_COT`, `_ARCSEC`, `_ARCCSC`,
@@ -124,7 +125,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `ON KEY(n) GOSUB line`: Enables a key trap for key `n`.
 - `ON PEN GOSUB line` / `PEN ON|OFF|STOP`: Traps a light-pen press, which is a left mouse click.
 - `ON STRIG(n) GOSUB line` / `STRIG ON|OFF|STOP`: Traps a joystick button press (n = 0, 2, 4, 6).
-- `ON TIMER(n) GOSUB line`: Enables a periodic timer trap.
+- `ON TIMER(n) GOSUB line` / `ON TIMER(t, n) GOSUB line`: Enables a periodic timer trap that fires every `n` seconds (a fraction is allowed): on the classic unnamed timer, or on numbered timer `t`, a number from `_FREETIMER` (1-32) that `TIMER(t) ON` then starts.
 - `ON ERROR GOTO line`: Error trapping.
 - `RESUME [0 | NEXT | line | label]`: Error recovery.
 - `STOP`: Pauses the program with `Break in N`. In direct mode, `CONT` resumes after the `STOP` with variables, loops and `GOSUB`s intact; Ctrl+C breaks the same way. Run from a file, the program ends there.
@@ -195,7 +196,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `RSET var$ = expression$`: Right-justifies a string into a field buffer or string variable.
 - `SPC(n)`: Used in `PRINT` to output spaces.
 - `TAB(n)`: Used in `PRINT` to move to a specific column.
-- `TIMER ON|OFF|STOP`: Controls timer trapping.
+- `TIMER ON|OFF|STOP` / `TIMER(t) ON|OFF|STOP|FREE`: Controls timer trapping: `ON` enables the trap and starts its interval fresh, `OFF` disables it and drops any pending event, and `STOP` holds a pending event until `ON` runs again. With `t` these act on numbered timer `t`, and `FREE` also drops its trap, giving the number back to `_FREETIMER`.
 
 ## File and System Operations
 - `CHDIR "path"`: Changes current directory.
@@ -213,7 +214,7 @@ be used anywhere a line number is accepted: `GOTO`, `GOSUB`, `ON...GOTO/GOSUB`,
 - `PUT #n[, [record][, variable]]`: Writes a `TYPE` variable or, with no variable, the `FIELD` buffer (which may not exceed the record length). An omitted record number writes the next record; record numbers below 1 are a "Bad record number". BASIKA also accepts `PUT #n, record, length, data$`.
 - `RMDIR "path"`: Removes a directory.
 - `SEEK #n, pos`: Sets file position.
-- `SHELL ["command"]`: Executes a system command.
+- `SHELL [_HIDE] [_DONTWAIT] ["command"]`: Executes a system command. `_HIDE` hides the command's output, `_DONTWAIT` starts it without waiting for it to finish, and `_SHELLHIDE("command")` runs it hidden and returns its exit code.
 - `SYSTEM` / `QUIT`: Ends the program and exits the interpreter, from direct mode or a running program.
 - `CHAIN file$`: Ends this program and runs another (`.bas` is added if needed). Variables listed in `COMMON` pass to the new program's `COMMON` variables by position, and open files stay open.
 - `COMMON [SHARED] var[()] [AS type][, ...]`: Lists the module variables passed on by `CHAIN`; with `SHARED` they are also visible in every procedure. Named blocks (`COMMON /name/`) are accepted.
@@ -317,7 +318,7 @@ Empty arguments keep their defaults, for example `LINE (0,0)-(9,9), , B` or
 - `_PIXELSIZE[(handle)]`: Bytes per pixel: 4 for a 32-bit image, 1 for a palette image, 0 for text mode. `_DEFAULTCOLOR[(handle)]`, `_BACKGROUNDCOLOR[(handle)]`: The image's foreground and background color.
 - `_PALETTECOLOR(index[, handle])`: The 32-bit color of a palette entry; `_PALETTECOLOR index, color32[, handle]` sets one.
 - `_FONTWIDTH[(font)]`, `_FONTHEIGHT[(font)]`: The size of a character cell of the current or a given font.
-- `_TITLE$`: The window title. `_SCREENX`, `_SCREENY`: Where the window is on the desktop. `_SCREENMOVE x, y` or `_SCREENMOVE _MIDDLE`: Moves it. `_SCREENHIDE`, `_SCREENSHOW`, `_SCREENICON`: Hide, show or minimize it. `_SCREENEXISTS`: -1 once there is a window. `_WINDOWHASFOCUS`: -1 while it has keyboard focus. `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`, `_DESKTOPREFRESHRATE`: The main display.
+- `_TITLE$`: The window title. `_SCREENX`, `_SCREENY`: Where the window is on the desktop. `_SCREENMOVE x, y` or `_SCREENMOVE _MIDDLE`: Moves it. `_SCREENHIDE`, `_SCREENSHOW`, `_SCREENICON`: Hide, show or minimize it. `_SCREENEXISTS`: -1 once there is a window. `_WINDOWHASFOCUS`: -1 while it has keyboard focus. `_EXIT`: -1 on the first read after the user closes the window, 0 after that and while there is no window. `_DESKTOPWIDTH`, `_DESKTOPHEIGHT`, `_DESKTOPREFRESHRATE`: The main display.
 - `_MOUSEHIDE`, `_MOUSESHOW [style$]`, `_MOUSECURSOR style$`, `_MOUSEMOVE x, y`: Hide or show the pointer, pick its shape (`"DEFAULT"`, `"LINK"`, `"TEXT"`, `"CROSSHAIR"`, `"VERTICAL"`, `"HORIZONTAL"`, `"TOPLEFT_BOTTOMRIGHT"`, `"TOPRIGHT_BOTTOMLEFT"`) and put it on a screen pixel.
 - `_MOUSEHIDDEN`: -1 while the pointer is hidden. `_MOUSEMOVEMENTX`, `_MOUSEMOVEMENTY`: Pointer movement in screen pixels since last read. `_MOUSEDISABLED`: -1 when there is no window to read a mouse from.
 - `_RGB32(r, g, b[, a])`, `_RGB32(gray[, a])`, `_RGBA32(r, g, b, a)`: Return a 32-bit `&HAARRGGBB` color. Channels are clamped to 0-255.

@@ -132,6 +132,8 @@ void graphics_set_controlchr(int on);
 int graphics_controlchr(void);
 void graphics_set_blink(int on);
 int graphics_blink(void);
+/* _EXIT: -1 once after the user closes the window, then 0 again. */
+int graphics_take_exit_pending(void);
 int graphics_uprintstring(int px, int py, const unsigned char *text, size_t length, int max_width,
                           int encoding, int font_handle, int image_handle);
 int graphics_uprintwidth(const unsigned char *text, size_t length, int encoding, int font_handle);

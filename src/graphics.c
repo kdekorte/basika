@@ -147,6 +147,9 @@ static int resize_scaling = RESIZE_SCALE_NONE;
 static int fullscreen_mode = FULLSCREEN_OFF;
 static int fullscreen_smooth = 0;
 static int resize_pending = 0;
+/* Window close request. SDL's QUIT no longer kills the process: _EXIT reads
+ * the request once and the program decides when to finish. */
+static int close_pending = 0;
 static int requested_w = -1, requested_h = -1;
 static SDL_Color current_text_color = {255, 255, 255, 255};
 static int canvas_width = 1280;
@@ -2654,6 +2657,14 @@ int graphics_resize_event(void) {
     return pending ? -1 : 0;
 }
 
+/* _EXIT: -1 once after the user closes the window, then 0 again. */
+int graphics_take_exit_pending(void) {
+    handle_events();
+    int pending = close_pending;
+    close_pending = 0;
+    return pending ? -1 : 0;
+}
+
 /* _RESIZEWIDTH / _RESIZEHEIGHT: the window's current size in pixels. */
 int graphics_resize_width(void) {
     int w = 0, h = 0;
@@ -2701,7 +2712,12 @@ void graphics_readline_initial(char *buffer, int size, const char *initial) {
     while (!stop_running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_QUIT) exit(0);
+            if (e.type == SDL_EVENT_QUIT) {
+                close_pending = 1;
+                stop_running = 1;
+                SDL_StopTextInput(window);
+                return;
+            }
             if (e.type == SDL_EVENT_TEXT_INPUT) {
                 if (pos < size - 2) {
                     // Append the new character
@@ -3408,7 +3424,7 @@ void handle_events() {
     if (!window) return;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_EVENT_QUIT) exit(0);
+        if (e.type == SDL_EVENT_QUIT) close_pending = 1;
         if (e.type == SDL_EVENT_TEXT_INPUT) {
             if (e.text.text[0]) last_key_char = (unsigned char)e.text.text[0];
         }
@@ -3511,7 +3527,10 @@ void wait_for_keypress() {
     if (!window) return;
     SDL_Event e;
     while (SDL_WaitEvent(&e)) {
-        if (e.type == SDL_EVENT_QUIT) exit(0);
+        if (e.type == SDL_EVENT_QUIT) {
+            close_pending = 1;
+            break;
+        }
         if (e.type == SDL_EVENT_KEY_DOWN) break;
         if (e.type == SDL_EVENT_WINDOW_EXPOSED ||
             e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||

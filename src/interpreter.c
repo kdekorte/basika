@@ -14,6 +14,7 @@
 #include <fnmatch.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/select.h>
 #include <zlib.h>
 #include <fcntl.h>
@@ -3391,12 +3392,23 @@ static int key_state[32]; // 0=OFF, 1=ON, 2=STOP
 static int key_event_pending[32];
 static int key_event_active[32];
 
-static int on_timer_line = 0;
-static double timer_interval = 0.0;
-static int timer_state = 0; // 0=OFF, 1=ON, 2=STOP
-static int timer_pending = 0;
-static int timer_event_active = 0;
-static double timer_last_trigger_time = 0.0;
+/* ON TIMER traps. Slot 0 is the classic unnamed timer; slots 1... hold
+ * numbers that _FREETIMER handed out, and TIMER(t) FREE gives them back. */
+#define MAX_TIMER_SLOTS 33
+typedef struct {
+    int used;               /* the slot holds a TIMER(t) trap (always for 0) */
+    int state;              /* 0=OFF, 1=ON, 2=STOP */
+    int pending;
+    int event_active;       /* its handler is running (one GOSUB at a time) */
+    double interval;
+    double last_trigger_time;
+    int handler_line;
+} TimerSlot;
+static TimerSlot timers[MAX_TIMER_SLOTS];
+/* Slots with a handler installed. The statement loop polls the timer traps
+ * after every statement, so this count keeps that poll O(1) for programs
+ * with no ON TIMER traps, which is the common case. */
+static int timer_trap_count = 0;
 
 static int on_strig_line[8];
 static int strig_state = 0; // 0=OFF, 1=ON, 2=STOP
@@ -3425,36 +3437,42 @@ void basika_trigger_key_event(int key_idx) {
 }
 
 static int dispatch_pending_timer_event(Statement *exec_stmt, TokenStream *ts, Statement **curr, const char **resume_ptr) {
-    if (timer_state == 0 || timer_pending == 0 || timer_event_active || on_timer_line == 0) return 0;
+    if (timer_trap_count == 0) return 0; /* no traps armed: nothing can be pending */
+    for (int n = 0; n < MAX_TIMER_SLOTS; n++) {
+        TimerSlot *t = &timers[n];
+        /* STOP (2) holds a pending event until TIMER ON, as in QBasic. */
+        if (!t->pending || t->state != 1 || t->event_active || t->handler_line == 0) continue;
 
-    Statement *target = find_line(on_timer_line);
-    if (!target) {
-        report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
-        timer_pending = 0;
-        timer_state = 0;
+        Statement *target = find_line(t->handler_line);
+        if (!target) {
+            report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+            t->pending = 0;
+            t->state = 0;
+            return 1;
+        }
+        if (gosub_ptr >= 32) {
+            report_runtime_error(ERR_OUT_OF_MEMORY);
+            t->pending = 0;
+            return 1;
+        }
+
+        gosub_call_stack[gosub_ptr].stmt = exec_stmt;
+        if (ts->pos < exec_stmt->token_count) {
+            gosub_call_stack[gosub_ptr].ptr = exec_stmt->tokens[ts->pos].start_ptr;
+        } else {
+            gosub_call_stack[gosub_ptr].ptr = exec_stmt->raw_command + strlen(exec_stmt->raw_command);
+        }
+        gosub_call_stack[gosub_ptr].event_type = EVENT_TIMER;
+        gosub_call_stack[gosub_ptr].event_index = n;
+        gosub_ptr++;
+
+        t->pending = 0;
+        t->event_active = 1;
+        *curr = target;
+        *resume_ptr = NULL;
         return 1;
     }
-    if (gosub_ptr >= 32) {
-        report_runtime_error(ERR_OUT_OF_MEMORY);
-        timer_pending = 0;
-        return 1;
-    }
-
-    gosub_call_stack[gosub_ptr].stmt = exec_stmt;
-    if (ts->pos < exec_stmt->token_count) {
-        gosub_call_stack[gosub_ptr].ptr = exec_stmt->tokens[ts->pos].start_ptr;
-    } else {
-        gosub_call_stack[gosub_ptr].ptr = exec_stmt->raw_command + strlen(exec_stmt->raw_command);
-    }
-    gosub_call_stack[gosub_ptr].event_type = EVENT_TIMER;
-    gosub_call_stack[gosub_ptr].event_index = 0;
-    gosub_ptr++;
-
-    timer_pending = 0;
-    timer_event_active = 1;
-    *curr = target;
-    *resume_ptr = NULL;
-    return 1;
+    return 0;
 }
 
 static int dispatch_pending_key_event(Statement *exec_stmt, TokenStream *ts, Statement **curr, const char **resume_ptr) {
@@ -3532,20 +3550,96 @@ static int dispatch_pending_device_event(Statement *exec_stmt, TokenStream *ts, 
     return 0;
 }
 
-static void maybe_queue_timer_event(void) {
-    if (timer_state == 0 || on_timer_line == 0 || timer_interval <= 0.0 || timer_pending || timer_event_active) return;
+/* ON TIMER[(t,)] seconds GOSUB line: arms the classic unnamed timer (no
+ * number) or timer t, whose number _FREETIMER handed out. Reports an error
+ * and returns 0 for a bad number or interval. */
+static int arm_timer(int slot, double interval, int target_line) {
+    if (interval <= 0.0 || slot < 0 || slot >= MAX_TIMER_SLOTS) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return 0;
+    }
+    TimerSlot *t = &timers[slot];
+    t->used = 1;
+    t->interval = interval;
+    timer_trap_count += (target_line != 0) - (t->handler_line != 0);
+    t->handler_line = target_line;
+    t->pending = 0;
+    t->event_active = 0;
+    t->last_trigger_time = wall_time_seconds();
+    return 1;
+}
 
-    if (!find_line(on_timer_line)) {
-        report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
-        timer_state = 0;
-        timer_pending = 0;
+/* TIMER [(t)] ON|OFF|STOP|FREE: runs, holds or releases a timer trap. */
+static void set_timer_state(int slot, Token mode) {
+    TimerSlot *t = (slot >= 0 && slot < MAX_TIMER_SLOTS) ? &timers[slot] : NULL;
+    if (!t || (slot > 0 && !t->used)) {
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
         return;
     }
+    if (mode.type == TOKEN_ON) {
+        t->state = 1;
+        t->last_trigger_time = wall_time_seconds();
+    } else if (mode.type == TOKEN_OFF) {
+        t->state = 0;
+        t->pending = 0;
+        t->event_active = 0;
+    } else if (mode.type == TOKEN_STOP) {
+        t->state = 2;
+    } else if (mode.type == TOKEN_IDENTIFIER && strcasecmp(mode.text, "FREE") == 0) {
+        // TIMER(t) FREE drops the trap and hands the number back.
+        t->state = 0;
+        t->pending = 0;
+        t->event_active = 0;
+        t->interval = 0.0;
+        timer_trap_count -= (t->handler_line != 0);
+        t->handler_line = 0;
+        if (slot > 0) t->used = 0;
+    } else {
+        report_runtime_error(ERR_SYNTAX_ERROR);
+    }
+}
 
-    double now = wall_time_seconds();
-    if (now - timer_last_trigger_time >= timer_interval) {
-        timer_pending = 1;
-        timer_last_trigger_time = now;
+/* _FREETIMER: hands out free timer numbers (1..., 32) for ON TIMER(t, n)
+ * GOSUB, or 0 when they are all taken. The number stays allocated until
+ * TIMER(t) FREE hands it back. */
+static int alloc_freetimer(void) {
+    for (int n = 1; n < MAX_TIMER_SLOTS; n++) {
+        if (!timers[n].used) {
+            timers[n].used = 1;
+            return n;
+        }
+    }
+    return 0;
+}
+
+/* SHELL command$ with QB64's _HIDE (hide the output) and _DONTWAIT (return
+ * at once) options. */
+static void run_shell_command(const char *cmd, int hide, int dont_wait) {
+    char full[288];
+    snprintf(full, sizeof(full), "%s%s%s", cmd,
+             hide ? " > /dev/null 2>&1" : "", dont_wait ? " &" : "");
+    fflush(stdout);
+    system(full);
+}
+
+static void maybe_queue_timer_event(void) {
+    if (timer_trap_count == 0) return; /* no traps armed: nothing to queue */
+    for (int n = 0; n < MAX_TIMER_SLOTS; n++) {
+        TimerSlot *t = &timers[n];
+        if (t->state == 0 || t->handler_line == 0 || t->interval <= 0.0 || t->pending || t->event_active) continue;
+
+        if (!find_line(t->handler_line)) {
+            report_runtime_error(ERR_UNDEFINED_LINE_NUMBER);
+            t->state = 0;
+            t->pending = 0;
+            return;
+        }
+
+        double now = wall_time_seconds();
+        if (now - t->last_trigger_time >= t->interval) {
+            t->pending = 1;
+            t->last_trigger_time = now;
+        }
     }
 }
 
@@ -4545,13 +4639,14 @@ static void call_qb64_file_function_text(const char **input, int id, double *num
 static void format_number_plain(Num value, int is_double, char *out, size_t size);
 static int is_string_member_reference_text(const char *text);
 
-/* ---- QB64 string functions: _TRIM$, _TOSTR$, _BIN$, _INSTRREV, _STRCMP and
- * _STRICMP. Each parser reads the arguments into a QB64StringArgs (strings
- * and numbers as they come) and qb64_string_function does the rest. */
+/* ---- QB64 string functions: _TRIM$, _TOSTR$, _BIN$, _INSTRREV, _STRCMP,
+ * _STRICMP and _SHELLHIDE. Each parser reads the arguments into a
+ * QB64StringArgs (strings and numbers as they come) and qb64_string_function
+ * does the rest. */
 enum {
     QB64_STR_NONE, QB64_STR_TRIM, QB64_STR_TOSTR, QB64_STR_BIN,
     QB64_STR_INSTRREV, QB64_STR_STRCMP, QB64_STR_STRICMP,
-    QB64_STR_UPRINTWIDTH, QB64_STR_UCHARPOS
+    QB64_STR_UPRINTWIDTH, QB64_STR_UCHARPOS, QB64_STR_SHELLHIDE
 };
 
 static int qb64_string_function_id(const char *name) {
@@ -4559,6 +4654,7 @@ static int qb64_string_function_id(const char *name) {
         {"_TRIM$", QB64_STR_TRIM}, {"_TOSTR$", QB64_STR_TOSTR}, {"_BIN$", QB64_STR_BIN},
         {"_INSTRREV", QB64_STR_INSTRREV}, {"_STRCMP", QB64_STR_STRCMP}, {"_STRICMP", QB64_STR_STRICMP},
         {"_UPRINTWIDTH", QB64_STR_UPRINTWIDTH}, {"_UCHARPOS", QB64_STR_UCHARPOS},
+        {"_SHELLHIDE", QB64_STR_SHELLHIDE},
     };
     if (name[0] != '_') return QB64_STR_NONE;
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -4702,6 +4798,23 @@ static int qb64_string_function(int id, const QB64StringArgs *args, Num *number,
             const char *a = qb64_arg_text(args, 0, &n0);
             const char *b = qb64_arg_text(args, 1, &n1);
             *number = num_i(qb64_compare_strings(a, n0, b, n1, id == QB64_STR_STRICMP), NUM_INTEGER);
+            return 0;
+        }
+        case QB64_STR_SHELLHIDE: {
+            // _SHELLHIDE(command$): runs the command without showing its
+            // output and gives its exit code.
+            if (args->count != 1 || !args->is_string[0]) return ERR_TYPE_MISMATCH;
+            const char *cmd = qb64_arg_text(args, 0, &n0);
+            char full[BASIC_STRING_MAX + 32];
+            static const char redirect[] = " > /dev/null 2>&1";
+            if (n0 > BASIC_STRING_MAX) n0 = BASIC_STRING_MAX;
+            memcpy(full, cmd, n0);
+            memcpy(full + n0, redirect, sizeof(redirect));
+            fflush(stdout);
+            int status = system(full);
+            int code = status;
+            if (status > 0 && WIFEXITED(status)) code = WEXITSTATUS(status);
+            *number = num_i(code, NUM_INTEGER);
             return 0;
         }
         case QB64_STR_UPRINTWIDTH:
@@ -8503,7 +8616,9 @@ enum {
     QB64_FN_SHL, QB64_FN_SHR, QB64_FN_ROL, QB64_FN_ROR,
     QB64_FN_SETBIT, QB64_FN_RESETBIT, QB64_FN_TOGGLEBIT, QB64_FN_READBIT,
     // Text.
-    QB64_FN_UFONTHEIGHT, QB64_FN_ULINESPACING, QB64_FN_MAPUNICODE, QB64_FN_CONTROLCHR, QB64_FN_BLINK
+    QB64_FN_UFONTHEIGHT, QB64_FN_ULINESPACING, QB64_FN_MAPUNICODE, QB64_FN_CONTROLCHR, QB64_FN_BLINK,
+    // Timers and process control.
+    QB64_FN_FREETIMER, QB64_FN_EXIT
 };
 
 static int qb64_function_id(const char *name) {
@@ -8535,6 +8650,7 @@ static int qb64_function_id(const char *name) {
         {"_PRINTMODE", QB64_FN_PRINTMODE}, {"_FULLSCREEN", QB64_FN_FULLSCREEN},
         {"_UFONTHEIGHT", QB64_FN_UFONTHEIGHT}, {"_ULINESPACING", QB64_FN_ULINESPACING},
         {"_MAPUNICODE", QB64_FN_MAPUNICODE}, {"_CONTROLCHR", QB64_FN_CONTROLCHR}, {"_BLINK", QB64_FN_BLINK},
+        {"_FREETIMER", QB64_FN_FREETIMER}, {"_EXIT", QB64_FN_EXIT},
         {"_SNDPLAYING", QB64_FN_SNDPLAYING}, {"_SNDPAUSED", QB64_FN_SNDPAUSED},
         {"_SNDLEN", QB64_FN_SNDLEN}, {"_SNDGETPOS", QB64_FN_SNDGETPOS},
         {"_MIN", QB64_FN_MIN}, {"_MAX", QB64_FN_MAX}, {"_CLAMP", QB64_FN_CLAMP},
@@ -8711,6 +8827,13 @@ static double qb64_function_value(int id, const double *args, int argc) {
             return graphics_controlchr() ? 0 : -1;
         case QB64_FN_BLINK:
             return graphics_blink() ? -1 : 0;
+        case QB64_FN_FREETIMER:
+            // _FREETIMER hands out timer numbers for ON TIMER(t, n) GOSUB;
+            // it gives 0 when they are all taken.
+            return alloc_freetimer();
+        case QB64_FN_EXIT:
+            // _EXIT reads -1 once after the user closes the window, then 0.
+            return graphics_take_exit_pending() ? -1 : 0;
         case QB64_FN_SCREENX:
         case QB64_FN_SCREENY:
             return graphics_is_active() ? graphics_window_position(id == QB64_FN_SCREENY) : 0;
@@ -11422,9 +11545,19 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                 return;
             } else if (next.type == TOKEN_KEY || next.type == TOKEN_TIMER || next.type == TOKEN_STRIG) {
                 Token lparen = get_next_token(&ptr);
-                double n_val = 0;
+                double n_val = 0, n_val2 = 0;
+                int timer_two_args = 0;
                 if (lparen.type == TOKEN_LPAREN) {
                     n_val = evaluate_expression(&ptr);
+                    const char *saved_comma = ptr;
+                    Token maybe_comma = get_next_token(&ptr);
+                    if (next.type == TOKEN_TIMER && maybe_comma.type == TOKEN_COMMA) {
+                        // ON TIMER(t, n) GOSUB: t from _FREETIMER, n seconds.
+                        n_val2 = evaluate_expression(&ptr);
+                        timer_two_args = 1;
+                    } else {
+                        ptr = saved_comma;
+                    }
                     Token rparen = get_next_token(&ptr);
                     if (rparen.type != TOKEN_RPAREN) {
                         report_runtime_error(ERR_SYNTAX_ERROR);
@@ -11456,11 +11589,13 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         return;
                     }
                 } else if (next.type == TOKEN_TIMER) {
-                    timer_interval = n_val;
-                    on_timer_line = target_line;
-                    timer_pending = 0;
-                    timer_event_active = 0;
-                    timer_last_trigger_time = wall_time_seconds();
+                    int slot = 0;
+                    double interval = n_val;
+                    if (timer_two_args) {
+                        slot = (int)n_val;
+                        interval = n_val2;
+                    }
+                    if (!arm_timer(slot, interval, target_line)) return;
                 } else if (next.type == TOKEN_STRIG) {
                     int s = (int)n_val;
                     if (s >= 0 && s < 8) {
@@ -11505,25 +11640,22 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             }
             ptr = saved_key;
         } else if (t.type == TOKEN_TIMER) {
-            Token mode = get_next_token(&ptr);
-            if (mode.type == TOKEN_ON) {
-                timer_state = 1;
-                timer_pending = 0;
-                timer_event_active = 0;
-                timer_last_trigger_time = wall_time_seconds();
-                *ptr_addr = ptr;
-                return;
-            } else if (mode.type == TOKEN_OFF) {
-                timer_state = 0;
-                timer_pending = 0;
-                timer_event_active = 0;
-                *ptr_addr = ptr;
-                return;
-            } else if (mode.type == TOKEN_STOP) {
-                timer_state = 2;
-                *ptr_addr = ptr;
-                return;
+            // TIMER ON|OFF|STOP, or TIMER(t) ON|OFF|STOP|FREE for a timer
+            // number from _FREETIMER: runs, holds or releases that trap.
+            int slot = 0;
+            const char *saved_paren = ptr;
+            if (get_next_token(&ptr).type == TOKEN_LPAREN) {
+                slot = evaluate_int_text(&ptr);
+                if (get_next_token(&ptr).type != TOKEN_RPAREN) {
+                    report_runtime_error(ERR_SYNTAX_ERROR);
+                    return;
+                }
+            } else {
+                ptr = saved_paren;
             }
+            set_timer_state(slot, get_next_token(&ptr));
+            *ptr_addr = ptr;
+            return;
         } else if (t.type == TOKEN_PEN) {
             // PEN ON | OFF | STOP: enables, disables or holds ON PEN trapping.
             Token mode = get_next_token(&ptr);
@@ -12279,13 +12411,28 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
             if (rmdir(path) != 0) report_runtime_error(ERR_PATH_FILE_ACCESS_ERROR);
         } else if (t.type == TOKEN_SHELL) {
             char cmd[256] = "";
+            int hide = 0, dont_wait = 0;
+            for (;;) {
+                const char *saved_opt = ptr;
+                Token opt = get_next_token(&ptr);
+                if (opt.type == TOKEN_IDENTIFIER && strcasecmp(opt.text, "_HIDE") == 0) {
+                    hide = 1;
+                } else if (opt.type == TOKEN_IDENTIFIER && strcasecmp(opt.text, "_DONTWAIT") == 0) {
+                    dont_wait = 1;
+                } else {
+                    ptr = saved_opt;
+                    break;
+                }
+            }
             const char *saved = ptr;
             Token cmd_tok = get_next_token(&ptr);
             if (cmd_tok.type != TOKEN_EOF && cmd_tok.type != TOKEN_COLON) {
                 ptr = saved;
                 parse_string_expression(&ptr, cmd, sizeof(cmd));
-                fflush(stdout);
-                if (cmd[0] != '\0') system(cmd);
+                if (cmd[0] != '\0') run_shell_command(cmd, hide, dont_wait);
+            } else if (hide || dont_wait) {
+                report_runtime_error(ERR_SYNTAX_ERROR);
+                return;
             } else {
                 const char *shell_cmd = getenv("SHELL");
                 fflush(stdout);
@@ -14018,7 +14165,7 @@ static int explicit_is_declared(const char *name, int scope) {
 
 /* Names that are not variables: built-ins Basika reads as identifiers. */
 static int explicit_is_builtin_name(const char *name, TokenType statement) {
-    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT", "IS", "FREEFILE"};
+    static const char *const always[] = {"ERR", "ERL", "ERDEV", "CSRLIN", "POS", "POINT", "LPRINT", "IS", "FREEFILE", "FREE"};
     for (size_t i = 0; i < sizeof(always) / sizeof(always[0]); i++) {
         if (strcasecmp(name, always[i]) == 0) return 1;
     }
@@ -14272,8 +14419,10 @@ static void run_program_from(Statement *start) {
     error_ptr = NULL;
     error_next_ptr = NULL;
 
-    timer_pending = 0;
-    timer_event_active = 0;
+    for (int i = 0; i < MAX_TIMER_SLOTS; i++) {
+        timers[i].pending = 0;
+        timers[i].event_active = 0;
+    }
     for (int i = 0; i < 32; i++) {
         key_event_pending[i] = 0;
         key_event_active[i] = 0;
@@ -14781,6 +14930,15 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     }
                     ts.pos++;
                     double n_val = evaluate_expression_tok(&ts);
+                    double n_val2 = 0;
+                    int timer_two_args = 0;
+                    if (next_on.type == TOKEN_TIMER && ts.pos < exec_stmt->token_count &&
+                        ts.tokens[ts.pos].type == TOKEN_COMMA) {
+                        // ON TIMER(t, n) GOSUB: t from _FREETIMER, n seconds.
+                        ts.pos++;
+                        n_val2 = evaluate_expression_tok(&ts);
+                        timer_two_args = 1;
+                    }
                     if (ts.pos >= exec_stmt->token_count || ts.tokens[ts.pos].type != TOKEN_RPAREN) {
                         report_runtime_error(ERR_SYNTAX_ERROR);
                         break;
@@ -14808,11 +14966,13 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                             report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
                         }
                     } else if (next_on.type == TOKEN_TIMER) {
-                        timer_interval = n_val;
-                        on_timer_line = target_line;
-                        timer_pending = 0;
-                        timer_event_active = 0;
-                        timer_last_trigger_time = wall_time_seconds();
+                        int slot = 0;
+                        double interval = n_val;
+                        if (timer_two_args) {
+                            slot = (int)n_val;
+                            interval = n_val2;
+                        }
+                        arm_timer(slot, interval, target_line);
                     } else if (next_on.type == TOKEN_STRIG) {
                         int s = (int)n_val;
                         if (s >= 0 && s < 8) {
@@ -14895,8 +15055,11 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     resume_ptr = gosub_call_stack[gosub_ptr].ptr;
                     
                     if (gosub_call_stack[gosub_ptr].event_type == EVENT_TIMER) {
-                        timer_event_active = 0;
-                        timer_last_trigger_time = wall_time_seconds();
+                        int slot_idx = gosub_call_stack[gosub_ptr].event_index;
+                        if (slot_idx >= 0 && slot_idx < MAX_TIMER_SLOTS) {
+                            timers[slot_idx].event_active = 0;
+                            timers[slot_idx].last_trigger_time = wall_time_seconds();
+                        }
                     } else if (gosub_call_stack[gosub_ptr].event_type == EVENT_KEY) {
                         int k = gosub_call_stack[gosub_ptr].event_index;
                         if (k >= 1 && k < 32) key_event_active[k] = 0;

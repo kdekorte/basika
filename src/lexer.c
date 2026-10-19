@@ -317,6 +317,7 @@ static const char *find_qb64_name(const char *name) {
         "_ATANH", "_COSH", "_SINH", "_TANH", "_SEC", "_CSC", "_COT", "_ARCSEC", "_ARCCSC", "_ARCCOT",
         "_SECH", "_CSCH", "_COTH", "_D2R", "_R2D", "_D2G", "_G2D", "_R2G", "_G2R",
         "_SHL", "_SHR", "_ROL", "_ROR", "_SETBIT", "_RESETBIT", "_TOGGLEBIT", "_READBIT",
+        "_FREETIMER", "_EXIT", "_HIDE", "_DONTWAIT", "_SHELLHIDE",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         if (strcasecmp(name, names[i]) == 0) return names[i];
