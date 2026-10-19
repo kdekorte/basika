@@ -18,7 +18,7 @@ static SDL_Renderer *renderer = NULL;
  * kind of write (SDL_RenderLine, SDL_RenderGeometry, ...) needs a wrapper. */
 static SDL_Texture *render_target = NULL;      /* the texture SDL draws into */
 static SDL_Texture *point_cache_texture = NULL; /* the texture POINT last read */
-static SDL_Surface *point_cache = NULL;         /* its pixels (ARGB8888), or NULL */
+static SDL_Surface *point_cache = NULL;         /* its pixels (RGBA8888), or NULL */
 static int point_cache_reads = 0;               /* reads of it since it last changed */
 /* Reads of an unchanged texture before it is copied. A copy that is dropped
  * before it saves as many reads doubles this, so drawing between reads
@@ -36,14 +36,72 @@ static void drop_point_cache(SDL_Texture *texture) {
     point_cache_reads = 0;
 }
 
+/* Mirrors of the renderer's draw state. Every change in this file goes
+ * through the wrappers below and the renderer is created once, so calls
+ * that would change nothing can be skipped: each is a validated SDL call,
+ * and the drawing paths make thousands of them per second. */
+static bool blend_mode_known = false;
+static SDL_BlendMode render_blend_mode = SDL_BLENDMODE_NONE;
+static bool draw_color_known = false;
+static Uint8 draw_color_r = 0, draw_color_g = 0, draw_color_b = 0, draw_color_a = 255;
+static bool clip_known = false;
+static bool clip_active = false;
+
 static bool tracked_set_render_target(SDL_Renderer *r, SDL_Texture *texture) {
+    if (texture == render_target) return true;
     if (!SDL_SetRenderTarget(r, texture)) return false;
     render_target = texture;
     return true;
 }
 
+static bool tracked_set_render_draw_blend_mode(SDL_Renderer *r, SDL_BlendMode mode) {
+    if (blend_mode_known && mode == render_blend_mode) return true;
+    if (!SDL_SetRenderDrawBlendMode(r, mode)) return false;
+    blend_mode_known = true;
+    render_blend_mode = mode;
+    return true;
+}
+
+static bool tracked_set_render_draw_color(SDL_Renderer *r, Uint8 cr, Uint8 cg, Uint8 cb, Uint8 ca) {
+    if (draw_color_known && cr == draw_color_r && cg == draw_color_g &&
+        cb == draw_color_b && ca == draw_color_a) return true;
+    if (!SDL_SetRenderDrawColor(r, cr, cg, cb, ca)) return false;
+    draw_color_known = true;
+    draw_color_r = cr;
+    draw_color_g = cg;
+    draw_color_b = cb;
+    draw_color_a = ca;
+    return true;
+}
+
+static bool tracked_set_render_clip_rect(SDL_Renderer *r, const SDL_Rect *rect) {
+    if (!rect && clip_known && !clip_active) return true;
+    if (!SDL_SetRenderClipRect(r, rect)) return false;
+    clip_known = true;
+    clip_active = rect != NULL;
+    return true;
+}
+
 static bool tracked_render_clear(SDL_Renderer *r) {
-    drop_point_cache(render_target);
+    /* An unblended, unclipped clear rewrites every pixel of the target with
+     * the draw color, so it is mirrored into POINT's copy of the target and
+     * the copy kept: a CLS between reads (POINT, PAINT) no longer throws it
+     * away. Clears that blend or clip still drop the copy. */
+    int keep = render_target != NULL && render_target == point_cache_texture && point_cache &&
+               blend_mode_known && render_blend_mode == SDL_BLENDMODE_NONE &&
+               clip_known && !clip_active;
+    if (keep && !draw_color_known &&
+        !SDL_GetRenderDrawColor(r, &draw_color_r, &draw_color_g, &draw_color_b, &draw_color_a)) {
+        keep = 0;
+    }
+    if (keep) {
+        draw_color_known = true;
+        Uint32 pixel = ((Uint32)draw_color_r << 24) | ((Uint32)draw_color_g << 16) |
+                       ((Uint32)draw_color_b << 8) | draw_color_a;
+        SDL_FillSurfaceRect(point_cache, NULL, pixel);
+    } else {
+        drop_point_cache(render_target);
+    }
     return SDL_RenderClear(r);
 }
 
@@ -55,9 +113,10 @@ static bool tracked_render_clear(SDL_Renderer *r) {
 static int fill_point_cache(SDL_Renderer *r, const SDL_FRect *rects, int count) {
     if (render_target == NULL || render_target != point_cache_texture) return 1;
     SDL_BlendMode mode;
-    if (!SDL_GetRenderDrawBlendMode(r, &mode) || mode != SDL_BLENDMODE_NONE) return 0;
-    SDL_Rect clip;
-    if (SDL_RenderClipEnabled(r) && SDL_GetRenderClipRect(r, &clip)) return 0;
+    if (blend_mode_known) mode = render_blend_mode;
+    else if (!SDL_GetRenderDrawBlendMode(r, &mode)) return 0;
+    if (mode != SDL_BLENDMODE_NONE) return 0;
+    if (clip_known ? clip_active : SDL_RenderClipEnabled(r)) return 0;
     if (!point_cache) return 1;
     for (int i = 0; i < count; i++) {
         const SDL_FRect *f = &rects[i];
@@ -65,8 +124,15 @@ static int fill_point_cache(SDL_Renderer *r, const SDL_FRect *rects, int count) 
             f->w != floorf(f->w) || f->h != floorf(f->h)) return 0;
     }
     Uint8 cr, cg, cb, ca;
-    SDL_GetRenderDrawColor(r, &cr, &cg, &cb, &ca);
-    Uint32 pixel = ((Uint32)ca << 24) | ((Uint32)cr << 16) | ((Uint32)cg << 8) | cb;
+    if (draw_color_known) {
+        cr = draw_color_r;
+        cg = draw_color_g;
+        cb = draw_color_b;
+        ca = draw_color_a;
+    } else if (!SDL_GetRenderDrawColor(r, &cr, &cg, &cb, &ca)) {
+        return 0;
+    }
+    Uint32 pixel = ((Uint32)cr << 24) | ((Uint32)cg << 16) | ((Uint32)cb << 8) | ca;
     for (int i = 0; i < count; i++) {
         int x0 = (int)rects[i].x, y0 = (int)rects[i].y;
         int x1 = x0 + (int)rects[i].w, y1 = y0 + (int)rects[i].h;
@@ -116,8 +182,17 @@ static void tracked_destroy_texture(SDL_Texture *texture) {
     SDL_DestroyTexture(texture);
 }
 
+/* Uploads pixels that POINT's copy already reflects, so unlike
+ * tracked_update_texture it does not drop the copy. */
+static bool tracked_update_texture_keep(SDL_Texture *texture, const SDL_Rect *rect, const void *pixels, int pitch) {
+    return SDL_UpdateTexture(texture, rect, pixels, pitch);
+}
+
 #define SDL_SetRenderTarget tracked_set_render_target
 #define SDL_RenderClear tracked_render_clear
+#define SDL_SetRenderDrawBlendMode tracked_set_render_draw_blend_mode
+#define SDL_SetRenderDrawColor tracked_set_render_draw_color
+#define SDL_SetRenderClipRect tracked_set_render_clip_rect
 #define SDL_RenderFillRect tracked_render_fill_rect
 #define SDL_RenderFillRects tracked_render_fill_rects
 #define SDL_RenderTexture tracked_render_texture
@@ -1619,7 +1694,9 @@ int init_graphics() {
         setenv("SDL_VIDEODRIVER", "dummy", 1);
     }
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
-    SDL_InitSubSystem(SDL_INIT_JOYSTICK); // optional: STICK/STRIG work without a joystick
+    // The dummy video driver of a --headless run delivers no joystick events,
+    // and skipping the subsystem keeps SDL_PumpEvents from polling for them.
+    if (!headless_mode) SDL_InitSubSystem(SDL_INIT_JOYSTICK); // optional: STICK/STRIG work without a joystick
     if (!TTF_Init()) return 0;
     
     // Create a 4:3 Window (1024x768)
@@ -2167,6 +2244,19 @@ static void free_point_cache(void) {
     point_cache_reads = 0;
 }
 
+/* Takes POINT's copy of the canvas from the GPU, in the canvas texture's
+ * format (RGBA8888) so drawing code can share it. Returns 0 on failure. */
+static int make_point_cache(void) {
+    SDL_SetRenderTarget(renderer, canvas);
+    SDL_Surface *raw = SDL_RenderReadPixels(renderer, NULL);
+    if (raw) {
+        point_cache = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA8888);
+        SDL_DestroySurface(raw);
+    }
+    point_cache_reads = 0; // now counts the reads the copy saves
+    return point_cache != NULL;
+}
+
 /* Reads pixel (x, y) of the canvas texture: from POINT's copy of it once
  * point_cache_after reads have found it unchanged, else from the GPU. */
 static int read_canvas_pixel(int x, int y, Uint8 *r, Uint8 *g, Uint8 *b, Uint8 *a) {
@@ -2175,22 +2265,16 @@ static int read_canvas_pixel(int x, int y, Uint8 *r, Uint8 *g, Uint8 *b, Uint8 *
         point_cache_texture = canvas;
     }
     if (!point_cache && ++point_cache_reads > point_cache_after) {
-        SDL_SetRenderTarget(renderer, canvas);
-        SDL_Surface *raw = SDL_RenderReadPixels(renderer, NULL);
-        if (raw) {
-            point_cache = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_ARGB8888);
-            SDL_DestroySurface(raw);
-        }
-        point_cache_reads = 0; // now counts the reads the copy saves
+        make_point_cache();
     }
     if (point_cache) {
         point_cache_reads++;
         if (x >= point_cache->w || y >= point_cache->h) return 0;
         Uint32 pixel = ((const Uint32 *)((const Uint8 *)point_cache->pixels + (size_t)y * point_cache->pitch))[x];
-        *a = (Uint8)(pixel >> 24);
-        *r = (Uint8)(pixel >> 16);
-        *g = (Uint8)(pixel >> 8);
-        *b = (Uint8)pixel;
+        *r = (Uint8)(pixel >> 24);
+        *g = (Uint8)(pixel >> 16);
+        *b = (Uint8)(pixel >> 8);
+        *a = (Uint8)pixel;
         return 1;
     }
 
@@ -2405,16 +2489,20 @@ typedef struct {
     int x, y;
 } Point;
 
-static Uint32 blend_paint_pixel(Uint32 destination, SDL_Color source,
-                                const SDL_PixelFormatDetails *details, SDL_Palette *palette) {
-    if (source.a == 255) return SDL_MapRGBA(details, palette, source.r, source.g, source.b, 255);
-    Uint8 dr, dg, db;
-    SDL_GetRGB(destination, details, palette, &dr, &dg, &db);
+/* Blends source over destination in the canvas texture's format, RGBA8888
+ * packed as r<<24|g<<16|b<<8|a: what SDL_GetRGB and SDL_MapRGBA compute for
+ * that format, without their per-pixel call overhead. */
+static Uint32 blend_paint_pixel(Uint32 destination, SDL_Color source) {
+    if (source.a == 255) {
+        return ((Uint32)source.r << 24) | ((Uint32)source.g << 16) |
+               ((Uint32)source.b << 8) | 0xFFu;
+    }
     int alpha = source.a;
+    Uint8 dr = (Uint8)(destination >> 24), dg = (Uint8)(destination >> 16), db = (Uint8)(destination >> 8);
     Uint8 r = (Uint8)((source.r * alpha + dr * (255 - alpha) + 127) / 255);
     Uint8 g = (Uint8)((source.g * alpha + dg * (255 - alpha) + 127) / 255);
     Uint8 b = (Uint8)((source.b * alpha + db * (255 - alpha) + 127) / 255);
-    return SDL_MapRGBA(details, palette, r, g, b, 255);
+    return ((Uint32)r << 24) | ((Uint32)g << 16) | ((Uint32)b << 8) | 0xFFu;
 }
 
 
@@ -2487,57 +2575,106 @@ static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned 
 
     SDL_SetRenderTarget(renderer, canvas);
     SDL_SetRenderClipRect(renderer, NULL);
-    SDL_Surface *raw_surf = SDL_RenderReadPixels(renderer, &region);
-    if (!raw_surf) return;
-    // Convert to canvas format to ensure color mapping matches the texture
-    SDL_Surface *surf = SDL_ConvertSurface(raw_surf, SDL_PIXELFORMAT_RGBA8888);
-    SDL_DestroySurface(raw_surf);
-    if (!surf) return;
+
+    /* CPU pixels of the region in the canvas texture's format (RGBA8888):
+     * POINT's copy of the canvas when it holds, since the drawing paths
+     * keep it exact, so repeated PAINTs need no GPU readback. A PAINT of
+     * the whole canvas that cannot reuse the copy takes it for the later
+     * PAINTs to share; a small region that cannot reuse it is read back on
+     * its own. */
+    SDL_Surface *surf = NULL;
+    int own_surf = 0;          /* surf is a temporary, not POINT's copy */
+    int off_x = 0, off_y = 0;  /* surf pixel (0, 0) at canvas (off_x, off_y) */
+    if (point_cache_texture == canvas && point_cache &&
+        point_cache->w == canvas_width && point_cache->h == canvas_height) {
+        surf = point_cache;
+        off_x = region.x;
+        off_y = region.y;
+    } else if (region.x == 0 && region.y == 0 &&
+               region.w == canvas_width && region.h == canvas_height) {
+        free_point_cache(); // whatever it holds; this PAINT needs the canvas
+        point_cache_texture = canvas;
+        if (!make_point_cache()) return;
+        surf = point_cache;
+    } else {
+        SDL_Surface *raw_surf = SDL_RenderReadPixels(renderer, &region);
+        if (!raw_surf) return;
+        // Convert to canvas format to ensure color mapping matches the texture
+        surf = SDL_ConvertSurface(raw_surf, SDL_PIXELFORMAT_RGBA8888);
+        SDL_DestroySurface(raw_surf);
+        if (!surf) return;
+        own_surf = 1;
+    }
 
     SDL_Color sc_border = get_graphics_color(border_color);
-    const SDL_PixelFormatDetails *details = SDL_GetPixelFormatDetails(surf->format);
-    SDL_Palette *palette = SDL_GetSurfacePalette(surf);
-    Uint32 u_paint = SDL_MapRGBA(details, palette, sc_paint.r, sc_paint.g, sc_paint.b, 255);
-    Uint32 u_border = SDL_MapRGBA(details, palette, sc_border.r, sc_border.g, sc_border.b, 255);
+    Uint32 u_paint = ((Uint32)sc_paint.r << 24) | ((Uint32)sc_paint.g << 16) |
+                     ((Uint32)sc_paint.b << 8) | 0xFFu;
+    Uint32 u_border = ((Uint32)sc_border.r << 24) | ((Uint32)sc_border.g << 16) |
+                      ((Uint32)sc_border.b << 8) | 0xFFu;
     // Mask out the alpha channel to make comparisons robust against driver-specific
     // variations in how alpha is handled in the render target or ReadPixels.
-    Uint32 mask = ~details->Amask;
-    int min_x = 0, min_y = 0, max_x = surf->w - 1, max_y = surf->h - 1;
+    Uint32 mask = 0xFFFFFF00u;
+    int min_x = 0, min_y = 0, max_x = region.w - 1, max_y = region.h - 1;
 
-    int pitch_pixels = surf->pitch / details->bytes_per_pixel;
-    Uint32 *pixels = (Uint32 *)surf->pixels;
-    Uint32 start_color = pixels[sy * pitch_pixels + sx];
+    int pitch_pixels = surf->pitch / 4;
+    Uint32 *row_base = (Uint32 *)surf->pixels + (size_t)off_y * (size_t)pitch_pixels + off_x;
+    Uint32 start_color = row_base[(size_t)sy * (size_t)pitch_pixels + (size_t)sx];
     // A solid fill also stops at pixels already in the paint color, as in QBasic.
     int stop_at_paint = !tile && sc_paint.a == 255;
     if ((start_color & mask) == (u_border & mask) ||
         (stop_at_paint && (start_color & mask) == (u_paint & mask))) {
-        SDL_DestroySurface(surf);
+        if (own_surf) SDL_DestroySurface(surf);
         return;
     }
 
-    size_t capacity = (size_t)surf->w * (size_t)surf->h;
-    Point *queue = malloc(capacity * sizeof(Point));
-    Uint8 *visited = calloc(capacity, sizeof(Uint8));
-    if (!queue || !visited) {
+    /* The queue and the visited stamps are kept between PAINTs: no
+     * per-call allocation, and stamping leaves most of the visited map
+     * untouched, where clearing it was a large part of a PAINT's cost. */
+    static Point *queue = NULL;
+    static Uint32 *stamps = NULL;
+    static size_t fill_capacity = 0;
+    static Uint32 fill_stamp = 0;
+    size_t needed = (size_t)region.w * (size_t)region.h;
+    if (needed > fill_capacity) {
         free(queue);
-        free(visited);
-        SDL_DestroySurface(surf);
-        return;
+        free(stamps);
+        queue = malloc(needed * sizeof(Point));
+        stamps = calloc(needed, sizeof(Uint32));
+        if (!queue || !stamps) {
+            free(queue);
+            free(stamps);
+            queue = NULL;
+            stamps = NULL;
+            fill_capacity = 0;
+            if (own_surf) SDL_DestroySurface(surf);
+            return;
+        }
+        fill_capacity = needed;
+        fill_stamp = 0;
     }
+    if (++fill_stamp == 0) { // wrapped: reset so no stamp is mistaken for current
+        memset(stamps, 0, fill_capacity * sizeof(Uint32));
+        fill_stamp = 1;
+    }
+
     size_t head = 0, tail = 0;
     // The bounds of the pixels painted, so only they are uploaded again.
-    int painted_x0 = surf->w, painted_y0 = surf->h, painted_x1 = -1, painted_y1 = -1;
-    visited[(size_t)sy * (size_t)surf->w + (size_t)sx] = 1;
+    int painted_x0 = region.w, painted_y0 = region.h, painted_x1 = -1, painted_y1 = -1;
+    stamps[(size_t)sy * (size_t)region.w + (size_t)sx] = fill_stamp;
     queue[tail++] = (Point){sx, sy};
 
     while (head < tail) {
         Point p = queue[head++];
-        Uint32 *pixel = &pixels[p.y * pitch_pixels + p.x];
+        Uint32 *pixel = &row_base[(size_t)p.y * (size_t)pitch_pixels + (size_t)p.x];
         SDL_Color fill = sc_paint;
-        if (tile) fill = get_graphics_color(tile_color(tile, tile_length, (int)((p.x + region.x) / xs),
-                                                       (int)((p.y + region.y) / ys)));
-        if (fill.a > 0) {
-            *pixel = blend_paint_pixel(*pixel, fill, details, palette);
+        int write = 1;
+        if (tile) {
+            fill = get_graphics_color(tile_color(tile, tile_length, (int)((p.x + region.x) / xs),
+                                                 (int)((p.y + region.y) / ys)));
+            write = fill.a > 0;
+        }
+        if (write) {
+            *pixel = blend_paint_pixel(*pixel, fill);
             if (p.x < painted_x0) painted_x0 = p.x;
             if (p.x > painted_x1) painted_x1 = p.x;
             if (p.y < painted_y0) painted_y0 = p.y;
@@ -2551,12 +2688,12 @@ static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned 
             int nx = neighbors[i].x;
             int ny = neighbors[i].y;
             if (nx < min_x || nx > max_x || ny < min_y || ny > max_y) continue;
-            size_t index = (size_t)ny * (size_t)surf->w + (size_t)nx;
-            if (visited[index]) continue;
-            Uint32 c = pixels[ny * pitch_pixels + nx];
+            size_t index = (size_t)ny * (size_t)region.w + (size_t)nx;
+            if (stamps[index] == fill_stamp) continue;
+            Uint32 c = row_base[(size_t)ny * (size_t)pitch_pixels + (size_t)nx];
             if ((c & mask) == (u_border & mask)) continue;
             if (stop_at_paint && (c & mask) == (u_paint & mask)) continue;
-            visited[index] = 1;
+            stamps[index] = fill_stamp;
             queue[tail++] = (Point){nx, ny};
         }
     }
@@ -2564,13 +2701,13 @@ static void flood_fill(double ux, double uy, unsigned int paint_color, unsigned 
     if (painted_x1 >= 0) {
         SDL_Rect painted = {region.x + painted_x0, region.y + painted_y0,
                             painted_x1 - painted_x0 + 1, painted_y1 - painted_y0 + 1};
-        const Uint8 *first = (const Uint8 *)surf->pixels + (size_t)painted_y0 * surf->pitch +
-                             (size_t)painted_x0 * details->bytes_per_pixel;
-        SDL_UpdateTexture(canvas, &painted, first, surf->pitch);
+        const Uint8 *first = (const Uint8 *)surf->pixels +
+                             (size_t)(off_y + painted_y0) * surf->pitch +
+                             (size_t)(off_x + painted_x0) * 4;
+        if (own_surf) SDL_UpdateTexture(canvas, &painted, first, surf->pitch);
+        else tracked_update_texture_keep(canvas, &painted, first, surf->pitch);
     }
-    SDL_DestroySurface(surf);
-    free(queue);
-    free(visited);
+    if (own_surf) SDL_DestroySurface(surf);
     // Presented like other drawing, at most once a frame: presenting after
     // every PAINT waited for the display each time.
     update_graphics();
@@ -3422,6 +3559,10 @@ int graphics_desktop_refresh_rate(void) {
 
 void handle_events() {
     if (!window) return;
+    /* The dummy video driver of a --headless run never delivers events and
+     * nothing pushes them programmatically, so polling it after every
+     * statement is pure overhead. */
+    if (headless_mode) return;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT) close_pending = 1;
