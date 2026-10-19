@@ -797,6 +797,7 @@ void set_args(int argc, char **argv) {
 
 int find_variable(const char *name);
 static int is_string_var(const char *name);
+static int is_string_identifier_tok(Token *token);
 static int parse_array_index(const char **input, int var_idx);
 static int parse_array_index_tok(TokenStream *ts, int var_idx);
 static void set_string_variable(int idx, int array_idx, const char *value);
@@ -1848,6 +1849,21 @@ static int is_string_var(const char *name) {
         return (default_type_map[first - 'A'] == '$');
     }
     return 0;
+}
+
+/* ERR and ERL are read specially rather than as variables. A three-character
+ * compare: strcasecmp shows up in profiles of array-heavy loops. */
+static int name_is_err_or_erl(const char *name) {
+    char c0 = (char)(name[0] | 0x20), c1 = (char)(name[1] | 0x20), c2 = (char)(name[2] | 0x20);
+    return c0 == 'e' && c1 == 'r' && (c2 == 'r' || c2 == 'l') && name[3] == '\0';
+}
+
+/* The last character of a name, or 0 when it is empty: the suffix tests of
+ * the array paths without a strlen call. */
+static char name_last_char(const char *name) {
+    const char *last = name;
+    while (last[1]) last++;
+    return *last;
 }
 
 // Forward declaration for is_string_token (used in parse_string_expression_tok)
@@ -4190,14 +4206,12 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx) {
             if (index_token->is_double) last_expression_is_double = 1;
             simple_index = 1;
         } else if (index_token->type == TOKEN_IDENTIFIER && proc_count == 0 &&
-                   user_function_count == 0 && !is_string_var(index_token->text) &&
-                   strcasecmp(index_token->text, "ERR") != 0 &&
-                   strcasecmp(index_token->text, "ERL") != 0) {
+                   user_function_count == 0 && !is_string_identifier_tok(index_token) &&
+                   !name_is_err_or_erl(index_token->text)) {
             int index_var_idx = resolve_token_variable(index_token);
             Variable *index_var = index_var_idx >= 0 ? get_variable_ptr(index_var_idx) : NULL;
             if (index_var) {
-                size_t name_length = strlen(index_var->name);
-                if (name_length > 0 && index_var->name[name_length - 1] == '#') {
+                if (name_last_char(index_var->name) == '#') {
                     last_expression_is_double = 1;
                 }
                 index_value = array_subscript(load_num(index_var, -1));
@@ -7311,8 +7325,10 @@ void compile_statement_expressions(Statement *statement) {
             .statement = statement,
             .pos = start
         };
+        // A single name or number is compiled too: reading it with the full
+        // parser costs a nine-level descent on every loop iteration.
         if (!parse_cached_expression(&parser) || parser.failed ||
-            parser.instruction_count < 2 || parser.max_depth > CACHED_EXPRESSION_STACK) {
+            parser.instruction_count < 1 || parser.max_depth > CACHED_EXPRESSION_STACK) {
             continue;
         }
 
@@ -9987,8 +10003,7 @@ static __attribute__((noinline)) int cached_subscript(TokenStream *ts, CompiledE
         variable = cached_subscript_variable(token);
         if (!variable) return -1;
         // Only a # suffix makes this subscript double.
-        size_t name_length = strlen(variable->name);
-        if (name_length > 0 && variable->name[name_length - 1] == '#') last_expression_is_double = 1;
+        if (name_last_char(variable->name) == '#') last_expression_is_double = 1;
     } else {
         int const_idx;
         variable = resolve_cached_name(expression, token, &const_idx);
