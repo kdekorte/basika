@@ -88,6 +88,7 @@ TESTS=(
   "tests/strings/dynamic_string_functions"
   "tests/strings/fixed_string_declarations"
   "tests/strings/basic_string_storage_test"
+  "tests/strings/string_move_semantics"
   "tests/file_io/mki_mks_mkd"
   "tests/strings/input_multi"
   "tests/strings/get_dollar"

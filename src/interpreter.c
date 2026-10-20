@@ -1986,6 +1986,30 @@ int basic_string_assign(BasicString **target, const void *data, size_t length) {
     return 1;
 }
 
+/* Transfers value's heap buffer to *target without copying the payload.
+ * value must be a temporary that nobody else references; on success it is
+ * left empty so a later release of it becomes a no-op. Fixed-length
+ * targets still take a copying assignment so truncation and padding
+ * survive. */
+static int basic_string_move_assign(BasicString **target, BasicString *value) {
+    if (!target || !value) return 0;
+    if (!*target) {
+        *target = basic_string_create(NULL, 0);
+        if (!*target) return 0;
+    }
+    if (!value->data || (*target)->is_fixed || (*target)->data == value->data) {
+        return basic_string_assign(target, value->data, value->length);
+    }
+    free((*target)->data);
+    (*target)->data = value->data;
+    (*target)->length = value->length;
+    (*target)->capacity = value->capacity;
+    value->data = NULL;
+    value->length = 0;
+    value->capacity = 0;
+    return 1;
+}
+
 static int assign_string_variable_value(int idx, int array_idx, const void *data, size_t length) {
     Variable *v = get_variable_ptr(idx);
     BasicString **target = array_idx >= 0 ? &v->s_array[array_idx] : &v->s_value;
@@ -1996,6 +2020,18 @@ static int assign_string_variable_value(int idx, int array_idx, const void *data
         (*target)->fixed_length = v->string_fixed_length;
     }
     return basic_string_assign(target, data, length);
+}
+
+/* Assigns a parsed string temporary to a variable, adopting the value's
+ * buffer when the variable has dynamic length so large assignments do not
+ * copy the payload a second time. */
+static int assign_string_variable_move(int idx, int array_idx, BasicString *value) {
+    Variable *v = get_variable_ptr(idx);
+    if (v->string_declared) {
+        return assign_string_variable_value(idx, array_idx, value->data, value->length);
+    }
+    BasicString **target = array_idx >= 0 ? &v->s_array[array_idx] : &v->s_value;
+    return basic_string_move_assign(target, value);
 }
 
 int basic_string_append(BasicString *target, const void *data, size_t length) {
@@ -5082,11 +5118,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             int n = evaluate_int_tok(ts);
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (n < 0) n = 0;
-            char *block = malloc((size_t)(n > 0 ? n : 1));
-            if (!block) return 0;
-            memset(block, ' ', (size_t)n);
-            basic_string_append(&term, block, (size_t)n);
-            free(block);
+            if (!basic_string_append_repeat(out, ' ', (size_t)n)) return 0;
         } else if (t.type == TOKEN_STRING_FUNC) {
             ts->pos++;
             ts->pos++;
@@ -5102,7 +5134,7 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
             }
             if (ts->tokens[ts->pos].type == TOKEN_RPAREN) ts->pos++;
             if (n < 0) n = 0;
-            int repeated = basic_string_append_repeat(&term, c, (size_t)n);
+            int repeated = basic_string_append_repeat(out, c, (size_t)n);
             basic_string_release(&arg_buf);
             if (!repeated) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
@@ -5301,13 +5333,13 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
                     : 0;
                 if (is_member < 0) return 0;
                 if (is_member && is_string_var(get_variable_ptr(idx)->name)) {
-                    append_string_variable_value(&term, idx, array_idx);
+                    append_string_variable_value(out, idx, array_idx);
                 } else if (!is_member && is_string_var(t.text)) {
                     ts->pos = token_index;
                     idx = resolve_token_variable(&ts->tokens[ts->pos]);
                     ts->pos++;
                     array_idx = parse_array_index_tok(ts, idx);
-                    append_string_variable_value(&term, idx, array_idx);
+                    append_string_variable_value(out, idx, array_idx);
                 } else {
                     ts->pos = token_index;
                     if (parsed) break;
@@ -5333,8 +5365,13 @@ static int parse_string_expression_tok_heap(TokenStream *ts, BasicString *out) {
         if (!term.length && t.type == TOKEN_STRING && strcmp(t.text, "") == 0) {
             // allow empty strings as valid terms
         }
-        basic_string_append(out, term.data, term.length);
-        basic_string_release(&term);
+        if (term.data && !out->data && !out->length && !out->capacity) {
+            /* First term built a fresh buffer: adopt it instead of copying. */
+            *out = term;
+        } else {
+            basic_string_append(out, term.data, term.length);
+            basic_string_release(&term);
+        }
 
         if (ts->tokens[ts->pos].type != TOKEN_PLUS) {
             break;
@@ -5414,11 +5451,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
             int n = evaluate_int_text(input);
             get_next_token(input);
             if (n < 0) n = 0;
-            char *block = malloc((size_t)(n > 0 ? n : 1));
-            if (!block) return 0;
-            memset(block, ' ', (size_t)n);
-            basic_string_append(&term, block, (size_t)n);
-            free(block);
+            if (!basic_string_append_repeat(out, ' ', (size_t)n)) return 0;
         } else if (t.type == TOKEN_STRING_FUNC) {
             get_next_token(input);
             int n = evaluate_int_text(input);
@@ -5443,7 +5476,7 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
                 get_next_token(input);
             }
             if (n < 0) n = 0;
-            int repeated = basic_string_append_repeat(&term, c, (size_t)n);
+            int repeated = basic_string_append_repeat(out, c, (size_t)n);
             basic_string_release(&arg_buf);
             if (!repeated) { basic_string_release(&term); return 0; }
         } else if (t.type == TOKEN_DEFLATE || t.type == TOKEN_INFLATE) {
@@ -5631,11 +5664,11 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
                     : 0;
                 if (is_member < 0) return 0;
                 if (is_member && is_string_var(get_variable_ptr(idx)->name)) {
-                    append_string_variable_value(&term, idx, array_idx);
+                    append_string_variable_value(out, idx, array_idx);
                 } else if (!is_member && is_string_var(t.text)) {
                     idx = find_variable(t.text);
                     array_idx = parse_array_index(input, idx);
-                    append_string_variable_value(&term, idx, array_idx);
+                    append_string_variable_value(out, idx, array_idx);
                 } else {
                     *input = saved;
                     if (parsed) break;
@@ -5656,8 +5689,13 @@ static int parse_string_expression_heap(const char **input, BasicString *out) {
         }
 
         parsed = 1;
-        basic_string_append(out, term.data, term.length);
+        if (term.data && !out->data && !out->length && !out->capacity) {
+            /* First term built a fresh buffer: adopt it instead of copying. */
+            *out = term;
+        } else {
+            basic_string_append(out, term.data, term.length);
             basic_string_release(&term);
+        }
 
         const char *separator = *input;
         if (get_next_token(input).type != TOKEN_PLUS) {
@@ -6897,7 +6935,7 @@ static void execute_assignment(const char **input, Token var_token) {
         BasicString dynamic_value = {0};
         const char *dynamic_saved = *input;
         if (parse_dynamic_string_expression(input, &dynamic_value)) {
-            assign_string_variable_value(idx, array_idx, dynamic_value.data, dynamic_value.length);
+            assign_string_variable_move(idx, array_idx, &dynamic_value);
             free(dynamic_value.data);
             return;
         }
@@ -7695,7 +7733,7 @@ static Statement *execute_sub_call(ProcedureDef *proc, TokenStream *ts, Statemen
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                basic_string_assign(&lv->s_value, val.data, val.length);
+                basic_string_move_assign(&lv->s_value, &val);
                 basic_string_release(&val);
             } else {
                 Num val = evaluate_num_tok(ts);
@@ -8315,7 +8353,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                             : is_string_identifier_tok(current_token)) {
                         BasicString value = {0};
                         if (parse_string_expression_tok_heap(&ts, &value)) {
-                            assign_string_variable_value(idx, array_idx, value.data, value.length);
+                            assign_string_variable_move(idx, array_idx, &value);
                         }
                         basic_string_release(&value);
                     } else {
@@ -8424,7 +8462,7 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                basic_string_assign(&lv->s_value, sval.data, sval.length);
+                basic_string_move_assign(&lv->s_value, &sval);
                 basic_string_release(&sval);
             } else {
                 Num val = evaluate_num_text(input);
@@ -8457,7 +8495,14 @@ static int evaluate_function_call_string_text(ProcedureDef *proc, const char **i
 
     for (int l = 0; l < frame->local_var_count; l++) {
         if (proc_name_match((*frame_local(frame, l)).name, proc->name) && (*frame_local(frame, l)).s_value) {
-            basic_string_append(out, (*frame_local(frame, l)).s_value->data, (*frame_local(frame, l)).s_value->length);
+            BasicString *result = (*frame_local(frame, l)).s_value;
+            if (result->data && !out->data && !out->length && !out->capacity) {
+                /* Adopt the function result buffer instead of copying it. */
+                *out = *result;
+                memset(result, 0, sizeof(*result));
+            } else {
+                basic_string_append(out, result->data, result->length);
+            }
             break;
         }
     }
@@ -8534,7 +8579,7 @@ static Num evaluate_function_call_numeric(ProcedureDef *proc, TokenStream *ts) {
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                basic_string_assign(&lv->s_value, val.data, val.length);
+                basic_string_move_assign(&lv->s_value, &val);
                 basic_string_release(&val);
             } else {
                 Num val = evaluate_num_tok(ts);
@@ -8637,7 +8682,7 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
                 Variable *lv = &(*frame_local(frame, frame->local_var_count++));
                 memset(lv, 0, sizeof(Variable));
                 snprintf(lv->name, sizeof(lv->name), "%s", pdef->name);
-                basic_string_assign(&lv->s_value, val.data, val.length);
+                basic_string_move_assign(&lv->s_value, &val);
                 basic_string_release(&val);
             } else {
                 Num val = evaluate_num_tok(ts);
@@ -8662,7 +8707,14 @@ static int evaluate_function_call_string(ProcedureDef *proc, TokenStream *ts, Ba
 
     for (int l = 0; l < frame->local_var_count; l++) {
         if (proc_name_match((*frame_local(frame, l)).name, proc->name) && (*frame_local(frame, l)).s_value) {
-            basic_string_append(out, (*frame_local(frame, l)).s_value->data, (*frame_local(frame, l)).s_value->length);
+            BasicString *result = (*frame_local(frame, l)).s_value;
+            if (result->data && !out->data && !out->length && !out->capacity) {
+                /* Adopt the function result buffer instead of copying it. */
+                *out = *result;
+                memset(result, 0, sizeof(*result));
+            } else {
+                basic_string_append(out, result->data, result->length);
+            }
             break;
         }
     }
@@ -13504,7 +13556,7 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                         if (!parse_string_expression_heap(&ptr, &value) && !runtime_error_occurred) {
                             report_runtime_error(ERR_TYPE_MISMATCH);
                         }
-                        if (!runtime_error_occurred) assign_string_variable_value(target, -1, value.data, value.length);
+                        if (!runtime_error_occurred) assign_string_variable_move(target, -1, &value);
                         basic_string_release(&value);
                     } else {
                         Num value = evaluate_num_text(&ptr);
@@ -15686,7 +15738,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                             : is_string_identifier_tok(current_token)) {
                         BasicString value = {0};
                         if (parse_string_expression_tok_heap(&ts, &value)) {
-                            assign_string_variable_value(idx, array_idx, value.data, value.length);
+                            assign_string_variable_move(idx, array_idx, &value);
                         }
                         basic_string_release(&value);
                     } else {

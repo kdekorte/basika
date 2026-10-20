@@ -93,10 +93,6 @@ These come up in ordinary QB64 programs and are small to add.
 
 ## Lexer and interpreter performance
 
-### Memory and strings
-
-- Profile large string assignments and concatenations, then avoid unnecessary copies through direct append or safe ownership transfer where BASICA value semantics permit it.
-
 ### File and graphics I/O
 
 - Profile file-heavy workloads; if `LOF`/`LOC` or frequent random-record access is hot, cache file-position/size metadata where it can be kept correct.
