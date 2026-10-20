@@ -96,7 +96,7 @@ These come up in ordinary QB64 programs and are small to add.
 ### File and graphics I/O
 
 - Profile file-heavy workloads; if `LOF`/`LOC` or frequent random-record access is hot, cache file-position/size metadata where it can be kept correct.
-- Profile graphics-heavy workloads for redundant state changes or presents; retain canvas batching and only add command batching when measurements show a benefit. `PAINT` still reads back the whole screen (or the active `VIEW`) on every call, which waits for the GPU (about 0.4 ms a fill in a window); it now uploads only the pixels it painted. `_PRINTSTRING` creates and destroys a text texture on every call, which flushes the queued drawing (about 16% of `demo/graphics_primitives_showcase.bas` in a window). The showcase runs at about 105 fps headless and at the display rate in a window.
+- `_PRINTSTRING` and `_UPRINTSTRING` render their text and create, draw and destroy a texture on every call, which flushes the queued drawing (about 16% of `demo/graphics_primitives_showcase.bas` in a window, whose HUD redraws every frame). `PRINT` avoids this with its per-glyph texture cache; cache whole-string textures by font, color and text the same way. The showcase runs at about 120 fps headless (60 with its `_LIMIT 60`) and at the display rate in a window.
 
 ## Testing and project hygiene
 
