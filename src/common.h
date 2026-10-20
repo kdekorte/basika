@@ -101,12 +101,18 @@ typedef struct {
 
 typedef struct {
     unsigned char opcode;
+    /* CEXPR_VARIABLE name-resolution cache: 0 none, 1 resolved_var holds the
+     * variable, 2 argc holds a CONST index, 3 leave the expression to the
+     * parser. Only filled (and only trusted) at module scope, when
+     * expression_name_generation still matches. */
+    unsigned char resolve_state;
     int token_index;
     Num number;      /* value of a CEXPR_NUMBER */
     int is_double;   /* the literal makes PRINT show 16 digits */
     int argc;        /* operands a call or array element takes from the stack */
     int function_id; /* QB64 function of a CEXPR_QB64 */
     int bit_width;   /* for _ROL/_ROR of a typed variable: its width, negative if _UNSIGNED */
+    void *resolved_var; /* cached variable of a CEXPR_VARIABLE (resolve_state 1) */
 } CompiledExpressionInstruction;
 
 typedef struct {
@@ -114,6 +120,7 @@ typedef struct {
     int instruction_count;
     unsigned int rejected_proc_generation; /* a name in it is a FUNCTION (+1, 0 = none) */
     int has_calls;   /* calls a function, so all names are checked before it runs */
+    unsigned int name_cache_generation; /* expression_name_generation when the per-name caches were filled */
     CompiledExpressionInstruction *instructions;
 } CompiledExpression;
 

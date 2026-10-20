@@ -503,6 +503,17 @@ static const char *find_declared_suffix(const char *name) {
 
 static unsigned int default_type_generation;
 
+/* Bumped whenever anything that changes how a name resolves to a variable,
+ * CONST or procedure changes (DEFtype/DIM-AS declarations, CONST statements,
+ * procedure and user-type scans, CLEAR), so that compiled expressions can
+ * cache each CEXPR_VARIABLE name's resolution in the instruction itself. */
+static unsigned int expression_name_generation = 1;
+
+static void invalidate_expression_name_cache(void) {
+    expression_name_generation++;
+    if (expression_name_generation == 0) expression_name_generation = 1;
+}
+
 static int declare_variable_type(const char *name, const char *suffix,
                                  const ProcedureDef *scope, int shared) {
     char base[64];
@@ -530,6 +541,7 @@ static int declare_variable_type(const char *name, const char *suffix,
     /* Cached token lookups must re-resolve against the new declaration. */
     default_type_generation++;
     if (default_type_generation == 0) default_type_generation = 1;
+    invalidate_expression_name_cache();
     return 1;
 }
 
@@ -541,6 +553,7 @@ static void clear_procedure_declared_types(void) {
     declared_type_count = kept;
     default_type_generation++;
     if (default_type_generation == 0) default_type_generation = 1;
+    invalidate_expression_name_cache();
 }
 
 /* Locals of a STATIC procedure, and names listed in a STATIC statement,
@@ -803,6 +816,7 @@ static int parse_array_index_tok(TokenStream *ts, int var_idx);
 static void set_string_variable(int idx, int array_idx, const char *value);
 static int resolve_token_variable(Token *token);
 static Num evaluate_num_tok(TokenStream *ts);
+static inline int evaluate_num_tok_cached(TokenStream *ts, Num *result);
 static Num evaluate_num_text(const char **input);
 static int round_to_int(double value);
 static int evaluate_int_text(const char **input);
@@ -1742,6 +1756,7 @@ static void parse_def_range(const char **ptr, char type_char) {
     if (changed) {
         default_type_generation++;
         if (default_type_generation == 0) default_type_generation = 1;
+        invalidate_expression_name_cache();
     }
 }
 
@@ -2255,6 +2270,7 @@ static int add_named_constant(const char *name, Num value, int is_wide) {
     }
     if (named_constant_count >= MAX_NAMED_CONSTANTS) return 0;
     if (++constant_generation == 0) constant_generation = 1;
+    invalidate_expression_name_cache();
     int idx = named_constant_count++;
     strncpy(named_constants[idx].name, normalized, sizeof(named_constants[idx].name) - 1);
     named_constants[idx].name[sizeof(named_constants[idx].name) - 1] = '\0';
@@ -2299,7 +2315,8 @@ static inline int find_named_constant_tok(Token *token) {
     return token->const_cache;
 }
 
-static int resolve_token_variable(Token *token) {
+/* Called at every variable reference; the cache-hit path is kept inline. */
+static inline __attribute__((always_inline)) int resolve_token_variable(Token *token) {
     if (!token || token->type != TOKEN_IDENTIFIER) return -1;
 
     if (token->var_idx != -1 && token->type_generation == default_type_generation) {
@@ -2481,6 +2498,7 @@ static int type_line_token_count(const Statement *stmt) {
 static int scan_user_types(void) {
     user_type_count = 0;
     user_type_instance_count = 0;
+    invalidate_expression_name_cache();
     for (Statement *stmt = get_head(); stmt; stmt = stmt->next) {
         if (stmt->token_count == 0 || stmt->tokens[0].type != TOKEN_TYPE) continue;
         if (stmt->token_count < 2 || stmt->tokens[1].type != TOKEN_IDENTIFIER ||
@@ -3653,8 +3671,9 @@ static void run_shell_command(const char *cmd, int hide, int dont_wait) {
     system(full);
 }
 
-static void maybe_queue_timer_event(void) {
-    if (timer_trap_count == 0) return; /* no traps armed: nothing to queue */
+/* Runs after every statement; with no traps armed the whole check is one
+ * load and branch, so the loop lives in an out-of-line slow path. */
+static void queue_timer_events_slow(void) {
     for (int n = 0; n < MAX_TIMER_SLOTS; n++) {
         TimerSlot *t = &timers[n];
         if (t->state == 0 || t->handler_line == 0 || t->interval <= 0.0 || t->pending || t->event_active) continue;
@@ -3672,6 +3691,11 @@ static void maybe_queue_timer_event(void) {
             t->last_trigger_time = now;
         }
     }
+}
+
+static inline __attribute__((always_inline)) void maybe_queue_timer_event(void) {
+    if (timer_trap_count == 0) return; /* no traps armed: nothing to queue */
+    queue_timer_events_slow();
 }
 
 void basika_trigger_pen_event(void) {
@@ -3749,10 +3773,15 @@ static inline __attribute__((always_inline)) int for_loop_next(ForLoop *loop) {
     Variable *v = get_variable_ptr(loop->var_idx);
     Num next = num_add(load_num(v, -1), loop->step_val);
     if (runtime_error_occurred || !store_num(v, -1, next)) return 0;
-    return for_loop_condition(load_num(v, -1), loop->end_val, loop->step_val);
+    /* An integer counter of the value's own kind stored the stepped value
+     * exactly as computed, so the reload would read it back unchanged. */
+    int vt = var_type(v);
+    Num value = (var_type_is_integer(vt) && next.kind == var_type_kind[vt])
+        ? next : load_num(v, -1);
+    return for_loop_condition(value, loop->end_val, loop->step_val);
 }
 
-static int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat);
+static inline __attribute__((always_inline)) int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat);
 static int apply_resize_metacommand(const char *text, int check_only);
 
 /* After skipping a loop that runs zero times to its NEXT (stmt, *pos): when
@@ -3774,7 +3803,7 @@ static int finish_skipped_next(Statement *stmt, int *pos, ForLoop **repeat) {
  * Returns 1 with *repeat set when a loop goes round again (loops inside it
  * are dropped), 0 when every loop named has ended (ts after the list), and
  * -1 on NEXT without FOR. */
-static int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat) {
+static inline __attribute__((always_inline)) int run_next_list(TokenStream *ts, const Statement *stmt, ForLoop **repeat) {
     while (1) {
         int f = for_ptr - 1;
         if (ts->pos < stmt->token_count && ts->tokens[ts->pos].type == TOKEN_IDENTIFIER) {
@@ -3823,7 +3852,7 @@ typedef struct {
 } BlockIfFrame;
 
 /* The tokens of a statement before a trailing ' or REM comment. */
-static int tokens_before_comment(const Statement *stmt) {
+static inline __attribute__((always_inline)) int tokens_before_comment(const Statement *stmt) {
     int count = stmt->token_count;
     if (count > 0 && (stmt->tokens[count - 1].type == TOKEN_APOSTROPHE ||
                       stmt->tokens[count - 1].type == TOKEN_REM)) {
@@ -3832,7 +3861,7 @@ static int tokens_before_comment(const Statement *stmt) {
     return count;
 }
 
-static int is_block_if_header(const Statement *stmt) {
+static inline __attribute__((always_inline)) int is_block_if_header(const Statement *stmt) {
     if (!stmt || stmt->token_count < 2 || stmt->tokens[0].type != TOKEN_IF) {
         return 0;
     }
@@ -6930,6 +6959,7 @@ static void clear_variables(int keep_registry) {
     for (int i = 0; i < 26; i++) default_type_map[i] = '!';
     default_type_generation++;
     if (default_type_generation == 0) default_type_generation = 1;
+    invalidate_expression_name_cache();
 }
 
 void basic_output(const char *text) { // Made non-static
@@ -7385,6 +7415,7 @@ void compile_statement_expressions(Statement *statement) {
 
 static void scan_procedures(void) {
     proc_generation++;
+    invalidate_expression_name_cache();
     proc_count = 0;
     clear_procedure_declared_types();
     clear_static_locals();
@@ -7731,7 +7762,10 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 continue;
 
             case TOKEN_IF: {
-                double cond = evaluate_expression_tok(&ts);
+                Num cond_num;
+                if (!evaluate_num_tok_cached(&ts, &cond_num)) cond_num = evaluate_num_tok(&ts);
+                /* Truthiness only, so the Num need not become a double. */
+                int cond = cond_num.kind < NUM_SINGLE ? cond_num.i != 0 : cond_num.d != 0;
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_THEN || ts.tokens[ts.pos].type == TOKEN_GOTO)) {
                     ts.pos++;
                 }
@@ -7742,10 +7776,10 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         break;
                     }
                     block_if_stack[block_if_depth++] = (BlockIfFrame){
-                        .branch_taken = cond != 0,
+                        .branch_taken = cond,
                         .else_seen = 0
                     };
-                    if (cond == 0) {
+                    if (!cond) {
                         Statement *branch = find_next_block_if_clause(exec_stmt, proc->end_stmt);
                         if (!branch) {
                             report_runtime_error(ERR_SYNTAX_ERROR);
@@ -7758,7 +7792,7 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     continue;
                 }
 
-                if (cond != 0) continue;
+                if (cond) continue;
 
                 int has_remaining_tokens = 0;
                 for (int check_i = ts.pos; check_i < exec_stmt->token_count; check_i++) {
@@ -8190,8 +8224,16 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 ForLoop *repeat = NULL;
                 int result = run_next_list(&ts, exec_stmt, &repeat);
                 if (result > 0) {
-                    curr_proc_stmt = repeat->start_stmt;
-                    resume_proc_pos = repeat->start_ts_pos;
+                    /* Looping back to a FOR whose line ends with the header
+                     * would re-enter the statement only to fall straight
+                     * through its remainder; go to the body directly. */
+                    if (repeat->start_ts_pos >= repeat->start_stmt->token_count) {
+                        curr_proc_stmt = repeat->start_stmt->next;
+                        resume_proc_pos = 0;
+                    } else {
+                        curr_proc_stmt = repeat->start_stmt;
+                        resume_proc_pos = repeat->start_ts_pos;
+                    }
                     jumped = 1;
                     break;
                 }
@@ -8221,7 +8263,9 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                 }
                 // A SUB name is never a variable: "Name (a) * 2, b" calls it rather
                 // than reading Name(a) as an array element first.
-                ProcedureDef *sub = find_procedure_tok(current_token);
+                /* With no procedures defined the lookup cannot match, so the
+                 * (cached) call is skipped, as in the expression paths. */
+                ProcedureDef *sub = proc_count > 0 ? find_procedure_tok(current_token) : NULL;
                 if (sub && !sub->is_function) {
                     // Inside a FUNCTION a SUB runs to completion here, then the
                     // calling statement continues.
@@ -8233,7 +8277,10 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                     }
                     continue;
                 }
-                name_string_function_result(current_token);
+                /* Renaming to the FUNCTION's own name only happens inside a
+                 * call; at module scope name_string_function_result is a
+                 * no-op, so skip the call entirely. */
+                if (call_stack_depth > 0) name_string_function_result(current_token);
                 int idx = resolve_token_variable(current_token);
                 int array_idx = -1;
                 int is_member = user_type_count > 0
@@ -8250,7 +8297,12 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                             idx = raw_index;
                         }
                     }
-                    array_idx = parse_array_index_tok(&ts, idx);
+                    /* parse_array_index_tok only acts on a "("; testing for
+                     * one first keeps scalar assignments call-free. */
+                    if (ts.pos < exec_stmt->token_count &&
+                        ts.tokens[ts.pos].type == TOKEN_LPAREN) {
+                        array_idx = parse_array_index_tok(&ts, idx);
+                    }
                 }
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
                     ts.pos++;
@@ -8267,7 +8319,8 @@ static void execute_procedure_statements(ProcedureDef *proc) {
                         }
                         basic_string_release(&value);
                     } else {
-                        Num value = evaluate_num_tok(&ts);
+                        Num value;
+                        if (!evaluate_num_tok_cached(&ts, &value)) value = evaluate_num_tok(&ts);
                         // An error while evaluating aborts the assignment, as in QBasic.
                         if (!runtime_error_occurred) set_numeric_variable_num(idx, array_idx, value);
                     }
@@ -10098,6 +10151,7 @@ static __attribute__((noinline)) int cached_call(TokenStream *ts, const Compiled
 
 static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expression, Num *result) {
     if (expression->has_calls && !cached_names_resolve(ts, expression)) return 0;
+    const unsigned int pass_generation = expression_name_generation;
 
     // The compiler checked the stack depth. Locals keep the loop from
     // reloading the program after every store.
@@ -10105,6 +10159,129 @@ static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expre
     const int instruction_count = expression->instruction_count;
     Num values[CACHED_EXPRESSION_STACK];
     int stack_size = 0;
+#if defined(__GNUC__)
+    /* Computed-goto dispatch: every opcode jumps straight to its handler,
+     * so one instruction costs a single indirect branch instead of the
+     * NUMBER/VARIABLE pre-tests plus a switch. The table lists the opcodes
+     * in enum order. */
+    static const void *const cexpr_dispatch[] = {
+        &&L_NUMBER, &&L_VARIABLE, &&L_SUBSCRIPT, &&L_ARRAY,
+        &&L_FUNCTION, &&L_FUNCTION0, &&L_QB64, &&L_POINT,
+        &&L_NEGATE, &&L_POWER, &&L_ADD, &&L_SUBTRACT,
+        &&L_MULTIPLY, &&L_DIVIDE, &&L_MOD, &&L_IDIV,
+        &&L_EQUAL, &&L_NOT_EQUAL, &&L_LESS, &&L_LESS_EQUAL,
+        &&L_GREATER, &&L_GREATER_EQUAL, &&L_NOT, &&L_AND,
+        &&L_OR, &&L_XOR, &&L_EQV, &&L_IMP
+    };
+#define CEXPR_NEXT do { \
+        if (++i >= instruction_count) goto cexpr_done; \
+        instruction = &instructions[i]; \
+        goto *cexpr_dispatch[instruction->opcode]; \
+    } while (0)
+    int i = 0;
+    if (instruction_count <= 0) goto cexpr_done;
+    const CompiledExpressionInstruction *instruction = &instructions[0];
+    goto *cexpr_dispatch[instruction->opcode];
+
+L_NUMBER:
+    if (instruction->is_double) last_expression_is_double = 1;
+    values[stack_size++] = instruction->number;
+    CEXPR_NEXT;
+L_VARIABLE: {
+    int const_idx;
+    Variable *variable;
+    /* The instruction caches what the name resolved to, so a plain
+     * variable read is a pointer load; the cache is only trusted at
+     * module scope and while nothing has changed how names resolve. */
+    if (instruction->resolve_state &&
+        expression->name_cache_generation == expression_name_generation &&
+        call_stack_depth == 0) {
+        if (instruction->resolve_state == 1) {
+            variable = instruction->resolved_var;
+            const_idx = -1;
+        } else if (instruction->resolve_state == 2) {
+            variable = NULL;
+            const_idx = instruction->argc;
+        } else {
+            return 0;
+        }
+    } else {
+        variable = resolve_cached_name(expression, &ts->tokens[instruction->token_index], &const_idx);
+        if (call_stack_depth == 0) {
+            /* Inside a call the same name can mean a local of the
+             * frame, so only the program's own scope is cached. The
+             * expression's generation is stamped once the whole pass
+             * is through, in case a call changed things midway. */
+            CompiledExpressionInstruction *cache = (CompiledExpressionInstruction *)instruction;
+            if (variable) {
+                cache->resolved_var = variable;
+                cache->resolve_state = 1;
+            } else if (const_idx >= 0) {
+                cache->argc = const_idx;
+                cache->resolve_state = 2;
+            } else {
+                cache->resolve_state = 3;
+            }
+        }
+    }
+    if (!variable) {
+        if (const_idx < 0) return 0;
+        if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
+        values[stack_size++] = named_constants[const_idx].value;
+        CEXPR_NEXT;
+    }
+    if (var_is_wide(variable)) last_expression_is_double = 1;
+    values[stack_size++] = load_num(variable, -1);
+    CEXPR_NEXT;
+}
+L_SUBSCRIPT:
+    stack_size = cached_subscript(ts, expression, instruction, values, stack_size);
+    if (stack_size < 0) return 0;
+    CEXPR_NEXT;
+L_ARRAY:
+    stack_size = cached_array_element(ts, expression, instruction, values, stack_size);
+    if (stack_size < 0) return 0;
+    CEXPR_NEXT;
+L_FUNCTION: L_FUNCTION0: L_QB64: L_POINT:
+    stack_size = cached_call(ts, instruction, values, stack_size);
+    CEXPR_NEXT;
+L_NEGATE:
+    values[stack_size - 1] = num_negate(values[stack_size - 1]);
+    CEXPR_NEXT;
+L_NOT:
+    values[stack_size - 1] = num_logical('~', values[stack_size - 1], values[stack_size - 1]);
+    CEXPR_NEXT;
+// Binary operators replace the top two operands; each is its own label, so
+// an instruction takes one dispatch.
+#define CACHED_BINARY_GOTO(label, operation) \
+    label: { \
+        Num right = values[--stack_size]; \
+        Num left = values[stack_size - 1]; \
+        values[stack_size - 1] = operation; \
+        CEXPR_NEXT; \
+    }
+CACHED_BINARY_GOTO(L_POWER, num_power(left, right))
+CACHED_BINARY_GOTO(L_ADD, num_add(left, right))
+CACHED_BINARY_GOTO(L_SUBTRACT, num_subtract(left, right))
+CACHED_BINARY_GOTO(L_MULTIPLY, num_multiply(left, right))
+CACHED_BINARY_GOTO(L_DIVIDE, num_divide(left, right))
+CACHED_BINARY_GOTO(L_MOD, num_integer_divide(left, right, 1))
+CACHED_BINARY_GOTO(L_IDIV, num_integer_divide(left, right, 0))
+CACHED_BINARY_GOTO(L_EQUAL, num_truth(num_compare(left, right) == 0))
+CACHED_BINARY_GOTO(L_NOT_EQUAL, num_truth(num_compare(left, right) != 0))
+CACHED_BINARY_GOTO(L_LESS, num_truth(num_compare(left, right) < 0))
+CACHED_BINARY_GOTO(L_LESS_EQUAL, num_truth(num_compare(left, right) <= 0))
+CACHED_BINARY_GOTO(L_GREATER, num_truth(num_compare(left, right) > 0))
+CACHED_BINARY_GOTO(L_GREATER_EQUAL, num_truth(num_compare(left, right) >= 0))
+CACHED_BINARY_GOTO(L_AND, num_logical('&', left, right))
+CACHED_BINARY_GOTO(L_OR, num_logical('|', left, right))
+CACHED_BINARY_GOTO(L_XOR, num_logical('^', left, right))
+CACHED_BINARY_GOTO(L_EQV, num_logical('=', left, right))
+CACHED_BINARY_GOTO(L_IMP, num_logical('>', left, right))
+#undef CACHED_BINARY_GOTO
+#undef CEXPR_NEXT
+cexpr_done:
+#else
     for (int i = 0; i < instruction_count; i++) {
         const CompiledExpressionInstruction *instruction = &instructions[i];
         // Numbers and variables, the commonest, are tested before the switch.
@@ -10115,7 +10292,41 @@ static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expre
         }
         if (instruction->opcode == CEXPR_VARIABLE) {
             int const_idx;
-            Variable *variable = resolve_cached_name(expression, &ts->tokens[instruction->token_index], &const_idx);
+            Variable *variable;
+            /* The instruction caches what the name resolved to, so a plain
+             * variable read is a pointer load; the cache is only trusted at
+             * module scope and while nothing has changed how names resolve. */
+            if (instruction->resolve_state &&
+                expression->name_cache_generation == expression_name_generation &&
+                call_stack_depth == 0) {
+                if (instruction->resolve_state == 1) {
+                    variable = instruction->resolved_var;
+                    const_idx = -1;
+                } else if (instruction->resolve_state == 2) {
+                    variable = NULL;
+                    const_idx = instruction->argc;
+                } else {
+                    return 0;
+                }
+            } else {
+                variable = resolve_cached_name(expression, &ts->tokens[instruction->token_index], &const_idx);
+                if (call_stack_depth == 0) {
+                    /* Inside a call the same name can mean a local of the
+                     * frame, so only the program's own scope is cached. The
+                     * expression's generation is stamped once the whole pass
+                     * is through, in case a call changed things midway. */
+                    CompiledExpressionInstruction *cache = (CompiledExpressionInstruction *)instruction;
+                    if (variable) {
+                        cache->resolved_var = variable;
+                        cache->resolve_state = 1;
+                    } else if (const_idx >= 0) {
+                        cache->argc = const_idx;
+                        cache->resolve_state = 2;
+                    } else {
+                        cache->resolve_state = 3;
+                    }
+                }
+            }
             if (!variable) {
                 if (const_idx < 0) return 0;
                 if (named_constants[const_idx].is_wide) last_expression_is_double = 1;
@@ -10177,13 +10388,42 @@ static int evaluate_cached_expression(TokenStream *ts, CompiledExpression *expre
 #undef CACHED_BINARY
         }
     }
+#endif
 
+    /* The whole pass resolved names with nothing changing underneath it, so
+     * the per-instruction caches it filled can be trusted until the next
+     * change. Anything unusual (calls that declare things, an aborted pass)
+     * simply leaves the stamp stale and the next pass re-resolves. */
+    if (call_stack_depth == 0 && expression_name_generation == pass_generation &&
+        expression->name_cache_generation != pass_generation) {
+        expression->name_cache_generation = pass_generation;
+    }
     *result = values[0];
     ts->pos = expression->end_pos;
     return 1;
 }
 
+/* The cached-expression gate of evaluate_num_tok, split out so its hottest
+ * call sites (IF conditions, assignment right sides) can skip the wrapper
+ * calls and, for IF, the Num-to-double round trip. */
+static inline int evaluate_num_tok_cached(TokenStream *ts, Num *result) {
+    Statement *statement = ts->statement;
+    if (statement && ts->tokens == statement->tokens &&
+        ts->pos >= 0 && ts->pos < statement->token_count &&
+        statement->compiled_expressions) {
+        CompiledExpression *expression = statement->compiled_expressions[ts->pos];
+        if (expression &&
+            !fixed_string_declarations_present &&
+            expression->rejected_proc_generation != proc_generation + 1) {
+            return evaluate_cached_expression(ts, expression, result);
+        }
+    }
+    return 0;
+}
+
 static Num evaluate_num_tok(TokenStream *ts) {
+    Num result;
+    if (evaluate_num_tok_cached(ts, &result)) return result;
     Statement *statement = ts->statement;
     if (statement && ts->tokens == statement->tokens &&
         ts->pos >= 0 && ts->pos < statement->token_count &&
@@ -14599,7 +14839,10 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 continue;
 
             case TOKEN_IF: {
-                double cond = evaluate_expression_tok(&ts);
+                Num cond_num;
+                if (!evaluate_num_tok_cached(&ts, &cond_num)) cond_num = evaluate_num_tok(&ts);
+                /* Truthiness only, so the Num need not become a double. */
+                int cond = cond_num.kind < NUM_SINGLE ? cond_num.i != 0 : cond_num.d != 0;
                 // Consume THEN or GOTO token
                 if (ts.pos < exec_stmt->token_count && (ts.tokens[ts.pos].type == TOKEN_THEN || ts.tokens[ts.pos].type == TOKEN_GOTO)) {
                     ts.pos++;
@@ -14611,10 +14854,10 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                         break;
                     }
                     block_if_stack[block_if_depth++] = (BlockIfFrame){
-                        .branch_taken = cond != 0,
+                        .branch_taken = cond,
                         .else_seen = 0
                     };
-                    if (cond == 0) {
+                    if (!cond) {
                         Statement *branch = find_next_block_if_clause(exec_stmt, NULL);
                         if (!branch) {
                             report_runtime_error(ERR_SYNTAX_ERROR);
@@ -14628,7 +14871,7 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                     continue;
                 }
 
-                if (cond != 0) continue;
+                if (cond) continue;
                 
                 // Find ELSE or end of line
                 int depth = 0;
@@ -15129,9 +15372,19 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
             case TOKEN_NEXT: {
                 ForLoop *repeat = NULL;
                 if (run_next_list(&ts, exec_stmt, &repeat) > 0) {
-                    curr = repeat->start_stmt;
-                    resume_ptr = NULL;
-                    resume_ts_pos = repeat->start_ts_pos;
+                    /* Looping back to a FOR whose line ends with the header
+                     * (the body is on the following lines) would re-enter the
+                     * statement only to fall straight through its remainder;
+                     * go to the first body statement directly. */
+                    if (repeat->start_ts_pos >= repeat->start_stmt->token_count) {
+                        curr = repeat->start_stmt->next;
+                        resume_ptr = NULL;
+                        resume_ts_pos = -1;
+                    } else {
+                        curr = repeat->start_stmt;
+                        resume_ptr = NULL;
+                        resume_ts_pos = repeat->start_ts_pos;
+                    }
                     jumped = 1;
                 }
                 break;
@@ -15371,7 +15624,9 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 // than reading Name(a) as an array element first. The arguments
                 // follow the name, which need not start the line (it may follow
                 // THEN, ELSE or a colon).
-                ProcedureDef *proc = find_procedure_tok(current_token);
+                /* With no procedures defined the lookup cannot match, so the
+                 * (cached) call is skipped, as in the expression paths. */
+                ProcedureDef *proc = proc_count > 0 ? find_procedure_tok(current_token) : NULL;
                 if (proc && !proc->is_function) {
                     ts.pos = (int)(current_token - ts.tokens) + 1;
                     curr = enter_inline_sub(proc, &ts, exec_stmt);
@@ -15393,7 +15648,10 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                 // _UPRINTSTRING (x, y), ... is a statement, not an array element.
                 if (t->text[0] == '_' && strcasecmp(t->text, "_UPRINTSTRING") == 0) goto identifier_statement;
                 // Direct handling of assignments
-                name_string_function_result(current_token);
+                /* Renaming to the FUNCTION's own name only happens inside a
+                 * call; at module scope name_string_function_result is a
+                 * no-op, so skip the call entirely. */
+                if (call_stack_depth > 0) name_string_function_result(current_token);
                 int idx = resolve_token_variable(current_token);
                 int array_idx = -1;
                 int is_member = user_type_count > 0
@@ -15410,7 +15668,12 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                             idx = raw_index;
                         }
                     }
-                    array_idx = parse_array_index_tok(&ts, idx);
+                    /* parse_array_index_tok only acts on a "("; testing for
+                     * one first keeps scalar assignments call-free. */
+                    if (ts.pos < exec_stmt->token_count &&
+                        ts.tokens[ts.pos].type == TOKEN_LPAREN) {
+                        array_idx = parse_array_index_tok(&ts, idx);
+                    }
                 }
                 if (ts.pos < exec_stmt->token_count && ts.tokens[ts.pos].type == TOKEN_EQUALS) {
                     ts.pos++;
@@ -15427,7 +15690,8 @@ static void execute_statements(Statement *curr, const char *resume_ptr, int resu
                         }
                         basic_string_release(&value);
                     } else {
-                        Num value = evaluate_num_tok(&ts);
+                        Num value;
+                        if (!evaluate_num_tok_cached(&ts, &value)) value = evaluate_num_tok(&ts);
                         // An error while evaluating aborts the assignment, as in QBasic.
                         if (!runtime_error_occurred) set_numeric_variable_num(idx, array_idx, value);
                     }
