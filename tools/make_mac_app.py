@@ -67,7 +67,7 @@ def version():
 def build_basika(work):
     """Compiles basika into work/ for any Mac of this architecture."""
     sources = [os.path.join(ROOT, "src", name) for name in
-               ("main.c", "lexer.c", "interpreter.c", "program.c", "graphics.c", "audio.c")]
+               ("main.c", "lexer.c", "interpreter.c", "program.c", "graphics.c", "audio.c", "platform.c")]
     cflags = run("pkg-config", "--cflags", *PACKAGES).split()
     libs = run("pkg-config", "--libs", *PACKAGES).split()
     out = os.path.join(work, "basika")

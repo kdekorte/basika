@@ -49,6 +49,13 @@ Build with:
 make
 ```
 
+The SDL libraries load lazily: a program that only prints to the console
+neither loads nor needs them, and they open the first time graphics or sound
+is used. macOS links them as lazy-load dylibs and glibc Linux `dlopen`s them
+on demand (`make LAZY_SDL=0` links them the classic way). Musl Linux (Alpine)
+links SDL normally, and `LD_BIND_NOW=1` cannot resolve the deferred Linux
+symbols.
+
 ## License
 
 Basika is distributed under the [MIT License](LICENSE).

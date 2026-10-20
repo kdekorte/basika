@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "audio.h"
+#include "platform.h"
 
 #define AUDIO_RATE 44100
 #define AUDIO_AMPLITUDE 9000
@@ -76,6 +77,7 @@ static int audio_init(void) {
     if (audio_attempted) return audio_ready;
     audio_attempted = 1;
 
+    if (!platform_load_sdl()) return 0;
     if (!MIX_Init()) return 0;
     mixer_initialized = 1;
     if (!shutdown_registered) {
@@ -116,7 +118,7 @@ static int ticks_to_ms(double ticks) {
 }
 
 static void delay_ms(int ms) {
-    if (ms > 0) SDL_Delay((Uint32)ms);
+    platform_delay_ms(ms);
 }
 
 static int buffer_append_silence(AudioBuffer *buffer, size_t samples) {
@@ -132,7 +134,7 @@ static int buffer_append_silence(AudioBuffer *buffer, size_t samples) {
             capacity *= 2;
         }
         if (capacity > SIZE_MAX / sizeof(*buffer->samples)) return 0;
-        Sint16 *resized = (Sint16 *)SDL_realloc(buffer->samples, capacity * sizeof(*buffer->samples));
+        Sint16 *resized = (Sint16 *)realloc(buffer->samples, capacity * sizeof(*buffer->samples));
         if (!resized) return 0;
         buffer->samples = resized;
         buffer->capacity = capacity;
@@ -197,13 +199,13 @@ void audio_sound(double frequency, double duration_ticks) {
             MIX_Audio *audio = make_buffer_audio(&buffer);
             if (audio && MIX_PlayAudio(mixer, audio)) {
                 MIX_DestroyAudio(audio);
-                SDL_free(buffer.samples);
+                free(buffer.samples);
                 delay_ms(ms);
                 return;
             }
             if (audio) MIX_DestroyAudio(audio);
         }
-        SDL_free(buffer.samples);
+        free(buffer.samples);
     }
 
     delay_ms(ms);
@@ -346,14 +348,14 @@ void audio_play(const char *mml) {
         if (audio) {
             if (MIX_PlayAudio(mixer, audio)) {
                 MIX_DestroyAudio(audio);
-                SDL_free(buffer.samples);
+                free(buffer.samples);
                 buffer.samples = NULL;
             } else {
                 MIX_DestroyAudio(audio);
             }
         }
     }
-    SDL_free(buffer.samples);
+    free(buffer.samples);
 
     if (audio_enabled && music_foreground) delay_ms(total_ms);
 }
@@ -373,7 +375,7 @@ int audio_sound_open(const char *path) {
     while (handle <= MAX_SOUND_HANDLES && sound_handles[handle].audio) handle++;
     if (handle > MAX_SOUND_HANDLES || !path || !path[0]) return 0;
     if (!mixer_initialized) {
-        if (!MIX_Init()) return 0;
+        if (!platform_load_sdl() || !MIX_Init()) return 0;
         mixer_initialized = 1;
         if (!shutdown_registered) {
             atexit(audio_shutdown);

@@ -1,6 +1,34 @@
 CC = gcc
 CFLAGS = -O3 -march=native -Wall -Wextra -I./src $(shell pkg-config --cflags sdl3 sdl3-ttf sdl3-mixer sdl3-image)
-LDFLAGS = $(shell pkg-config --libs sdl3 sdl3-ttf sdl3-mixer sdl3-image) -lz -lm
+
+# The SDL libraries load lazily (make LAZY_SDL=0 links them the classic way):
+# macOS records them as lazy-load dylibs that dyld opens on the first SDL
+# call, and glibc Linux leaves the SDL symbols unresolved until platform.c
+# dlopen()s the libraries, so a console-only program neither loads nor needs
+# SDL. musl Linux resolves everything at startup and falls back to a normal
+# link. Building always needs the SDL development packages.
+LAZY_SDL ?= 1
+UNAME_S := $(shell uname -s)
+SDL_LIBS = $(shell pkg-config --libs sdl3 sdl3-ttf sdl3-mixer sdl3-image)
+
+ifeq ($(LAZY_SDL),1)
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS = $(shell pkg-config --libs-only-L sdl3 sdl3-ttf sdl3-mixer sdl3-image) \
+          -Wl,-lazy-lSDL3 -Wl,-lazy-lSDL3_ttf -Wl,-lazy-lSDL3_mixer -Wl,-lazy-lSDL3_image \
+          -lz -lm
+else ifeq ($(UNAME_S),Linux)
+IS_MUSL = $(shell ldd --version 2>&1 | grep -ci musl)
+ifeq ($(IS_MUSL),0)
+LDFLAGS = -Wl,--unresolved-symbols=ignore-all -Wl,-z,lazy -ldl -lz -lm
+else
+LDFLAGS = $(SDL_LIBS) -lz -lm
+endif
+else
+LDFLAGS = $(SDL_LIBS) -lz -lm
+endif
+else
+LDFLAGS = $(SDL_LIBS) -lz -lm
+endif
 
 PREFIX ?= /usr/local
 DESTDIR ?=
@@ -8,7 +36,7 @@ DESTDIR ?=
 VERSION = $(shell grep 'BASIKA_VERSION' src/common.h | head -1 | sed 's/.*"\(.*\)".*/\1/')
 PACKAGE_NAME = basika-$(VERSION)
 
-SRC = src/main.c src/lexer.c src/interpreter.c src/program.c src/graphics.c src/audio.c
+SRC = src/main.c src/lexer.c src/interpreter.c src/program.c src/graphics.c src/audio.c src/platform.c
 OBJ = $(SRC:.c=.o)
 TARGET = basika
 
@@ -20,7 +48,7 @@ $(TARGET): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ): src/common.h src/lexer.h
+$(OBJ): src/common.h src/lexer.h src/platform.h
 
 .PHONY: test test-performance clean install uninstall package burrow-app
 
