@@ -7,7 +7,6 @@
 #include <SDL3_ttf/SDL_ttf.h>
 #include "graphics.h"
 #include "interpreter.h"
-#include "platform.h"
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
@@ -721,7 +720,7 @@ void graphics_sleep(int ms) {
     if (ms > 0) {
         graphics_present_if_autodisplay();
         handle_events();
-        platform_delay_ms(ms);
+        SDL_Delay(ms);
     }
 }
 
@@ -729,18 +728,18 @@ void graphics_sleep(int ms) {
  * wake_on_key is set, a key press ends the wait early and stays buffered for
  * INKEY$. A negative ms waits until a key is pressed. */
 static void wait_responsive(double ms, int wake_on_key) {
-    Uint64 start = platform_ticks_ns();
+    Uint64 start = SDL_GetTicksNS();
     Uint64 limit = ms < 0 ? 0 : (Uint64)(ms * 1000000.0);
     while (!stop_running) {
         handle_events();
         if (wake_on_key && (last_key_char || last_key_code)) break;
-        Uint64 elapsed = platform_ticks_ns() - start;
+        Uint64 elapsed = SDL_GetTicksNS() - start;
         if (ms >= 0 && elapsed >= limit) break;
         Uint64 remaining = ms >= 0 ? limit - elapsed : 10000000;
         Uint32 step = (Uint32)(remaining / 1000000);
         if (step > 10) step = 10;
-        if (step == 0) platform_delay_ns(remaining);
-        else platform_delay_ms(step);
+        if (step == 0) SDL_DelayPrecise(remaining);
+        else SDL_Delay(step);
     }
 }
 
@@ -763,7 +762,7 @@ void graphics_limit(double fps) {
     static Uint64 next_frame = 0;
     if (fps <= 0) return;
     Uint64 period = (Uint64)(1000000000.0 / fps);
-    Uint64 now = platform_ticks_ns();
+    Uint64 now = SDL_GetTicksNS();
     if (next_frame == 0 || now > next_frame + period) next_frame = now;
     if (next_frame > now) wait_responsive((double)(next_frame - now) / 1000000.0, 0);
     else handle_events();
@@ -1506,7 +1505,6 @@ static int is_default_font_handle(int handle) {
 
 int graphics_loadfont(const char *filename, int size, int style) {
     if (!filename || size <= 0) return -1;
-    if (!platform_load_sdl()) return -1;  /* no SDL: no fonts */
     TTF_Init();
 
     /* Find a free slot (slots 0..MAX_FONT_SLOTS-1) */
@@ -1692,7 +1690,6 @@ static int window_title_set = 0; /* _TITLE was used before or after the window o
 
 int init_graphics() {
     if (window) return 1;
-    if (!platform_load_sdl()) return 0;
     if (headless_mode) {
         setenv("SDL_VIDEODRIVER", "dummy", 1);
     }
@@ -3058,9 +3055,6 @@ void graphics_keyclear(void) {
 
 /* The state of a lock key, 1 caps, 2 num, 3 scroll: -1 if on, else 0. */
 int graphics_lock_state(int which) {
-    /* Without a window no events were pumped, so no lock key is on; SDL
-     * would report the same. */
-    if (!window) return 0;
     SDL_Keymod mod = SDL_GetModState();
     SDL_Keymod bit = which == 1 ? SDL_KMOD_CAPS : which == 2 ? SDL_KMOD_NUM : SDL_KMOD_SCROLL;
     return (mod & bit) ? -1 : 0;
@@ -3157,14 +3151,10 @@ int graphics_mouse_movement(int y) {
 
 /* _MOUSEHIDE, _MOUSESHOW and _MOUSEHIDDEN. */
 void graphics_mouse_visible(int visible) {
-    if (!window) return;  /* no display: no cursor to show or hide */
     if (visible) SDL_ShowCursor(); else SDL_HideCursor();
 }
 
-int graphics_mouse_hidden(void) {
-    if (!window) return 0;  /* no display: the cursor is not hidden */
-    return SDL_CursorVisible() ? 0 : -1;
-}
+int graphics_mouse_hidden(void) { return SDL_CursorVisible() ? 0 : -1; }
 
 /* _MOUSEMOVE x, y: puts the pointer on a screen pixel. */
 void graphics_mouse_move(int x, int y) {
@@ -3183,7 +3173,6 @@ void graphics_mouse_move(int x, int y) {
 
 /* _MOUSESHOW style$ / _MOUSECURSOR style$: returns 0 only for a style name it does not know. */
 int graphics_mouse_cursor(const char *style) {
-    if (!window) return 1;  /* no display: a known style is accepted and ignored */
     static const struct { const char *name; SDL_SystemCursor id; } styles[] = {
         {"DEFAULT", SDL_SYSTEM_CURSOR_DEFAULT}, {"LINK", SDL_SYSTEM_CURSOR_POINTER},
         {"TEXT", SDL_SYSTEM_CURSOR_TEXT}, {"CROSSHAIR", SDL_SYSTEM_CURSOR_CROSSHAIR},
@@ -3551,10 +3540,7 @@ int graphics_window_has_focus(void) {
 }
 
 int graphics_desktop_size(int want_height) {
-    if (!window) {
-        if (!platform_load_sdl()) return 0;
-        SDL_InitSubSystem(SDL_INIT_VIDEO);
-    }
+    if (!window) SDL_InitSubSystem(SDL_INIT_VIDEO);
     SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
     if (!display) display = SDL_GetPrimaryDisplay();
     const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display);
@@ -3563,10 +3549,7 @@ int graphics_desktop_size(int want_height) {
 }
 
 int graphics_desktop_refresh_rate(void) {
-    if (!window) {
-        if (!platform_load_sdl()) return 0;
-        SDL_InitSubSystem(SDL_INIT_VIDEO);
-    }
+    if (!window) SDL_InitSubSystem(SDL_INIT_VIDEO);
     SDL_DisplayID display = window ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
     if (!display) display = SDL_GetPrimaryDisplay();
     const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display);
