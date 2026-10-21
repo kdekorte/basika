@@ -1,0 +1,8 @@
+LOF: 5   LOC: 1 
+LOF: 10   LOC: 2 
+Z: 42  W: 2.5 
+ERR: 59 
+AFTER ERR: 59 
+DEFINT LOF: 2 
+DEFINT N2: 300 
+ERR: 5 

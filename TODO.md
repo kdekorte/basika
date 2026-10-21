@@ -88,7 +88,6 @@ These come up in ordinary QB64 programs and are small to add.
 
 ## Interpreter correctness
 
-- `PUT #n, [position], variable` and `GET` only accept records (and BASIKA's `len, data` form); QBasic also writes and reads numeric and string variables, which BINARY files rely on.
 - Each field of each `TYPE` array element uses one of the 8192 variable-table entries; storing records as contiguous blocks would remove that limit and speed up record I/O.
 
 ## Lexer and interpreter performance

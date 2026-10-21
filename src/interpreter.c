@@ -6841,6 +6841,159 @@ static int transfer_user_type_record(int file_number, double record_number,
     return success;
 }
 
+/* The primitive type name whose packed file image a variable of type vt
+ * has; untyped variables record as SINGLE. */
+static const char *variable_record_type_name(int vt) {
+    return vt >= VT_STRING && vt <= VT_DOUBLE ? primitive_types[vt - 1].name : "SINGLE";
+}
+
+/* Bytes a numeric variable of type vt occupies in a file record. */
+static int numeric_variable_record_size(int vt) {
+    return vt >= VT_STRING && vt <= VT_DOUBLE ? primitive_types[vt - 1].bytes : 4;
+}
+
+/* The string value a PUT/GET variable argument names: a scalar's s_value
+ * or one element of s_array; NULL while it holds no data yet. */
+static BasicString *variable_string_value(Variable *v, int array_index) {
+    if (array_index >= 0) {
+        return v->s_array && array_index < v->array_size
+            ? v->s_array[array_index] : NULL;
+    }
+    return v->s_value;
+}
+
+/* Matches QBasic's `PUT/GET #n, [position,] variable` argument: an
+ * identifier, optionally with an array index, that ends the statement.
+ * BASIKA's `PUT/GET #n, position, len, data$` form continues with a comma
+ * after the length expression (or with an operator inside it), so those
+ * statements are left for it. Returns 1 on a match with *var_index_out and
+ * *array_index_out set and *input left before the statement separator, 0
+ * when the statement does not have this form (*input unchanged), or -1
+ * after reporting an error. */
+static int parse_record_variable_argument(const char **input, const char *name,
+                                          int *var_index_out, int *array_index_out) {
+    const char *saved = *input;
+    int depth = 0;
+    int ended = 0;
+    while (!ended) {
+        const char *before = *input;
+        Token t = get_next_token(input);
+        if (t.type == TOKEN_LPAREN) {
+            depth++;
+        } else if (t.type == TOKEN_RPAREN) {
+            if (depth > 0) depth--;
+        } else if (t.type == TOKEN_EOF && depth > 0) {
+            break; // unbalanced parentheses
+        } else if (depth == 0) {
+            if (t.type == TOKEN_EOF || t.type == TOKEN_COLON ||
+                t.type == TOKEN_ELSE || t.type == TOKEN_APOSTROPHE ||
+                t.type == TOKEN_REM) {
+                *input = before; // leave the separator to the statement loop
+                ended = 1;
+            } else {
+                break; // comma or expression: the BASIKA length form
+            }
+        }
+    }
+    if (!ended) {
+        *input = saved;
+        return 0;
+    }
+    int var_index = find_variable(name);
+    if (var_index < 0) {
+        *input = saved;
+        return 0;
+    }
+    *input = saved; // re-parse the optional array index after the identifier
+    int array_index = parse_array_index(input, var_index);
+    if (array_index < 0 && get_variable_ptr(var_index)->num_dims > 0) {
+        // A whole array is not a record; only single elements are.
+        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+        return -1;
+    }
+    *var_index_out = var_index;
+    *array_index_out = array_index;
+    return 1;
+}
+
+/* PUT #n/GET #n with a numeric or string variable (a scalar, an array
+ * element or a record member) as in QBasic: exactly the variable's bytes
+ * move - the type's size for a numeric, the current length for a string.
+ * BINARY files are positioned by byte and move exactly those bytes;
+ * RANDOM files always move a whole LEN-byte record, zero-filling the bytes
+ * past the variable, and data larger than LEN raises Bad record length. */
+static int transfer_variable_record(int fnum, double rec, int var_index,
+                                    int array_index, int writing) {
+    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+        report_runtime_error(ERR_BAD_FILE_NUMBER);
+        return 0;
+    }
+    if (file_mode[fnum] != FILE_MODE_RANDOM && file_mode[fnum] != FILE_MODE_BINARY) {
+        report_runtime_error(ERR_BAD_FILE_MODE);
+        return 0;
+    }
+    Variable *v = get_variable_ptr(var_index);
+    int string_variable = v->string_declared || var_type(v) == VT_STRING;
+    BasicString *string_value = NULL;
+    size_t size;
+    if (string_variable) {
+        string_value = variable_string_value(v, array_index);
+        size = string_value ? string_value->length
+            : v->string_declared ? v->string_fixed_length : 0;
+    } else {
+        size = (size_t)numeric_variable_record_size(var_type(v));
+    }
+    int binary = file_mode[fnum] == FILE_MODE_BINARY;
+    if (!binary && size > (size_t)file_record_length[fnum]) {
+        report_runtime_error(ERR_BAD_RECORD_LENGTH);
+        return 0;
+    }
+    long offset;
+    if (!file_record_offset(fnum, rec, &offset)) return 0;
+    file_last_record[fnum] = binary ? offset + (long)size : (long)rec;
+    size_t transfer_size = binary ? size : (size_t)file_record_length[fnum];
+    unsigned char *buffer = calloc(transfer_size ? transfer_size : 1, 1);
+    if (!buffer) {
+        report_runtime_error(ERR_OUT_OF_MEMORY);
+        return 0;
+    }
+    const char *type_name = variable_record_type_name(var_type(v));
+    int success = 1;
+    if (writing) {
+        if (string_variable) {
+            if (size > 0) memcpy(buffer, string_value->data, size);
+        } else {
+            encode_record_value(type_name, load_num(v, array_index), buffer);
+        }
+        if (fseek(file_handles[fnum], offset, SEEK_SET) != 0 ||
+            fwrite(buffer, 1, transfer_size, file_handles[fnum]) != transfer_size ||
+            fflush(file_handles[fnum]) != 0) {
+            report_runtime_error(ERR_BAD_FILE_NUMBER);
+            success = 0;
+        }
+    } else {
+        if (fseek(file_handles[fnum], offset, SEEK_SET) != 0) {
+            report_runtime_error(ERR_BAD_FILE_NUMBER);
+            success = 0;
+        } else {
+            size_t bytes_read = fread(buffer, 1, size, file_handles[fnum]);
+            if (bytes_read < size) memset(buffer + bytes_read, 0, size - bytes_read);
+            if (string_variable) {
+                if (!assign_string_variable_value(var_index, array_index,
+                                                   buffer, size)) {
+                    report_runtime_error(ERR_OUT_OF_MEMORY);
+                    success = 0;
+                }
+            } else if (!store_num(v, array_index,
+                                  decode_record_value(type_name, buffer))) {
+                success = 0; // overflow already reported
+            }
+        }
+    }
+    free(buffer);
+    return success;
+}
+
 /* Inside FUNCTION Name$, "Name = ..." sets the string result, as in QB64:
  * renames the assignment target to the function's own name. */
 static void name_string_function_result(Token *target) {
@@ -14119,39 +14272,54 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                             transfer_user_type_record(fnum, rec, root_index,
                                                       array_index, 1);
                         } else {
-                            ptr = argument_start;
-                            int len = evaluate_int_text(&ptr);
-                            sep = get_next_token(&ptr);
-                            char data[512] = "";
-                            if (sep.type == TOKEN_COMMA) {
-                                const char *expr_saved = ptr;
-                                Token tok = get_next_token(&ptr);
-                                if (tok.type == TOKEN_STRING) {
-                                    strncpy(data, tok.text, sizeof(data) - 1);
-                                } else if (tok.type == TOKEN_IDENTIFIER && is_string_var(tok.text)) {
-                                    int src_idx = find_variable(tok.text);
-                                    int src_array_idx = parse_array_index(&ptr, src_idx);
-                                    char temp[BASIC_STRING_MAX] = "";
-                                    get_string_variable_value(src_idx, src_array_idx, temp, sizeof(temp));
-                                    strncpy(data, temp, sizeof(data) - 1);
+                            // QBasic form: PUT #n, [position,] variable with a
+                            // numeric or string variable, array element or
+                            // record member; anything else is BASIKA's
+                            // len, data$ form.
+                            int var_index, array_index;
+                            int matched = argument.type == TOKEN_IDENTIFIER
+                                ? parse_record_variable_argument(&ptr, argument.text,
+                                                                &var_index, &array_index) : 0;
+                            if (matched > 0) {
+                                transfer_variable_record(fnum, rec, var_index,
+                                                         array_index, 1);
+                            } else if (matched == 0) {
+                                ptr = argument_start;
+                                int len = evaluate_int_text(&ptr);
+                                sep = get_next_token(&ptr);
+                                char data[512] = "";
+                                if (sep.type == TOKEN_COMMA) {
+                                    const char *expr_saved = ptr;
+                                    Token tok = get_next_token(&ptr);
+                                    if (tok.type == TOKEN_STRING) {
+                                        strncpy(data, tok.text, sizeof(data) - 1);
+                                    } else if (tok.type == TOKEN_IDENTIFIER && is_string_var(tok.text)) {
+                                        int src_idx = find_variable(tok.text);
+                                        int src_array_idx = parse_array_index(&ptr, src_idx);
+                                        char temp[BASIC_STRING_MAX] = "";
+                                        get_string_variable_value(src_idx, src_array_idx, temp, sizeof(temp));
+                                        strncpy(data, temp, sizeof(data) - 1);
+                                    } else {
+                                        ptr = expr_saved;
+                                        parse_string_expression(&ptr, data, sizeof(data));
+                                    }
+                                    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+                                        report_runtime_error(ERR_BAD_FILE_NUMBER);
+                                    } else if (len < 0 || len > BASIC_STRING_MAX) {
+                                        report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                                    } else {
+                                        long offset = (long)((rec - 1) * len);
+                                        fseek(file_handles[fnum], offset, SEEK_SET);
+                                        file_last_record[fnum] = (long)rec;
+                                        char buf[BASIC_STRING_MAX];
+                                        memset(buf, ' ', len);
+                                        strncpy(buf, data, len);
+                                        fwrite(buf, 1, len, file_handles[fnum]);
+                                        fflush(file_handles[fnum]);
+                                    }
                                 } else {
-                                    ptr = expr_saved;
-                                    parse_string_expression(&ptr, data, sizeof(data));
+                                    report_runtime_error(ERR_SYNTAX_ERROR);
                                 }
-                            } else {
-                                ptr = saved;
-                            }
-                            if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                                report_runtime_error(ERR_BAD_FILE_NUMBER);
-                            } else {
-                                long offset = (long)((rec - 1) * len);
-                                fseek(file_handles[fnum], offset, SEEK_SET);
-                                file_last_record[fnum] = (long)rec;
-                                char buf[BASIC_STRING_MAX];
-                                memset(buf, ' ', len);
-                                strncpy(buf, data, len);
-                                fwrite(buf, 1, len, file_handles[fnum]);
-                                fflush(file_handles[fnum]);
                             }
                         }
                     }
@@ -14229,31 +14397,48 @@ void interpret_line_at_ptr(const char **ptr_addr, int is_direct, int *last_line_
                             transfer_user_type_record(fnum, rec, root_index,
                                                       array_index, 0);
                         } else {
-                            ptr = argument_start;
-                            int len = evaluate_int_text(&ptr);
-                            sep = get_next_token(&ptr);
-                            if (sep.type != TOKEN_COMMA) { ptr = saved; }
-                            else {
-                                Token var = get_next_token(&ptr);
-                                if (!(var.type == TOKEN_IDENTIFIER && is_string_var(var.text))) { ptr = saved; }
-                                else {
-                                    int idx = find_variable(var.text);
-                                    int array_idx = parse_array_index(&ptr, idx);
-                                    if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
-                                        report_runtime_error(ERR_BAD_FILE_NUMBER);
+                            // QBasic form: GET #n, [position,] variable with a
+                            // numeric or string variable, array element or
+                            // record member; anything else is BASIKA's
+                            // len, stringvar form.
+                            int var_index, array_index;
+                            int matched = argument.type == TOKEN_IDENTIFIER
+                                ? parse_record_variable_argument(&ptr, argument.text,
+                                                                &var_index, &array_index) : 0;
+                            if (matched > 0) {
+                                transfer_variable_record(fnum, rec, var_index,
+                                                         array_index, 0);
+                            } else if (matched == 0) {
+                                ptr = argument_start;
+                                int len = evaluate_int_text(&ptr);
+                                sep = get_next_token(&ptr);
+                                if (sep.type != TOKEN_COMMA) {
+                                    report_runtime_error(ERR_SYNTAX_ERROR);
+                                } else {
+                                    Token var = get_next_token(&ptr);
+                                    if (!(var.type == TOKEN_IDENTIFIER && is_string_var(var.text))) {
+                                        report_runtime_error(ERR_SYNTAX_ERROR);
                                     } else {
-                                        long offset = (long)((rec - 1) * len);
-                                        fseek(file_handles[fnum], offset, SEEK_SET);
-                                        file_last_record[fnum] = (long)rec;
-                                        char buf[BASIC_STRING_MAX];
-                                        size_t r = fread(buf, 1, len, file_handles[fnum]);
-                                        if (r < (size_t)len) {
-                                            for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
+                                        int idx = find_variable(var.text);
+                                        int array_idx = parse_array_index(&ptr, idx);
+                                        if (fnum < 1 || fnum >= 16 || !file_handles[fnum]) {
+                                            report_runtime_error(ERR_BAD_FILE_NUMBER);
+                                        } else if (len < 0 || len >= BASIC_STRING_MAX) {
+                                            report_runtime_error(ERR_ILLEGAL_FUNCTION_CALL);
+                                        } else {
+                                            long offset = (long)((rec - 1) * len);
+                                            fseek(file_handles[fnum], offset, SEEK_SET);
+                                            file_last_record[fnum] = (long)rec;
+                                            char buf[BASIC_STRING_MAX];
+                                            size_t r = fread(buf, 1, len, file_handles[fnum]);
+                                            if (r < (size_t)len) {
+                                                for (size_t i = r; i < (size_t)len; i++) buf[i] = ' ';
+                                            }
+                                            buf[len] = '\0';
+                                            int trim = len - 1;
+                                            while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
+                                            set_string_variable(idx, array_idx, buf);
                                         }
-                                        buf[len] = '\0';
-                                        int trim = len - 1;
-                                        while (trim >= 0 && buf[trim] == ' ') { buf[trim] = '\0'; trim--; }
-                                        set_string_variable(idx, array_idx, buf);
                                     }
                                 }
                             }
